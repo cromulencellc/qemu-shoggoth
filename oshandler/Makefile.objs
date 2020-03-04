@@ -1,0 +1,2 @@
+common-obj-y += oshandler.o
+common-obj-y += osarch.o

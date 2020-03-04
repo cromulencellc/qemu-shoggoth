@@ -1,0 +1,42 @@
+# -*- Mode: Python -*-
+
+##
+# = Python Interface
+##
+
+##
+# @python-exec:
+#
+# Execute some python code
+#
+# Returns: nothing
+#
+# Since: shoggoth-0.2
+#
+# Example:
+#
+# -> { "execute": "python-exec"}
+# <- { "return": {}}
+#
+##
+
+{ 'command': 'python-exec', 'data': {'script': 'str'} }
+
+
+##
+# @python-exec-file:
+#
+# Execute some python code
+#
+# Returns: nothing
+#
+# Since: shoggoth-0.2
+#
+# Example:
+#
+# -> { "execute": "python-exec-file", 'args': {'file': '/path/to/script.py'}}
+# <- { "return": {}}
+#
+##
+
+{ 'command': 'python-exec-file', 'data': {'file': 'str'} }

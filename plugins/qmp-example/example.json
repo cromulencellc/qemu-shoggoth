@@ -1,0 +1,23 @@
+# -*- Mode: Python -*-
+
+##
+# = Example QMP Interface
+##
+
+##
+# @qmp-example:
+#
+# Example
+#
+# Returns: nothing
+#
+# Since: shoggoth-0.3
+#
+# Example:
+#
+# -> { "execute": "qmp-example"}
+# <- { "return": {}}
+#
+##
+
+{ 'command': 'qmp-example' }

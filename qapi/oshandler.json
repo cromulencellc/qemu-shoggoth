@@ -1,0 +1,312 @@
+# -*- Mode: Python -*-
+
+##
+# = OsHandler Interface
+##
+
+##
+# @ProcessTypes:
+#
+# Available process types.
+#
+#
+# Since: shoggoth-0.2
+##
+{ 'enum': 'ProcessTypes',
+  'data': ['none', 'lnx', 'win', 'win64']}
+
+
+##
+# @VmAreaInfo:
+#
+# Linux vm area.
+# Selected fields from struct vm_area_struct in Linux Kernel
+#
+# Since: shoggoth-0.2
+##
+{ 'struct': 'VmAreaInfo',
+  'data': {
+      'vm_start': 'uint64',
+      'vm_end': 'uint64',
+      'file_ptr': 'uint64',
+      'page_prot': 'uint64',
+      'flags': 'uint64',
+      'backing_filename': 'str'
+      } }
+
+
+##
+# @TaskMemoryInfo:
+#
+# Linux task memory information.
+# Selected fields from struct mm_struct in Lnux Kernel
+#
+# Since: shoggoth-0.2
+##
+{ 'struct': 'TaskMemoryInfo',
+  'data': {
+      'base_ptr': 'uint64',
+      'mmap_base': 'uint64',
+      'mmap_legacy_base': 'uint64',
+      'task_size': 'uint64',
+      'highest_vm_end': 'uint64',
+      'vm_areas': ['VmAreaInfo']
+      } }
+
+
+##
+# @LinuxProcess:
+#
+# Linux Process information.
+# Selected fields from stuct task_struct in Linux Kernel
+#
+# Since: shoggoth-0.2
+##
+{ 'struct': 'LinuxProcess',
+  'data': {
+      'tgid': 'uint32',
+      'fs_struct_ptr': 'uint64',
+      'open_files_ptr': 'uint64',
+      'real_parent_ptr': 'uint64',
+      'stack_canary': 'uint64',
+      'child_list_next': 'uint64',
+      'child_list_prev': 'uint64',
+      'sibling_list_next': 'uint64',
+      'sibling_list_prev': 'uint64',
+      'mm_ptr': 'uint64',
+      'active_mm_ptr': 'uint64',
+      'task_mem': 'TaskMemoryInfo',
+      'children': ['uint64'],
+      'siblings': ['uint64'] 
+      } }
+
+##
+# @WinVAD:
+#
+# Windows VAD information.
+#
+#
+# Since: shoggoth-0.2
+##
+{ 'struct': 'WinVAD',
+  'data': {
+      'file_name': 'str',
+      'base': 'uint32',
+      'size': 'uint32',
+      'flags': 'uint32',
+      'control': 'uint32',
+      'vad': 'uint32',
+      'right': 'uint32',
+      'left': 'uint32'
+      } }
+
+##
+# @WinProcess:
+#
+# Windows Process information.
+#
+#
+# Since: shoggoth-0.2
+##
+{ 'struct': 'WinProcess',
+  'data': { 
+      'parent_pid': 'uint32',
+      'image_base': 'uint32',
+      'vad': ['WinVAD']
+      } }
+
+##
+# @Win64VAD:
+#
+# Windows VAD information.
+#
+#
+# Since: shoggoth-0.4
+##
+{ 'struct': 'Win64VAD',
+  'data': { 
+      'file_name': 'str',
+      'base': 'uint64',
+      'size': 'uint64',
+      'flags': 'uint64',
+      'control': 'uint64',
+      'vad': 'uint64',
+      'right': 'uint64',
+      'left': 'uint64'
+      } }
+
+##
+# @Win64Process:
+#
+# Windows Process information.
+#
+#
+# Since: shoggoth-0.4
+##
+{ 'struct': 'Win64Process',
+  'data': { 
+      'parent_pid': 'uint32',
+      'image_base': 'uint64',
+      'vad': ['Win64VAD']
+      } }
+
+##
+# @ProcessInfo:
+#
+# Generic Process information.
+#
+# @pid: pid
+#
+# @procaddr: base address of process
+#
+# @cr3: address of page directory
+#
+# Since: shoggoth-0.4
+##
+{ 'struct': 'ProcessInfo',
+      'data': { 
+      'cr3': 'uint64',
+      'procaddr': 'uint64',
+      'pid': 'uint32'
+      } }
+
+##
+# @Process:
+#
+# Process information.
+#
+# @name: process name
+# 
+# Since: shoggoth-0.2
+##
+{ 'union': 'Process',
+  'base': {
+    'info': 'ProcessInfo',
+    'name': 'str',
+    'type': 'ProcessTypes' },
+  'discriminator': 'type',
+  'data': {
+    'lnx': 'LinuxProcess',
+    'win': 'WinProcess',
+    'win64': 'Win64Process' }
+}
+
+##
+# @os-proclist:
+#
+# Return the active process list.
+#
+# Returns: @Process list
+#
+# Since: shoggoth-0.2
+#
+# Example:
+#
+# -> { "execute": "os-proclist"}
+# <- { "return": [{"parent_pid": 0, "name": "System", "image_base": 0, "cr3": 11587584, "type": "win", "pid": 4}]}
+#
+##
+{ 'command': 'os-proclist',
+  'returns': ['Process'] }
+
+##
+# @os-procdetail:
+#
+# Return the active process list.
+#
+# Returns: @Process
+#
+# Since: shoggoth-0.2
+#
+# Example:
+#
+# -> { "execute": "os-procdetail", "arguments": { "pid": "1234" } }
+# <- { "return": {"parent_pid": 0, "name": "System", "image_base": 0, "cr3": 11587584, "type": "win", "pid": 4}}
+#
+##
+{ 'command': 'os-procdetail', 'data': {'pid': 'uint64'},
+  'returns': 'Process' }
+
+##
+# @BP-ID:
+#
+# Breakpoint ID.
+#
+# @id: Id 
+#
+#
+# Since: shoggoth-0.3
+##
+{ 'struct': 'BP-ID',
+  'data': { 'id': 'uint64' } }
+
+##
+# @os-set-breakpoint:
+#
+# Set a breakpoint.
+#
+# Returns: @Process list
+#
+# Since: shoggoth-0.2
+#
+# Example:
+#
+# -> { "execute": "os-set-breakpoint", "arguments": { "pid": 1594, "addr": 0x5555555510c4 } }
+# <- { "return": {"id": 1}}
+#
+##
+{ 'command': 'os-set-breakpoint', 'data': {'pid': 'uint64', 'addr': 'uint64'},
+'returns': 'BP-ID' }
+
+##
+# @os-clear-breakpoint:
+#
+# Set a breakpoint.
+#
+# Returns: @Process list
+#
+# Since: shoggoth-0.2
+#
+# Example:
+#
+# -> { "execute": "os-clear-breakpoint", "arguments": { "id": 1 } }
+# <- { }
+#
+##
+{ 'command': 'os-clear-breakpoint', 'data': {'id': 'uint64'} }
+
+##
+# @os-begin:
+#
+# Start the os handler.
+#
+# Returns: nothing
+#
+# Since: shoggoth-0.2
+#
+# Example:
+#
+# -> { "execute": "os-begin", "arguments": { "name": null } }
+# <- { "return": {}}
+#
+##
+
+{ 'command': 'os-begin', 'data': {'name': 'str'} }
+
+##
+# @os-find:
+#
+# Start the os handler.
+#
+# Returns: nothing
+#
+# Since: shoggoth-0.2
+#
+# Example:
+#
+# -> { "execute": "os-find" }
+# <- { "return": {}}
+#
+##
+
+{ 'command': 'os-find' }

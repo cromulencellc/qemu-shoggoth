@@ -1,0 +1,5 @@
+This is currently not functional. It will provide a Python framework to control
+the QEMU RA tools. There is a console driver that will be used for development
+and test that will also have examples of how the tool works.
+
+Documentation will be added here when there is enough to document.
