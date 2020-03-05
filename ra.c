@@ -505,7 +505,7 @@ void rapid_analysis_init(QemuOpts *ra_opts, MachineState *machine)
     global_rst->config_timeout = timeout;
     global_rst->job_timeout = timeout;
 
-    if(execmode && strncmp(execmode, "user", 4)){
+    if(execmode && strncmp(execmode, "basic", 4)){
         global_rst->enable_interrupts = false;
         global_rst->skip_blocks = true;
         global_rst->skip_save = true;

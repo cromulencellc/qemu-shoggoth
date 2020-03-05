@@ -1958,10 +1958,10 @@ static OSHandler *linux_scan_for_context(OSHandler* ctxt, OSArch *arch)
    }
 
    l->do_divide_error = 0;
-    l->do_error_trap = 0;
-    l->do_trap = 0;
-    l->current_task = 0;
-    l->kern_gs_base = 0;
+   l->do_error_trap = 0;
+   l->do_trap = 0;
+   l->current_task = 0;
+   l->kern_gs_base = 0;
 
    if (!scan_for_debian(l)){
       if(!scan_for_ubuntu(l)){

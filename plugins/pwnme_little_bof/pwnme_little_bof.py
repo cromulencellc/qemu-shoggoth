@@ -55,7 +55,8 @@ def generate_input(slen, *psets):
 
    while len(pattern) < slen:
       for p in patgen:
-         pattern += p[0] + p[1] + p[2]
+         for i, _ in enumerate(p):
+            pattern += p[i]
          if len(pattern) > slen:
             break
 
