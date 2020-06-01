@@ -3,5 +3,7 @@ common-obj-y += plugin-object.o
 common-obj-y += qemu-registers.o
 common-obj-y += qemu-processes.o
 common-obj-y += qemu-vm.o
+common-obj-y += plugin-error.o
+common-obj-y += plugin-command.o
 
 plugin.o-cflags :=-ldl

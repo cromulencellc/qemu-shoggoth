@@ -38,6 +38,7 @@
 typedef struct RSaveTree RSaveTree;
 typedef struct RSaveTreeClass RSaveTreeClass;
 typedef struct RAMRapidReferenceCache RAMRapidReferenceCache;
+typedef struct StreamHook StreamHook;
 
 #define TYPE_RSAVE_TREE "rsave-tree"
 #define RSAVE_TREE(obj)                                    \
@@ -104,6 +105,9 @@ struct RSaveTree {
     RAMRapidReferenceCache *reftable;
     uint8_t *pagemem;
     uint8_t *memend;
+
+    // Stream Information
+    QList *stream_hook_list;
 };
 
 struct RSaveTreeClass {
@@ -125,7 +129,9 @@ struct RSaveTreeClass {
     void (*init_ram_cache)(RSaveTree *rst, uint64_t size, Error **errp);
     bool (*search_ram_cache)(RSaveTree *rst, ram_addr_t offset, SHA1_HASH_TYPE ref_hash, uint8_t *host_buf);
     void (*update_ram_cache)(RSaveTree *rst, ram_addr_t offset, SHA1_HASH_TYPE ref_hash, uint8_t *host_buf);
-    void (*set_stream_data)(RSaveTree *rst, uint32_t fileno, uint8_t *data, uint32_t size);
+    StreamHook *(*set_stream_data)(RSaveTree *rst, uint32_t fileno, uint8_t *data, uint32_t size);
+    StreamHook *(*get_stream_data)(RSaveTree *rst, int fd);
+    bool (*write_stream_data)(RSaveTree *rst, CPUState *cs, int fileno, ram_addr_t buf, size_t count);
     void (*reset_job)(RSaveTree *rst, uint8_t queue, int32_t job_id, JOB_FLAG_TYPE job_flags);
 };
 

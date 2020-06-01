@@ -18,10 +18,12 @@ extern __thread Monitor *cur_mon;
 
 bool monitor_cur_is_qmp(void);
 
+
 void monitor_init_globals(void);
 void monitor_init(Chardev *chr, int flags);
 void monitor_cleanup(void);
 
+void monitor_redirect_handler(Monitor *mon, void (*)(const char *));
 int monitor_suspend(Monitor *mon);
 void monitor_resume(Monitor *mon);
 

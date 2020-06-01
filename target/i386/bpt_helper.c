@@ -61,7 +61,7 @@ static int hw_breakpoint_insert(CPUX86State *env, int index)
     switch (hw_breakpoint_type(dr7, index)) {
     case DR7_TYPE_BP_INST:
         if (hw_breakpoint_enabled(dr7, index)) {
-            err = cpu_breakpoint_insert(cs, drN, BP_CPU, NULL,
+            err = cpu_breakpoint_insert(cs, drN, BP_CPU,
                                         &env->cpu_breakpoint[index]);
         }
         break;

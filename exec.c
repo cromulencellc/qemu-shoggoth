@@ -1182,7 +1182,7 @@ static inline bool cpu_watchpoint_address_matches(CPUWatchpoint *wp,
 #endif
 
 /* Add a breakpoint.  */
-int cpu_breakpoint_insert(CPUState *cpu, vaddr pc, int flags, ProcessInfo *user,
+int cpu_breakpoint_insert(CPUState *cpu, vaddr pc, int flags,
                           CPUBreakpoint **breakpoint)
 {
     CPUBreakpoint *bp;
@@ -1191,7 +1191,6 @@ int cpu_breakpoint_insert(CPUState *cpu, vaddr pc, int flags, ProcessInfo *user,
 
     bp->pc = pc;
     bp->flags = flags;
-    bp->user = user;
 
     /* keep all GDB-injected breakpoints in front */
     if (flags & BP_GDB) {

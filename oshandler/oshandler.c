@@ -8,7 +8,7 @@
  * Approved for Public Release, Distribution Unlimited
  *
  * Authors:
- *  Adam Critchley <adamc@cromulence.com>
+ *  Adam Critchley <shoggoth@cromulence.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -182,7 +182,7 @@ static OSPid oshandler_get_ospid_by_pid(OSHandler* ctxt, uint64_t pid)
    return hpid;
 }
 
-static OSPid oshandler_get_ospid_by_active(OSHandler* ctxt, CPUState* cpu)
+static OSPid oshandler_get_ospid_by_active(OSHandler* ctxt, CPUState *cpu)
 {
    ProcessInfo *pi = OSHANDLER_GET_CLASS(ctxt)->get_processinfo_by_active(ctxt, cpu);
    if(!pi){
@@ -351,7 +351,7 @@ static void oshandler_print_process_list(OSHandler* ctxt, ProcessInfo *cur_pi)
     OSHandlerClass *os_cc = OSHANDLER_GET_CLASS(ctxt);
     OSArchClass *arch_cc = OSARCH_GET_CLASS(ctxt->arch);
     // Assume active on first cpu
-    ProcessInfo *pi = os_cc->get_processinfo_by_active(ctxt, cpus.tqh_first);
+    ProcessInfo *pi = os_cc->get_processinfo_by_active(ctxt, qemu_get_cpu(0));
 
    monitor_printf(cur_mon, "%s%s\n",
       qstring_get_str(ctxt->arch->process_header),
@@ -769,22 +769,24 @@ void object_property_add_uint64_ptr2(Object *obj, const char *name,
 
 OSHandler *oshandler_init(CPUState *cpu, const char *hint)
 {
-   if( !os_handler )
+   if(!os_handler)
    {
       OSArch *cpu_arch = osarch_init(cpu);
 
-      if( hint ){
+      if(hint){
          os_handler = OSHANDLER(object_new(hint));
-		}else{
-			Object *os_obj = object_resolve_path_component(object_get_objects_root(), "os_handler");
-			if (os_obj && object_dynamic_cast(os_obj, TYPE_OSHANDLER))
-			{
-				os_handler = OSHANDLER_GET_CLASS(os_obj)->scan(OSHANDLER(os_obj), cpu_arch);
-			}
-		}
+      }else{
+         Object *os_obj = object_resolve_path_component(object_get_objects_root(), "os_handler");
+         if (os_obj && object_dynamic_cast(os_obj, TYPE_OSHANDLER))
+         {
+            os_handler = OSHANDLER(os_obj);
+         }
+      }
 
-      if( !os_handler )
+      if(os_handler)
       {
+         os_handler = OSHANDLER_GET_CLASS(os_handler)->scan(os_handler, cpu_arch);
+      }else{
          GSList *list = object_class_get_list(TYPE_OSHANDLER, false);
          while (!os_handler && list) {
             OSHandlerClass *hc = OBJECT_CLASS_CHECK(OSHandlerClass, list->data,
@@ -802,7 +804,7 @@ OSHandler *oshandler_init(CPUState *cpu, const char *hint)
          }
       }
 
-      if( os_handler ){
+      if(os_handler){
          os_handler->arch = cpu_arch;
       }
    }

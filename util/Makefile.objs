@@ -48,5 +48,4 @@ util-obj-y += range.o
 util-obj-y += stats64.o
 util-obj-y += systemd.o
 util-obj-y += iova-tree.o
-util-obj-y += benchmark.o
 util-obj-$(CONFIG_LINUX) += vfio-helpers.o

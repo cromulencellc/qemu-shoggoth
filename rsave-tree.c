@@ -18,6 +18,7 @@
 
 #include "rsave-tree.h"
 #include "migration/rsave-tree-node.h"
+#include "migration/ram_rapid.h"
 #include "qapi/qmp/qlist.h"
 #include "qapi/qmp/qpointer.h"
 #include "oshandler/oshandler.h"
@@ -30,6 +31,13 @@ struct RAMRapidReferenceCache{
     ram_addr_t addr;
     SHA1_HASH_TYPE hash;
     uint8_t *pageptr;
+};
+
+struct StreamHook {
+    int fileno;
+    size_t input_len;
+    uint8_t *input;
+    int64_t offset;
 };
 
 static void rsave_tree_prepare_tb(RSaveTree *rst, TranslationBlock *tb)
@@ -277,9 +285,59 @@ static void rsave_tree_start_analysis(RSaveTree *rst)
     rst->last_state_link = rstl;
 }
 
-static void rsave_tree_set_stream_data(RSaveTree *rst, uint32_t fileno, uint8_t *data, uint32_t size)
+static StreamHook *rsave_tree_set_stream_data(RSaveTree *rst, uint32_t fileno, uint8_t *data, uint32_t count)
 {
+    StreamHook *hp = g_new0(StreamHook, 1);
 
+    hp->fileno = fileno;
+    hp->input = data;
+    hp->input_len = count;
+
+    qlist_append(rst->stream_hook_list, qpointer_from_pointer((void *)hp, g_free));
+
+    return hp;
+}
+
+static StreamHook *rsave_tree_get_stream_data(RSaveTree *rst, int fd)
+{
+    QListEntry *e;
+    QLIST_FOREACH_ENTRY(rst->stream_hook_list, e) {
+        QPointer *this_qptr = qobject_to(QPointer, qlist_entry_obj(e));
+        StreamHook* this_stream = qpointer_get_pointer(this_qptr);
+        if(this_stream->fileno == fd) {
+            return this_stream;
+        }
+    }
+    return false;
+}
+
+static bool rsave_tree_write_stream_data(RSaveTree *rst, CPUState *cs, int fileno, ram_addr_t buf, size_t count)
+{
+    StreamHook *hp = rsave_tree_get_stream_data(rst, fileno);
+    size_t size = count;
+
+    if (hp == false || hp->offset == -1)
+        return false;
+
+    if (hp->offset+count > hp->input_len) {
+        size = hp->offset+count - hp->input_len;
+        ram_rapid_set_ram_block(cs,
+                                buf,
+                                size,
+                                (hp->input)+hp->offset,
+                                false);
+        hp->offset = -1;
+        return true;
+    }
+
+    ram_rapid_set_ram_block(cs,
+                            buf,
+                            size,
+                            (hp->input)+hp->offset,
+                            false);
+
+    hp->offset += count;
+    return true;
 }
 
 static void rsave_tree_reset_job(RSaveTree *rst, uint8_t queue, int32_t job_id, JOB_FLAG_TYPE job_flags)
@@ -292,6 +350,13 @@ static void rsave_tree_reset_job(RSaveTree *rst, uint8_t queue, int32_t job_id, 
     rst->job_timeout = rst->config_timeout;
     rst->job_report_mask = rst->report_mask;
     rst->exceptions_occurred = 0;
+
+    QListEntry *e;
+    QLIST_FOREACH_ENTRY(rst->stream_hook_list, e) {
+        QPointer *this_qptr = qobject_to(QPointer, qlist_entry_obj(e));
+        StreamHook* this_stream = qpointer_get_pointer(this_qptr);
+        this_stream->offset = 0;
+    }
 }
 
 static void rsave_tree_reset(RSaveTree *rst)
@@ -326,6 +391,8 @@ static void rsave_tree_reset(RSaveTree *rst)
     rst->pagemem = NULL;
     rst->reftable = NULL;
     rst->memend = NULL;
+
+    rst->stream_hook_list = qlist_new();
 }
 
 static void rsave_tree_initfn(Object *obj)
@@ -353,6 +420,10 @@ static void rsave_tree_finalize(Object *obj)
     rst->root_list = NULL;
     qobject_unref(rst->node_reference);
     rst->node_reference = NULL;
+
+    // Free stream hook entries
+    qobject_unref(rst->stream_hook_list);
+    rst->stream_hook_list = NULL;
 
     if(rst->last_state_link) {
         object_unref(OBJECT(rst->last_state_link));
@@ -398,6 +469,8 @@ static void rsave_tree_class_init(ObjectClass *klass, void *class_data)
     rst_class->search_ram_cache = rsave_tree_search_ram_cache;
     rst_class->update_ram_cache = rsave_tree_update_ram_cache;
     rst_class->set_stream_data = rsave_tree_set_stream_data;
+    rst_class->get_stream_data = rsave_tree_get_stream_data;
+    rst_class->write_stream_data = rsave_tree_write_stream_data;
     rst_class->reset_job = rsave_tree_reset_job;
 }
 

@@ -16,6 +16,9 @@
  * The creation of this code was funded by the US Government.
  */
 
+#ifndef __NET_CB_H__
+#define __NET_CB_H__
+
 #include "qemu/osdep.h"
 #include "qemu-common.h"
 
@@ -24,3 +27,5 @@ void notify_sending_packet(uint8_t **pkt_buf, uint32_t *pkt_size);
 
 bool is_recvpacket_instrumentation_enabled(void);
 bool is_sendpacket_instrumentation_enabled(void);
+
+#endif

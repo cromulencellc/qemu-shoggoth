@@ -26,6 +26,7 @@
 #include "sysemu/hw_accel.h"
 
 #include <capstone.h>
+#include <capstone/x86.h>
 #include <limits.h>
 
 #define EOUTPUT(...) fprintf (stderr, __VA_ARGS__)
@@ -40,8 +41,6 @@
     OBJECT_GET_CLASS(Linux, obj, TYPE_LINUX)
 
 // This is for opts
-#define LINUX_OPTS  ("linux-opts")
-
 #define LINUX_COMM_NAME_SIZE (16)
 
 #define PDPT_ENTRY_MASK (3 << 30)
@@ -51,44 +50,45 @@
 
 typedef struct Linux
 {
-    OSHandler obj;
+   OSHandler obj;
 
-    uint64_t do_divide_error;
-    uint64_t do_page_fault;
-    uint64_t __do_page_fault;
-    uint64_t do_error_trap;
-    uint64_t do_trap;
-    uint64_t do_syscall_64;
+   uint64_t div0_entry;
+   uint64_t divE_entry;
+   uint64_t do_divide_error;
+   uint64_t do_page_fault;
+   uint64_t __do_page_fault;
+   uint64_t do_error_trap;
+   uint64_t do_trap;
+   uint64_t do_syscall_64;
+   uint64_t do_umount;
+   uint64_t sys_call_table;
 
-    uint64_t vmalloc_fault;
+   uint64_t vmalloc_fault;
 
-    uint64_t phys_base_ptr;
-    uint64_t vmalloc_base_ptr;
-    uint64_t page_offset_base_ptr;
+   uint64_t phys_base_ptr;
+   uint64_t vmalloc_base_ptr;
+   uint64_t page_offset_base_ptr;
 
-    uint64_t phys_base;
-    uint64_t vmalloc_base;
-    uint64_t page_offset_base;
+   uint64_t phys_base;
+   uint64_t vmalloc_base;
+   uint64_t page_offset_base;
 
-    uint64_t current_task;
+   uint64_t current_task;
 
-    uint64_t kern_gs_base;
-    
-    uint64_t task_mm_offset;
-    uint64_t task_pid_offset;
-    uint64_t task_comm_offset;
-    uint64_t task_fs_offset;
+   uint64_t kern_gs_base;
 
-    uint64_t mm_struct_pgd_offset;
-    
-    uint64_t vm_area_file_offset;
+   uint64_t task_mm_offset;
+   uint64_t task_pid_offset;
+   uint64_t task_comm_offset;
+   uint64_t task_fs_offset;
+   uint64_t task_pids_offset;
 
-    QList* process_list;
+   QList* process_list;
 
-    csh x86_disas_handle;
-    uint64_t current_process;
+   csh x86_disas_handle;
+   uint64_t current_process;
 
-    CPUState *cpu;
+   CPUState *cpu;
 } Linux;
 
 typedef struct LinuxClass
@@ -143,14 +143,8 @@ static uint32_t disassemble_mem(Linux* ctxt, cs_insn** disas_instr, uint64_t add
 static bool parse_do_trap(Linux* ctxt)
 {
    uint64_t cur_addr = 0;
-
    uint32_t num_instr = 0;
-
-   bool found = false;
-
    cs_insn* instr = NULL;
-
-   // EOUTPUT("parse_do_trap\n");
 
    cur_addr = ctxt->do_trap;
    for(uint32_t i = 0; i < 50; i++)
@@ -159,70 +153,43 @@ static bool parse_do_trap(Linux* ctxt)
       for(uint32_t j = 0; j < num_instr; j++)
       {
          cs_insn* cur_instr = &instr[j];
-
-         // EOUTPUT("%lx @ mnemonic %s\n", cur_addr, cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "mov", sizeof(cur_instr->mnemonic)) == 0)
+         cs_x86* detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
          {
-            for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
-            {
-               // EOUTPUT("operands[%d] = ", k);
-               switch(cur_instr->detail->x86.operands[k].type)
-               {
-                  case X86_OP_REG:
-                     // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                     break;
-                  case X86_OP_IMM:
-                     // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                     break;
-                  case X86_OP_MEM:
-                     // EOUTPUT("  OP MEM SEGMENT: %#"PRIx32" BASE %#"PRIx32" INDEX %#"PRIx32" SCALE %#"PRIx32
-                     //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[k].mem.segment,
-                     //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                     //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
 
-                     ctxt->current_task = ctxt->kern_gs_base + cur_instr->detail->x86.operands[k].mem.disp;
-                     found = true;
-                     break;
-                  case X86_OP_FP:
-                     // EOUTPUT("  OP FP \n");
-                     break;
-                  case X86_OP_INVALID:
-                     break;
-               }
-            }
+         if(cur_instr->id == X86_INS_MOV
+            && op1->type == X86_OP_REG
+            && op2->type == X86_OP_MEM
+            && op2->mem.segment == X86_REG_GS )
+         {
+            ctxt->current_task = ctxt->kern_gs_base + op2->mem.disp;
+            cs_free(instr, num_instr);
+            return true;
          }
 
          cur_addr += cur_instr->size;
       }
 
       cs_free(instr, num_instr);
-
-      if(found)
-         break;
    }
 
-   // EOUTPUT("current task ofs = %#"PRIx64"\n", ctxt->current_task);
-
-   if(!found)
-   {
-      // EOUTPUT("Could not find current task\n");
-      goto fail;
-   }
-
-fail:
-   return found;
+   return false;
 }
 
 static bool parse_div0_idte(Linux* ctxt)
 {
    uint64_t cur_addr = 0;
-   uint64_t div0_addr = 0;
    uint64_t idt_addr = 0;
-
    uint32_t num_instr = 0;
    uint32_t inst_count = 0;
-
-   bool found = false;
 
    cs_insn* instr = NULL;
 
@@ -230,65 +197,34 @@ static bool parse_div0_idte(Linux* ctxt)
    CPUX86State *env = &x86_cpu->env;
 
    ctxt->kern_gs_base = env->segs[R_GS].base;
-   // EOUTPUT("kernelgsbase = %#"PRIx64"\n", ctxt->kern_gs_base);
 
    if(ctxt->kern_gs_base == 0 && env->kernelgsbase > 0)
    {
-      // EOUTPUT("kernelgsbase = %#"PRIx64"\n", env->kernelgsbase);
       ctxt->kern_gs_base = env->kernelgsbase;
    }
 
    idt_addr = env->idt.base;
-   // EOUTPUT("idt.base = %#"PRIx64"\n", idt_addr);
+   ctxt->div0_entry = parse_idt_entry_base(ctxt->cpu, idt_addr, 0);
 
-   // EOUTPUT("cr3 = %#"PRIx64"\n", env->cr[3]);
-
-   div0_addr = parse_idt_entry_base(ctxt->cpu, idt_addr, 0);
-
-   // EOUTPUT("div0_addr = %#"PRIx64"\n", div0_addr);
-   cur_addr = div0_addr;
+   cur_addr = ctxt->div0_entry;
    for(uint32_t i = 0; i < 20; i++)
    {
       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
 
-      // EOUTPUT("num Instr = %x\n", num_instr);
-
       for(uint32_t j = 0; j < num_instr; j++)
       {
          cs_insn* cur_instr = &instr[j];
+         cs_x86* cur_detail = &(cur_instr->detail->x86);
 
-         // EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "call", sizeof(cur_instr->mnemonic)) == 0)
+         if(cur_instr->id == X86_INS_CALL)
          {
             if(inst_count == 1)
             {
-               for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
-               {
-                  // EOUTPUT("operands[%d] = ", k);
-                  switch(cur_instr->detail->x86.operands[k].type)
-                  {
-                     case X86_OP_REG:
-                        // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                        break;
-                     case X86_OP_IMM:
-                        // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                        ctxt->do_divide_error = cur_instr->detail->x86.operands[k].imm;
-                        found = true;
-                        break;
-                     case X86_OP_MEM:
-                        // EOUTPUT("  OP MEM SEGMENT: %#"PRIx32" BASE %#"PRIx32" INDEX %#"PRIx32" SCALE %#"PRIx32
-                           // " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[j].mem.segment,
-                           // cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                           // cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                        break;
-                     case X86_OP_FP:
-                        // EOUTPUT("  OP FP \n");
-                        break;
-                     case X86_OP_INVALID:
-                        break;
-                  }
+               if(cur_detail->operands[0].type == X86_OP_IMM) {
+                  ctxt->do_divide_error = cur_detail->operands[0].imm;
+                  cs_free(instr, num_instr);
+                  return true;
                }
-               break;
             }
             else
             {
@@ -299,34 +235,16 @@ static bool parse_div0_idte(Linux* ctxt)
       }
 
       cs_free(instr, num_instr);
-
-      if(found)
-         break;
    }
 
-   if(!found)
-   {
-      // EOUTPUT("Failed to find do_divide_error\n");
-      // return false;
-      goto fail;
-   }
-
-   // EOUTPUT("do_divide_error = %#"PRIx64"\n", ctxt->do_divide_error);
-
-fail:
-   return found;
+   return false;
 }
 
 static bool parse_divE_idte(Linux* ctxt)
 {
    uint64_t cur_addr = 0;
-   uint64_t divE_addr = 0;
-   uint64_t idt_addr = 0;
-
    uint32_t num_instr = 0;
    uint32_t inst_count = 0;
-
-   bool found = false;
 
    cs_insn* instr = NULL;
 
@@ -334,65 +252,32 @@ static bool parse_divE_idte(Linux* ctxt)
    CPUX86State *env = &x86_cpu->env;
 
    ctxt->kern_gs_base = env->segs[R_GS].base;
-   // EOUTPUT("kernelgsbase = %#"PRIx64"\n", ctxt->kern_gs_base);
 
    if(ctxt->kern_gs_base == 0 && env->kernelgsbase > 0)
    {
-      // EOUTPUT("kernelgsbase = %#"PRIx64"\n", env->kernelgsbase);
       ctxt->kern_gs_base = env->kernelgsbase;
    }
 
-   idt_addr = env->idt.base;
-   // EOUTPUT("idt.base = %#"PRIx64"\n", idt_addr);
+   ctxt->divE_entry = parse_idt_entry_base(ctxt->cpu, env->idt.base, 0x0E);
 
-   // EOUTPUT("cr3 = %#"PRIx64"\n", env->cr[3]);
-
-   divE_addr = parse_idt_entry_base(ctxt->cpu, idt_addr, 0x0E);
-
-// EOUTPUT("divE_addr = %#"PRIx64"\n", divE_addr);
-   cur_addr = divE_addr;
+   cur_addr = ctxt->divE_entry;
    for(uint32_t i = 0; i < 20; i++)
    {
       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
 
-      // EOUTPUT("num Instr = %x\n", num_instr);
-
       for(uint32_t j = 0; j < num_instr; j++)
       {
          cs_insn* cur_instr = &instr[j];
+         cs_x86* cur_detail = &(cur_instr->detail->x86);
 
-//       EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "call", sizeof(cur_instr->mnemonic)) == 0)
+         if(cur_instr->id == X86_INS_CALL)
          {
             if(inst_count == 1)
             {
-               for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
-               {
-                  // EOUTPUT("operands[%d] = ", k);
-                  switch(cur_instr->detail->x86.operands[k].type)
-                  {
-                     case X86_OP_REG:
-                        // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                        break;
-                     case X86_OP_IMM:
-                        // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                        ctxt->do_page_fault = cur_instr->detail->x86.operands[k].imm;
-                        found = true;
-                        break;
-                     case X86_OP_MEM:
-                        // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
-                        //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[j].mem.segment,
-                        //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                        //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                        break;
-                     case X86_OP_FP:
-                        // EOUTPUT("  OP FP \n");
-                        break;
-                     case X86_OP_INVALID:
-                        break;
-                  }
+               if(cur_detail->operands[0].type == X86_OP_IMM) {
+                  ctxt->do_page_fault = cur_detail->operands[0].imm;
+                  return true;
                }
-               break;
             }
             else
             {
@@ -403,334 +288,160 @@ static bool parse_divE_idte(Linux* ctxt)
       }
 
       cs_free(instr, num_instr);
-
-      if(found)
-         break;
    }
 
-   if(!found)
-   {
-      // EOUTPUT("Failed to find do_divide_error\n");
-      // return false;
-      goto fail;
-   }
-
-   // EOUTPUT("do_page_fault = %#"PRIx64"\n", ctxt->do_page_fault);
-
-fail:
-   return found;
+   return false;
 }
 
 static bool parse_do_page_fault(Linux* ctxt)
 {
+   uint64_t current_call = 0;
    uint64_t cur_addr = 0;
-   // uint64_t divE_addr = 0;
-// uint64_t idt_addr = 0;
-
    uint32_t num_instr = 0;
-   uint32_t inst_count = 0;
-
-   bool found = false;
-
    cs_insn* instr = NULL;
 
    cur_addr = ctxt->do_page_fault;
-   for(uint32_t i = 0; i < 20; i++)
+   for(uint32_t i = 0; i < 120; i++)
    {
       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
-
-      // EOUTPUT("num Instr = %x\n", num_instr);
 
       for(uint32_t j = 0; j < num_instr; j++)
       {
          cs_insn* cur_instr = &instr[j];
-
-//       EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "jmp", sizeof(cur_instr->mnemonic)) == 0)
+         cs_x86* detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
          {
-            for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
-            {
-               // EOUTPUT("operands[%d] = ", k);
-               switch(cur_instr->detail->x86.operands[k].type)
-               {
-                  case X86_OP_REG:
-                     // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                     break;
-                  case X86_OP_IMM:
-                     // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                     ctxt->__do_page_fault = cur_instr->detail->x86.operands[k].imm;
-                     found = true;
-                     break;
-                  case X86_OP_MEM:
-                     // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
-                     //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[j].mem.segment,
-                     //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                     //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                     break;
-                  case X86_OP_FP:
-                     // EOUTPUT("  OP FP \n");
-                     break;
-                  case X86_OP_INVALID:
-                     break;
-               }
-            }
-            break;
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
          }
+
+         // follow the first branch in each function
+         // and look for an access to gs:current_task
+         if(cur_instr->id == X86_INS_JMP || cur_instr->id == X86_INS_CALL)
+         {
+            if(op1->type == X86_OP_IMM){
+               current_call = op1->imm;
+               cur_addr = current_call;
+               break;
+            }
+         }else
+         // find register holding current task
+         if(cur_instr->id == X86_INS_MOV
+            && op1->type == X86_OP_REG
+            && op2->type == X86_OP_MEM
+            && op2->mem.segment == X86_REG_GS
+            && (ctxt->kern_gs_base + op2->mem.disp) == ctxt->current_task)
+         {
+            // this is __do_page_fault
+            ctxt->__do_page_fault = current_call;
+            cs_free(instr, num_instr);
+            return true;
+         }
+
          cur_addr += cur_instr->size;
       }
 
       cs_free(instr, num_instr);
-
-      if(found)
-         break;
    }
 
-   if(!found)
-   {
-
-      goto fail;
-   }
-
-// EOUTPUT("__do_page_fault = %#"PRIx64"\n", ctxt->__do_page_fault);
-
-   found = false;
-   inst_count = 0;
-   cur_addr = ctxt->__do_page_fault;
-   for(uint32_t i = 0; i < 200; i++)
-   {
-      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
-
-      // EOUTPUT("num Instr = %x\n", num_instr);
-
-      for(uint32_t j = 0; j < num_instr; j++)
-      {
-         cs_insn* cur_instr = &instr[j];
-
-//       EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "call", sizeof(cur_instr->mnemonic)) == 0)
-         {
-            if(inst_count == 10)
-            {
-               for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
-               {
-                  // EOUTPUT("operands[%d] = ", k);
-                  switch(cur_instr->detail->x86.operands[k].type)
-                  {
-                     case X86_OP_REG:
-                        // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                        break;
-                     case X86_OP_IMM:
-//                      EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                        ctxt->vmalloc_fault = cur_instr->detail->x86.operands[k].imm;
-                        found = true;
-                        break;
-                     case X86_OP_MEM:
-                        // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
-                        //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[j].mem.segment,
-                        //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                        //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                        break;
-                     case X86_OP_FP:
-                        // EOUTPUT("  OP FP \n");
-                        break;
-                     case X86_OP_INVALID:
-                        break;
-                  }
-               }
-               // break;
-            }
-            else
-            {
-               inst_count++;
-            }
-         }
-         cur_addr += cur_instr->size;
-      }
-
-      cs_free(instr, num_instr);
-
-      if(found)
-         break;
-   }
-
-   if(!found)
-   {
-      // EOUTPUT("Failed to find do_divide_error\n");
-      // return false;
-      // We may be in KVM which means we found trace_do_page_fault instead of __do_page_fault
-      // However we can parse trace_do_page_fault exactly the same as do_page_fault so adjust and retry.
-      ctxt->do_page_fault = ctxt->__do_page_fault;
-      found = parse_do_page_fault(ctxt);
-      if (!found)
-      {
-         goto fail;
-      }
-   }
-
-// EOUTPUT("vmalloc_fault = %#"PRIx64"\n", ctxt->vmalloc_fault);
-
-fail:
-   return found;
+   return false;
 }
 
-// Assumes for ubuntu style kernels
-static bool parse_do_page_fault2(Linux* ctxt)
+static bool parse_inner_do_page_fault(Linux* ctxt)
 {
    uint64_t cur_addr = 0;
-   // uint64_t divE_addr = 0;
-// uint64_t idt_addr = 0;
-
    uint32_t num_instr = 0;
-   uint32_t inst_count = 0;
-
-   bool found = false;
-
    cs_insn* instr = NULL;
+   x86_reg target_reg = X86_REG_INVALID;
+   x86_reg rsi_arg = X86_REG_INVALID;
+   x86_reg rdi_arg = X86_REG_INVALID;
 
-   // If it wasn't a jmp try again with a call for ubuntu
-   cur_addr = ctxt->do_page_fault;
-   for(uint32_t i = 0; i < 20; i++)
-   {
-      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
-
-      // EOUTPUT("num Instr = %x\n", num_instr);
-
-      for(uint32_t j = 0; j < num_instr; j++)
-      {
-         cs_insn* cur_instr = &instr[j];
-
-//       EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "call", sizeof(cur_instr->mnemonic)) == 0)
-         {
-            for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
-            {
-               // EOUTPUT("operands[%d] = ", k);
-               switch(cur_instr->detail->x86.operands[k].type)
-               {
-                  case X86_OP_REG:
-                     // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                     break;
-                  case X86_OP_IMM:
-                     // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                     ctxt->__do_page_fault = cur_instr->detail->x86.operands[k].imm;
-                     found = true;
-                     break;
-                  case X86_OP_MEM:
-                     // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
-                     //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[j].mem.segment,
-                     //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                     //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                     break;
-                  case X86_OP_FP:
-                     // EOUTPUT("  OP FP \n");
-                     break;
-                  case X86_OP_INVALID:
-                     break;
-               }
-            }
-            break;
-         }
-         cur_addr += cur_instr->size;
-      }
-
-      cs_free(instr, num_instr);
-
-      if(found)
-         break;
-   }
-   if (!found)
-      goto fail;
-
-// EOUTPUT("__do_page_fault = %#"PRIx64"\n", ctxt->__do_page_fault);
-
-   found = false;
-   inst_count = 0;
    cur_addr = ctxt->__do_page_fault;
+
    for(uint32_t i = 0; i < 200; i++)
    {
       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
 
-      // EOUTPUT("num Instr = %x\n", num_instr);
-
       for(uint32_t j = 0; j < num_instr; j++)
       {
          cs_insn* cur_instr = &instr[j];
-
-//       EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "call", sizeof(cur_instr->mnemonic)) == 0)
+         cs_x86* detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
          {
-            if(inst_count == 10)
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
+
+         // follow the local register and look for pass to register args
+         if(target_reg != X86_REG_INVALID)
+         {
+            // look for pass to rdi
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op1->reg == X86_REG_RDI
+               && op2->type == X86_OP_REG)
             {
-               for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
+               rdi_arg = op2->reg;
+            }else
+            // look for pass to rsi
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op1->reg == X86_REG_RSI
+               && op2->type == X86_OP_REG)
+            {
+               rsi_arg = op2->reg;
+            }else
+            if(cur_instr->id == X86_INS_CALL
+               && op1->type == X86_OP_IMM)
+            {
+               // is this the right call?
+               if(rsi_arg == X86_REG_INVALID
+                  && rdi_arg == target_reg)
                {
-                  // EOUTPUT("operands[%d] = ", k);
-                  switch(cur_instr->detail->x86.operands[k].type)
-                  {
-                     case X86_OP_REG:
-                        // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                        break;
-                     case X86_OP_IMM:
-//                      EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                        ctxt->vmalloc_fault = cur_instr->detail->x86.operands[k].imm;
-                        found = true;
-                        break;
-                     case X86_OP_MEM:
-                        // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
-                        //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[j].mem.segment,
-                        //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                        //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                        break;
-                     case X86_OP_FP:
-                        // EOUTPUT("  OP FP \n");
-                        break;
-                     case X86_OP_INVALID:
-                        break;
-                  }
+                  ctxt->vmalloc_fault = op1->imm;
+                  cs_free(instr, num_instr);
+                  return true;
+               }else{
+                  rsi_arg = X86_REG_INVALID;
+                  rdi_arg = X86_REG_INVALID;
                }
-               // break;
             }
-            else
+         }else{
+            // look for the first assignment of register
+            // argument RDI to local register
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_REG
+               && op2->reg == X86_REG_RDI)
             {
-               inst_count++;
+               // move the register
+               target_reg = op1->reg;
             }
          }
+
          cur_addr += cur_instr->size;
       }
 
       cs_free(instr, num_instr);
-
-      if(found)
-         break;
    }
 
-   if(!found)
-   {
-      // EOUTPUT("Failed to find do_divide_error\n");
-      // return false;
-      // We may be in KVM which means we found trace_do_page_fault instead of __do_page_fault
-      // However we can parse trace_do_page_fault exactly the same as do_page_fault so adjust and retry.
-      ctxt->do_page_fault = ctxt->__do_page_fault;
-      found = parse_do_page_fault2(ctxt);
-      if (!found)
-      {
-         goto fail;
-      }
-   }
-
-// EOUTPUT("vmalloc_fault = %#"PRIx64"\n", ctxt->vmalloc_fault);
-
-fail:
-   return found;
+   return false;
 }
 
 static bool parse_vmalloc_fault(Linux* ctxt)
 {
    uint64_t cur_addr = 0;
-
    uint32_t num_instr = 0;
-
-   bool found = false;
-
    cs_insn* instr = NULL;
 
    cur_addr = ctxt->vmalloc_fault;
@@ -738,92 +449,236 @@ static bool parse_vmalloc_fault(Linux* ctxt)
    {
       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
 
-      for(uint32_t j = 0; j < num_instr && !found; j++)
+      for(uint32_t j = 0; j < num_instr; j++)
       {
          cs_insn* cur_instr = &instr[j];
-
-//       EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "mov", sizeof(cur_instr->mnemonic)) == 0)
+         cs_x86* detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
          {
-            for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
-            {
-               // EOUTPUT("operands[%d] = ", k);
-               switch(cur_instr->detail->x86.operands[k].type)
-               {
-                  case X86_OP_REG:
-                     // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                     break;
-                  case X86_OP_IMM:
-                     // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                     // ctxt->vmalloc_base_ptr = cur_instr->detail->x86.operands[k].imm;
-                     // ctxt->page_offset_base_ptr = ctxt->vmalloc_base + sizeof(uint64_t);
-                     // found = true;
-                     // fprintf(stderr, "Found it\n");
-                     break;
-                  case X86_OP_MEM:
-//                   EOUTPUT("  OP MEM SEGMENT: %du BASE %du INDEX %du SCALE %d DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[k].mem.segment,
-//                      cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-//                      cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-
-                     ctxt->vmalloc_base_ptr = cur_addr + cur_instr->size + cur_instr->detail->x86.operands[k].mem.disp;
-                     ctxt->page_offset_base_ptr = ctxt->vmalloc_base_ptr + sizeof(uint64_t);
-
-//                   EOUTPUT("vmalloc_base_ptr = %#"PRIx64"\npage_offset_base_ptr = %#"PRIx64"\n", ctxt->vmalloc_base_ptr, ctxt->page_offset_base_ptr);
-
-                     found = true;
-                     break;
-                  case X86_OP_FP:
-                     // EOUTPUT("  OP FP \n");
-                     break;
-                  case X86_OP_INVALID:
-                     break;
-               }
-            }
-            if (found)
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
                break;
+         }
+
+         if(cur_instr->id == X86_INS_MOV
+            && op1->type == X86_OP_REG
+            && op2->type == X86_OP_MEM
+            && op2->mem.base == X86_REG_RIP)
+         {
+            ctxt->vmalloc_base_ptr = cur_addr + cur_instr->size + op2->mem.disp;
+            ctxt->page_offset_base_ptr = ctxt->vmalloc_base_ptr + sizeof(uint64_t);
+            qemu_load_u64(ctxt->cpu->cpu_index, ctxt->vmalloc_base_ptr, &ctxt->vmalloc_base);
+            qemu_load_u64(ctxt->cpu->cpu_index, ctxt->page_offset_base_ptr, &ctxt->page_offset_base);
+            cs_free(instr, num_instr);
+            return true;
          }
 
          cur_addr += cur_instr->size;
       }
 
       cs_free(instr, num_instr);
-   
-      if(found)
-         break;
    }
 
-   if(!found)
+   return false;
+}
+
+static bool parse_sys_mprotect(Linux* ctxt)
+{
+   uint64_t cur_addr = 0;
+   uint32_t num_instr = 0;
+   cs_insn* instr = NULL;
+   x86_reg rsi_arg = X86_REG_INVALID;
+   x86_reg target_reg = X86_REG_INVALID;
+   int stage = 0;
+   bool pop_vma_sig = false;
+   bool found_lea_image = false;
+   uint64_t current_call = 0;
+   int instr_count = 0;
+
+   // this one is doozy... sorry...
+   // (0) sys_mprotect find with gs:current_task
+   // (1) do_mprotect_pkey uses lea from stack struct
+   // (2) mprotect_fixup uses mov rbp, rdx -> mov rsi, rbp
+   // (3) follow first function looking for cmovb cs:phys_base or mov cs:phys_base
+   // (4) if (3) failed then proceed to look in change_protection itself
+
+   qemu_load_u64(ctxt->cpu->cpu_index, ctxt->sys_call_table+8*10, &cur_addr);
+   current_call = cur_addr;
+
+   for(uint32_t i = 0; i < 1500; i++)
    {
-      // EOUTPUT("Failed to find do_error_trap\n");
-      goto fail;
+      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+      for(uint32_t j = 0; j < num_instr; j++)
+      {
+         cs_insn* cur_instr = &instr[j];
+         cs_x86* detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
+         {
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
+
+         if(stage == 0)
+         {
+            // find register holding current task
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_MEM
+               && op2->mem.segment == X86_REG_GS
+               && (ctxt->kern_gs_base + op2->mem.disp) == ctxt->current_task)
+            {
+               // this is do_mprotect_pkey or sys_mprotect
+               cur_addr = current_call;
+               current_call = 0;
+               stage = 1;
+               break;
+            }else
+            // follow the first call in every function
+            if(cur_instr->id == X86_INS_CALL
+               && op1->type == X86_OP_IMM)
+            {
+               cur_addr = op1->imm;
+               current_call = cur_addr;
+               break;
+            }
+         }else if(stage == 1)
+         {
+            // look for local structure pass to rsi, which is the image
+            if(cur_instr->id == X86_INS_LEA
+               && op1->type == X86_OP_REG
+               && op1->reg == X86_REG_RSI
+               && op2->type == X86_OP_MEM
+               && (op2->mem.base == X86_REG_RBP || op2->mem.base == X86_REG_RSP))
+            {
+               found_lea_image = true;
+            }else
+            if(cur_instr->id == X86_INS_CALL
+               && op1->type == X86_OP_IMM)
+            {
+               // is this the right call?
+               if(found_lea_image)
+               {
+                  stage = 2;
+                  cur_addr = op1->imm;
+                  break;
+               }
+            }
+         }else if(stage == 2)
+         {
+            // follow the local register and look for pass to register args
+            if(target_reg != X86_REG_INVALID)
+            {
+               // look for pass to rsi
+               if(cur_instr->id == X86_INS_MOV
+                  && op1->type == X86_OP_REG
+                  && op1->reg == X86_REG_RSI
+                  && op2->type == X86_OP_REG)
+               {
+                  rsi_arg = op2->reg;
+               }else if((cur_instr->id == X86_INS_SUB
+                  || cur_instr->id == X86_INS_SHR
+                  || cur_instr->id == X86_INS_ADD
+                  || cur_instr->id == X86_INS_SHL)
+                  && op1->type == X86_OP_REG
+                  && op1->reg == target_reg)
+               {
+                  // something modified our target reg so get rid of it
+                  target_reg = X86_REG_INVALID;
+               }
+            }else{
+               // look for the first assignment of register
+               // argument RDX to local register
+               if(cur_instr->id == X86_INS_MOV
+                  && op1->type == X86_OP_REG
+                  && op2->type == X86_OP_REG
+                  && op2->reg == X86_REG_RDX)
+               {
+                  // move the register
+                  target_reg = op1->reg;
+               }
+            }
+
+            // special case, invalidate next call after xor ecx, ecx
+            if(cur_instr->id == X86_INS_XOR
+               && op1->type == X86_OP_REG
+               && op1->reg == X86_REG_ECX
+               && op2->type == X86_OP_REG
+               && op2->reg == X86_REG_ECX)
+            {
+               pop_vma_sig = true;
+            }
+
+            if(target_reg != X86_REG_INVALID
+               && cur_instr->id == X86_INS_CALL
+               && op1->type == X86_OP_IMM)
+            {
+               // is this the right call?
+               if(rsi_arg == target_reg
+                  && !pop_vma_sig)
+               {
+                  stage = 3;
+                  cur_addr = op1->imm;
+                  current_call = cur_addr;
+                  break;
+               }else{
+                  rsi_arg = X86_REG_INVALID;
+                  pop_vma_sig = false;
+               }
+            }
+         }else if(stage == 3){
+            // take first call to either change_protection_range or
+            // hugetlb_change_protection
+            if((cur_instr->id == X86_INS_CALL || cur_instr->id == X86_INS_JMP)
+               && op1->type == X86_OP_IMM)
+            {
+               cur_addr = op1->imm;
+               stage = 4;
+               break;
+            }
+            // if we don't find functions immediately then everything was inlined
+            instr_count++;
+            if( instr_count >= 25 ){
+               // continue searching for phys_base in this function...
+               stage = 4;
+            }
+         }else if(stage == 4){
+            // look in this function for the cs relative mov
+            if((cur_instr->id == X86_INS_CMOVB || cur_instr->id == X86_INS_MOV)
+               && op1->type == X86_OP_REG
+               && op1->size == 8
+               && op2->type == X86_OP_MEM
+               && op2->mem.base == X86_REG_RIP)
+            {
+               ctxt->phys_base_ptr = cur_addr + cur_instr->size + op2->mem.disp;
+               qemu_load_u64(ctxt->cpu->cpu_index, ctxt->phys_base_ptr, &ctxt->phys_base);
+               cs_free(instr, num_instr);
+               return true;
+            }
+         }
+
+         cur_addr += cur_instr->size;
+      }
+
+      cs_free(instr, num_instr);
    }
 
-   qemu_load_u64(ctxt->cpu->cpu_index, ctxt->vmalloc_base_ptr, &ctxt->vmalloc_base);
-   qemu_load_u64(ctxt->cpu->cpu_index, ctxt->page_offset_base_ptr, &ctxt->page_offset_base);
-
-// EOUTPUT("vmalloc_base = %#"PRIx64"\n", ctxt->vmalloc_base);
-// EOUTPUT("page_offset_base = %#"PRIx64"\n", ctxt->page_offset_base);
-
-   // TODO: This is a hack, a horrible hack.  Parse this actual pointer or offset to phys_base later
-   ctxt->phys_base_ptr = ctxt->page_offset_base_ptr - 0x25dc0;
-
-// EOUTPUT("phys_base_ptr = %#"PRIx64"\n", ctxt->phys_base_ptr);
-
-   qemu_load_u64(ctxt->cpu->cpu_index, ctxt->phys_base_ptr, &ctxt->phys_base);
-// EOUTPUT("phys_base = %#"PRIx64"\n", ctxt->phys_base);
-
-fail:
-   return found;
+   return false;
 }
 
 static bool parse_do_divide_error(Linux* ctxt)
 {
    uint64_t cur_addr = 0;
-
    uint32_t num_instr = 0;
-
-   bool found = false;
-
    cs_insn* instr = NULL;
 
    cur_addr = ctxt->do_divide_error;
@@ -834,187 +689,106 @@ static bool parse_do_divide_error(Linux* ctxt)
       for(uint32_t j = 0; j < num_instr; j++)
       {
          cs_insn* cur_instr = &instr[j];
+         cs_x86* cur_detail = &(cur_instr->detail->x86);
 
-         // EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "jmp", sizeof(cur_instr->mnemonic)) == 0)
+         if((cur_instr->id == X86_INS_CALL || cur_instr->id == X86_INS_JMP)
+            && cur_detail->operands[0].type == X86_OP_IMM)
          {
-            for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
-            {
-               // EOUTPUT("operands[%d] = ", k);
-               switch(cur_instr->detail->x86.operands[k].type)
-               {
-                  case X86_OP_REG:
-                     // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                     break;
-                  case X86_OP_IMM:
-                     // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                     ctxt->do_error_trap = cur_instr->detail->x86.operands[k].imm;
-                     found = true;
-                     break;
-                  case X86_OP_MEM:
-                     // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
-                     //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[k].mem.segment,
-                     //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                     //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                     break;
-                  case X86_OP_FP:
-                     // EOUTPUT("  OP FP \n");
-                     break;
-                  case X86_OP_INVALID:
-                     break;
-               }
-            }
-            break;
+            ctxt->do_error_trap = cur_detail->operands[0].imm;
+            cs_free(instr, num_instr);
+            return true;
          }
 
          cur_addr += cur_instr->size;
       }
 
       cs_free(instr, num_instr);
-   
-      if(found)
-         break;
    }
 
-   if(!found)
-   {
-      goto fail;
-   }
-
-   // EOUTPUT("do_error_trap = %#"PRIx64"\n", ctxt->do_error_trap);
-
-fail:
-   return found;
+   return false;
 }
 
-static bool parse_do_divide_error2(Linux* ctxt)
+static uint64_t find_syscall_table(Linux* ctxt, uint64_t routine)
 {
    uint64_t cur_addr = 0;
-
    uint32_t num_instr = 0;
-   uint32_t call_count = 0;
-
-   bool found = false;
-
+   uint64_t sys_call_table = 0;
    cs_insn* instr = NULL;
 
-   cur_addr = ctxt->do_divide_error;
-   for(uint32_t i = 0; i < 10; i++)
+   cur_addr = routine;
+
+   for(uint32_t i = 0; i < 50; i++)
    {
       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
 
       for(uint32_t j = 0; j < num_instr; j++)
       {
          cs_insn* cur_instr = &instr[j];
-
-         // EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "call", sizeof(cur_instr->mnemonic)) == 0)
+         cs_x86* detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
          {
-            if (call_count == 1)
-            {
-               for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
-               {
-                  // EOUTPUT("operands[%d] = ", k);
-                  switch(cur_instr->detail->x86.operands[k].type)
-                  {
-                     case X86_OP_REG:
-                        // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                        break;
-                     case X86_OP_IMM:
-                        // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                        ctxt->do_error_trap = cur_instr->detail->x86.operands[k].imm;
-                        found = true;
-                        break;
-                     case X86_OP_MEM:
-                        // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
-                        //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[k].mem.segment,
-                        //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                        //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                        break;
-                     case X86_OP_FP:
-                        // EOUTPUT("  OP FP \n");
-                        break;
-                     case X86_OP_INVALID:
-                        break;
-                  }
-               }
-            }
-            else
-            {
-               call_count++;
-            }
-               
-            break;
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
          }
 
+         if(cur_instr->id == X86_INS_MOV
+            && op1->type == X86_OP_REG
+            && op2->type == X86_OP_MEM
+            && op2->mem.scale == 8)
+         {
+            sys_call_table = op2->mem.disp;
+            cs_free(instr, num_instr);
+            return sys_call_table;
+         }
          cur_addr += cur_instr->size;
       }
 
       cs_free(instr, num_instr);
-   
-      if(found)
-         break;
-      }
-   if (!found)
-      goto fail;
+   }
 
-   // EOUTPUT("do_error_trap = %#"PRIx64"\n", ctxt->do_error_trap);
-
-fail:
-   return found;
+   return 0;
 }
-
 
 static bool parse_do_syscall(Linux* ctxt)
 {
    uint64_t cur_addr = 0;
    uint32_t num_instr = 0;
-
    cs_insn* instr = NULL;
 
    X86CPU *x86_cpu = X86_CPU(ctxt->cpu);
    CPUX86State *env = &x86_cpu->env;
 
-   ctxt->do_syscall_64 = 0;
-   cur_addr = env->sysenter_eip;
+   ctxt->do_syscall_64 = env->lstar;
 
-   for(uint32_t i = 0; i < 150 && ctxt->do_syscall_64 == 0; i++)
+   // look for the syscall table call directly first...
+   cur_addr = ctxt->do_syscall_64;
+   for(uint32_t i = 0; i < 50; i++)
    {
       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
-      for(uint32_t j = 0; j < num_instr && ctxt->do_syscall_64 == 0; j++)
+      for(uint32_t j = 0; j < num_instr; j++)
       {
          cs_insn* cur_instr = &instr[j];
-
-         // EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "call", sizeof(cur_instr->mnemonic)) == 0)
+         cs_x86* detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         switch(detail->op_count)
          {
-            for(uint32_t k = 0; k < cur_instr->detail->x86.op_count && ctxt->do_syscall_64 == 0; k++)
-            {
-               // EOUTPUT("operands[%d] = ", k);
-               switch(cur_instr->detail->x86.operands[k].type)
-               {
-                  case X86_OP_REG:
-                     // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                     break;
-                  case X86_OP_IMM:
-                     // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                     ctxt->do_syscall_64 = cur_instr->detail->x86.operands[k].imm;
-                     break;
-                  case X86_OP_MEM:
-                     // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
-                     //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[k].mem.segment,
-                     //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                     //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                     break;
-                  case X86_OP_FP:
-                     // EOUTPUT("  OP FP \n");
-                     break;
-                  case X86_OP_INVALID:
-                     break;
-                  default:
-                     break;
-               }
-            }
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
+
+         if(cur_instr->id == X86_INS_CALL
+            && op1->type == X86_OP_MEM
+            && op1->mem.scale == 8)
+         {
+            ctxt->sys_call_table = op1->mem.disp;
+            cs_free(instr, num_instr);
+            return true;
          }
          cur_addr += cur_instr->size;
       }
@@ -1022,17 +796,41 @@ static bool parse_do_syscall(Linux* ctxt)
       cs_free(instr, num_instr);
    }
 
-   return true;
+   // didn't find it directly in the syscall routine, so look for a syscall function
+   cur_addr = ctxt->do_syscall_64;
+   for(uint32_t i = 0; i < 150; i++)
+   {
+      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+      for(uint32_t j = 0; j < num_instr; j++)
+      {
+         cs_insn* cur_instr = &instr[j];
+         cs_x86* cur_detail = &(cur_instr->detail->x86);
+
+         if(cur_instr->id == X86_INS_CALL
+            && cur_detail->operands[0].type == X86_OP_IMM)
+         {
+            uint64_t ret_val = find_syscall_table(ctxt, cur_detail->operands[0].imm);
+            if( ret_val > 0 ){
+               ctxt->sys_call_table = ret_val;
+               ctxt->do_syscall_64 = cur_detail->operands[0].imm;
+               cs_free(instr, num_instr);
+               return true;
+            }
+         }
+         cur_addr += cur_instr->size;
+      }
+      cs_free(instr, num_instr);
+   }
+
+   return false;
 }
 
 static bool parse_do_error_trap(Linux* ctxt)
 {
    uint64_t cur_addr = 0;
-
    uint32_t num_instr = 0;
    uint32_t inst_count = 0;
-
-   bool found = false;
 
    cs_insn* instr = NULL;
 
@@ -1043,41 +841,18 @@ static bool parse_do_error_trap(Linux* ctxt)
       for(uint32_t j = 0; j < num_instr; j++)
       {
          cs_insn* cur_instr = &instr[j];
+         cs_x86* cur_detail = &(cur_instr->detail->x86);
 
-         // EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "call", sizeof(cur_instr->mnemonic)) == 0)
+         if(cur_instr->id == X86_INS_CALL)
          {
             if(inst_count == 1)
             {
-               for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
+               if(cur_detail->operands[0].type == X86_OP_IMM)
                {
-                  // EOUTPUT("operands[%d] = ", k);
-                  switch(cur_instr->detail->x86.operands[k].type)
-                  {
-                     case X86_OP_REG:
-                        // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                        break;
-                     case X86_OP_IMM:
-                        // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                        ctxt->do_trap = cur_instr->detail->x86.operands[k].imm;
-                        found = true;
-                        break;
-                     case X86_OP_MEM:
-                        // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
-                        //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[k].mem.segment,
-                        //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                        //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                        break;
-                     case X86_OP_FP:
-                        // EOUTPUT("  OP FP \n");
-                        break;
-                     case X86_OP_INVALID:
-                        break;
-                     default:
-                        break;
-                  }
+                  ctxt->do_trap = cur_detail->operands[0].imm;
+                  cs_free(instr, num_instr);
+                  return true;
                }
-               break;
             }
             else
             {
@@ -1089,107 +864,10 @@ static bool parse_do_error_trap(Linux* ctxt)
       }
 
       cs_free(instr, num_instr);
-
-      if(found)
-         break;
    }
 
-   // EOUTPUT("do_trap = %#"PRIx64"\n", ctxt->do_trap);
-
-   if(!found)
-   {
-       // EOUTPUT("Could not find do_trap\n");
-      goto fail;
-   }
-
-fail:
-   return found;
+   return false;
 }
-
-/* // Handles an ubuntu type kernel
-static bool parse_do_error_trap2(Linux* ctxt, CPUState* cs)
-{
-   uint64_t cur_addr = 0;
-
-   uint32_t num_instr = 0;
-   uint32_t inst_count = 0;
-
-   bool found = false;
-
-   cs_insn* instr = NULL;
-
-   cur_addr = ctxt->do_error_trap;
-   for(uint32_t i = 0; i < 50; i++)
-   {
-      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
-      for(uint32_t j = 0; j < num_instr; j++)
-      {
-         cs_insn* cur_instr = &instr[j];
-
-         // EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
-         if(strncmp(cur_instr->mnemonic, "call", sizeof(cur_instr->mnemonic)) == 0)
-         {
-            if(inst_count == 0)
-            {
-               for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
-               {
-                  // EOUTPUT("operands[%d] = ", k);
-                  switch(cur_instr->detail->x86.operands[k].type)
-                  {
-                     case X86_OP_REG:
-                        // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
-                        break;
-                     case X86_OP_IMM:
-                        // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
-                        ctxt->do_error_trap = cur_instr->detail->x86.operands[k].imm;
-
-                        found = true;
-                        break;
-                     case X86_OP_MEM:
-                        // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
-                        //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[k].mem.segment,
-                        //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
-                        //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
-                        break;
-                     case X86_OP_FP:
-                        // EOUTPUT("  OP FP \n");
-                        break;
-                     case X86_OP_INVALID:
-                        break;
-                     default:
-                        break;
-                  }
-               }
-               break;
-            }
-            else
-            {
-               inst_count++;
-            }
-         }
-
-         cur_addr += cur_instr->size;
-      }
-
-      cs_free(instr, num_instr);
-
-      if(found)
-         break;
-   }
-
-   // EOUTPUT("do_trap = %#"PRIx64"\n", ctxt->do_trap);
-
-   if(!found)
-   {
-       // EOUTPUT("Could not find do_trap\n");
-      goto fail;
-   }
-   return parse_do_error_trap(ctxt, cs);
-
-fail:
-   return found;
-}
-*/
 
 static bool uint_in_list(uint64List* list, uint64_t val)
 {
@@ -1218,19 +896,20 @@ static bool uint_in_list(uint64List* list, uint64_t val)
 #define TASK_LIST_FILES_STRUCT_OFS     (TASK_LIST_FS_STRUCT_OFS+8)
 
 #define MM_STRUCT_VM_AREA_OFS       0x0000
-#define MM_STRUCT_PGD_OFS           (ctxt->mm_struct_pgd_offset)
 #define MM_STRUCT_MMAP_BASE_OFS     0x0020
 #define MM_STRUCT_MMAP_LEGACY_BASE_OFS  0x0028
-#define MM_STRUCT_TASK_SIZE            0x0040
-#define MM_STRUCT_HIGHEST_VM_END_OFS   0x0048
+#define MM_STRUCT_TASK_SIZE            0x0030
+#define MM_STRUCT_HIGHEST_VM_END_OFS   0x0038
 
 #define VM_AREA_VM_START_OFS        0x0000
 #define VM_AREA_VM_END_OFS             0x0008
 #define VM_AREA_VM_NEXT_OFS            0x0010
 #define VM_AREA_VM_PREV_OFS            0x0018
+// vma_set_page_prot
 #define VM_AREA_VM_PAGE_PROT_OFS    0x0048
 #define VM_AREA_VM_FLAGS_OFS        0x0050
-#define VM_AREA_VM_FILE_OFS            (ctxt->vm_area_file_offset)
+#define VM_AREA_VM_FILE_OFS         0x0090
+#define MM_STRUCT_PGD_OFS           0x0040
 
 static void parse_task_child_ptrs(Linux* ctxt, Process* task, CPUState* cpu, uint64List* tail)
 {
@@ -1251,30 +930,29 @@ static void parse_task_child_ptrs(Linux* ctxt, Process* task, CPUState* cpu, uin
         current_child && current_child != previous_child;
        qemu_load_u64(ctxt->cpu->cpu_index, current_child, &current_child))
    {
-          // Transform the kernel LL pointer to a task pointer by jumping to the
-         // top of the task struct
-         uint64_t current_task_pointer = current_child - TASK_LIST_SIBLING_LIST_HEAD_OFS;
-            
-         // If, for some reason, we've added this task before, 
-         // then we are in a bad state. We will make sure this isn't the case
-         if (uint_in_list(task->u.lnx.children, current_task_pointer))
-         {
-            // If we are here, we are unlikely to 
-            // recover
-            break;
-         }
-         uint64List* newEntry = g_new0(uint64List, 1);
-         newEntry->next = NULL;
-         newEntry->value = current_task_pointer;
-         if (task->u.lnx.children == NULL)
-         {
-            task->u.lnx.children = newEntry;
-         }
-         else
-         {
-            tail->next = newEntry;
-         }
-         tail = newEntry;
+         // Transform the kernel LL pointer to a task pointer by jumping to the
+      // top of the task struct
+      uint64_t current_task_pointer = current_child - TASK_LIST_SIBLING_LIST_HEAD_OFS;
+         
+      // If, for some reason, we've added this task before, 
+      // then we are in a bad state. We will make sure this isn't the case
+      if (uint_in_list(task->u.lnx.children, current_task_pointer))
+      {
+         // If we are here, we are unlikely to recover
+         break;
+      }
+      uint64List* newEntry = g_new0(uint64List, 1);
+      newEntry->next = NULL;
+      newEntry->value = current_task_pointer;
+      if (task->u.lnx.children == NULL)
+      {
+         task->u.lnx.children = newEntry;
+      }
+      else
+      {
+         tail->next = newEntry;
+      }
+      tail = newEntry;
    }
 
     {
@@ -1302,18 +980,12 @@ static void parse_task_child_ptrs(Linux* ctxt, Process* task, CPUState* cpu, uin
    }
 }
 
-// static void parse_task_sibling_ptrs(Process* task, CPUState* cpu, uint64List* siblings)
-// {
-//    if(task->u.lnx.sibling_list_next == task->u.lnx.sibling_list_prev)
-//       return;
-// }
-
-static void parse_vm_area_struct(Linux* ctxt, TaskMemoryInfo* mem_info, CPUState* cpu)
+static void parse_vm_area_struct(Linux* ctxt, Process *task, TaskMemoryInfo* mem_info, CPUState* cpu)
 {
    uint64_t ptr = mem_info->base_ptr;
 
    VmAreaInfo* vm_info = NULL;
-   VmAreaInfoList* tail = NULL;
+   VmAreaInfoList** tail = &(mem_info->vm_areas);
 
    while(true)
    {
@@ -1343,11 +1015,9 @@ static void parse_vm_area_struct(Linux* ctxt, TaskMemoryInfo* mem_info, CPUState
 
       VmAreaInfoList* entry = g_new0(VmAreaInfoList, 1);
       entry->value = vm_info;
-      if (unlikely(mem_info->vm_areas == NULL))
-         mem_info->vm_areas = entry;
-      else
-         tail->next = entry;
-      tail = entry;
+      entry->next = NULL;
+      *tail = entry;
+      tail = &(entry->next);
 
       if (next == ptr)
          break;
@@ -1396,12 +1066,7 @@ static bool parse_mm_struct(Linux* ctxt, Process* task, CPUState* cpu)
       return false;
    }
 
-   // EOUTPUT("mmap_base = %#"PRIx64"\n", info->mmap_base);
-   // EOUTPUT("mmap_legacy_base = %#"PRIx64"\n", info->mmap_legacy_base);
-   // EOUTPUT("task_size = %#"PRIx64"\n", info->task_size);
-   // EOUTPUT("highest_vm_end = %#"PRIx64"\n", info->highest_vm_end);
-
-   parse_vm_area_struct(ctxt, info, cpu);
+   parse_vm_area_struct(ctxt, task, info, cpu);
 
    if(!qemu_load_u64(ctxt->cpu->cpu_index, mm_ptr + MM_STRUCT_PGD_OFS, &pgd_ptr)){
       return false;
@@ -1449,18 +1114,11 @@ static bool parse_mm_struct(Linux* ctxt, Process* task, CPUState* cpu)
 
 static bool parse_task_struct(Linux* ctxt, CPUState* cpu, uint64_t ptask, Process* new_task)
 {
-   // uint64_t stack_canary = 0;
-
-   // uint32_t search_len = 0;
-   // uint32_t ret = 0;
    char *comm_name = NULL;
 
-   // X86CPU *x86_cpu = X86_CPU(cpu);
-   // CPUX86State *env = &x86_cpu->env;
 
    // EOUTPUT("cr3 = %#"PRIx64"\n", env->cr[3]);
 
-   // uint64_t ptask = 0;
 
    // EOUTPUT("ctxt->current_task = %#"PRIx64"\n", ctxt->current_task);
 
@@ -1479,47 +1137,60 @@ static bool parse_task_struct(Linux* ctxt, CPUState* cpu, uint64_t ptask, Proces
    if(!comm_name){
       return false;
    }
-   
-   // EOUTPUT("comm_name = %s\n", new_task->comm_name);
 
+         // printf("fs_struct_ptr\n");
    if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_FS_STRUCT_OFS, &new_task->u.lnx.fs_struct_ptr)){
       return false;
    }
    
    // EOUTPUT("fs ptr = %#"PRIx64"\n", new_task->fs_struct_ptr);
 
+         // printf("open_files_ptr\n");
    if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_FILES_STRUCT_OFS, &new_task->u.lnx.open_files_ptr)){
       return false;
    }
 
    // EOUTPUT("files_struct ptr = %#"PRIx64"\n", new_task->open_files_ptr);
 
+         // printf("real_parent_ptr\n");
    if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_REAL_PARENT_OFS, &new_task->u.lnx.real_parent_ptr)){
       return false;
    }
 
    // EOUTPUT("real_parent_ptr = %#"PRIx64"\n", new_task->real_parent_ptr);
 
+         // printf("tgid\n");
    if(!qemu_load_u32(ctxt->cpu->cpu_index, ptask + TASK_LIST_TGID_OFS, &new_task->u.lnx.tgid)){
       return false;
    }
 
    // EOUTPUT("tgid = %d\n", new_task->tgid);
 
+         // printf("pid\n");
    if(!qemu_load_u32(ctxt->cpu->cpu_index, ptask + TASK_LIST_PID_OFS, &new_task->info->pid)){
       return false;
    }
 
    // EOUTPUT("pid = %d\n", new_task->pid);
 
+         // printf("canary\n");
    if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_STACK_CANARY_OFS, &new_task->u.lnx.stack_canary)){
       return false;
    }
 
    if (new_task->info->pid == 0)
    {
+         // printf("new_task->info->pid == 0\n");
       uint64_t offset = 0;
-      if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_PIDS_OFS, &offset)){
+
+      // default behavior is to just use a constant offset
+      uint64_t pids_offset = TASK_LIST_PIDS_OFS;
+      // however, if the offset was detected or specified then use that instead
+      if( ctxt->task_pids_offset > 0 ){
+         pids_offset = ctxt->task_pids_offset;
+      }
+
+      if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + pids_offset, &offset)){
          return false;
       }
       if (offset != 0)
@@ -1535,26 +1206,44 @@ static bool parse_task_struct(Linux* ctxt, CPUState* cpu, uint64_t ptask, Proces
 
    // EOUTPUT("stack canary = %#"PRIx64"\n", new_task->stack_canary);
 
-   // for(uint32_t i = 0; i < 0x1000; i+=8)
-   // {
-   //    uint64_t tmp = 0;
-   //    uint8_t tmp_comm[16] = {0};
-      
-   //    EOUTPUT("ORIG OFS = %08X    comm = %s\n", i, tmp_comm);
-   // }
-
    // For 32-bit change sizeof(uint64_t) to sizeof(uint32_t), 
    // this would preferably be done with a dynamically assigned pointer size per system
-   if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_CHILD_LIST_HEAD_OFS, &new_task->u.lnx.child_list_next) ||
-      !qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_CHILD_LIST_HEAD_OFS + sizeof(uint64_t), &new_task->u.lnx.child_list_prev) ||
-      !qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_SIBLING_LIST_HEAD_OFS, &new_task->u.lnx.sibling_list_next) ||
-      !qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_SIBLING_LIST_HEAD_OFS + sizeof(uint64_t), &new_task->u.lnx.sibling_list_prev) ||
-      !qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_MM_OFS, &new_task->u.lnx.mm_ptr) ||
-      !qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_ACTIVE_MM_OFS, &new_task->u.lnx.active_mm_ptr)){
+   if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_CHILD_LIST_HEAD_OFS, &new_task->u.lnx.child_list_next)){
+      // printf("TASK_LIST_ACTIVE_MM_OFS\n");
+      return false;
+   }
+
+   if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_CHILD_LIST_HEAD_OFS + sizeof(uint64_t), &new_task->u.lnx.child_list_prev)){
+      // printf("TASK_LIST_ACTIVE_MM_OFS\n");
+      return false;
+
+   }
+
+   if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_SIBLING_LIST_HEAD_OFS, &new_task->u.lnx.sibling_list_next)){
+      // printf("TASK_LIST_ACTIVE_MM_OFS\n");
+      return false;
+   }
+
+   if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_SIBLING_LIST_HEAD_OFS + sizeof(uint64_t), &new_task->u.lnx.sibling_list_prev)){
+      // printf("TASK_LIST_ACTIVE_MM_OFS\n");
+      return false;
+   }
+
+   if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_MM_OFS, &new_task->u.lnx.mm_ptr)){
+      // printf("TASK_LIST_ACTIVE_MM_OFS\n");
+      return false;
+   }
+
+   if(!qemu_load_u64(ctxt->cpu->cpu_index, ptask + TASK_LIST_ACTIVE_MM_OFS, &new_task->u.lnx.active_mm_ptr)){
+      // printf("TASK_LIST_ACTIVE_MM_OFS\n");
       return false;
    }
 
    // EOUTPUT("active_mm_ptr = %#"PRIx64"\n", new_task->active_mm_ptr);
+
+   new_task->name = comm_name;
+   new_task->u.lnx.children = NULL;
+   new_task->u.lnx.siblings = NULL;
 
    parse_mm_struct(ctxt, new_task, cpu);
 
@@ -1564,19 +1253,12 @@ static bool parse_task_struct(Linux* ctxt, CPUState* cpu, uint64_t ptask, Proces
    // EOUTPUT("sibling_list_prev = %#"PRIx64"\n", new_task->sibling_list_prev);
    // EOUTPUT("sibling_list_next = %#"PRIx64"\n", new_task->sibling_list_next);
 
-   new_task->name = comm_name;
-   new_task->u.lnx.children = NULL;
-   new_task->u.lnx.siblings = NULL;
 
    uint64_t next_task = new_task->info->procaddr + TASK_LIST_CHILD_LIST_HEAD_OFS;
    if(new_task->u.lnx.child_list_next != next_task || new_task->u.lnx.child_list_prev != next_task)
       parse_task_child_ptrs(ctxt, new_task, cpu, new_task->u.lnx.children);
 
-   // if(new_task->u.lnx.sibling_list_next != new_task->u.lnx.sibling_list_prev)
-   //    parse_task_sibling_ptrs(new_task, cpu, new_task->u.lnx.siblings);
-
    // EOUTPUT("child list prev = %#"PRIx64"\nchild list next = %#"PRIx64"\n", child_list_prev, child_list_next);
-
    // EOUTPUT("\n");
 
    return true;
@@ -1654,6 +1336,571 @@ static uint64_t find_top_parent(Linux* ctxt, CPUState* cpu, uint64_t cur_ptr)
    return new_parent;
 }
 
+static int64_t find_comm_offset(Linux* ctxt)
+{
+   uint64_t cur_addr = 0;
+   uint32_t num_instr = 0;
+   x86_reg target_reg = X86_REG_INVALID;
+   int inst_count = 0;
+   int call_depth = 0;
+   int64_t comm_offset = 0;
+
+   cs_insn* instr = NULL;
+   
+   cur_addr = ctxt->do_trap;
+
+   // look for it directly as an arg to printk in do_trap
+   for(uint32_t i = 0; i < 150; i++)
+   {
+      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+      for(uint32_t j = 0; j < num_instr; j++)
+      {
+         cs_insn* cur_instr = &instr[j];
+         cs_x86 *detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
+         {
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
+
+         if(target_reg != X86_REG_INVALID)
+         {
+            // comm is passed as 1st arg when calling printk
+            if(cur_instr->id == X86_INS_LEA
+               && op1->type == X86_OP_REG
+               && op1->reg == X86_REG_RSI
+               && op2->type == X86_OP_MEM
+               && op2->mem.base == target_reg)
+            {
+               comm_offset = op2->mem.disp;
+            }else if(cur_instr->id == X86_INS_CALL && comm_offset > 0){
+               // was rsi set prior to this call?
+               cs_free(instr, num_instr);
+               return comm_offset;
+            }
+         }else{
+            // find register holding current task
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_MEM
+               && op2->mem.segment == X86_REG_GS
+               && (ctxt->kern_gs_base + op2->mem.disp) == ctxt->current_task)
+            {
+                  target_reg = op1->reg;
+            }
+         }
+
+         cur_addr += cur_instr->size;
+      }
+
+      cs_free(instr, num_instr);
+   }
+   
+   // direct lookup failed... look for nameidata in sys_umount and subtract difference
+   // sys_umount -> user_path_mountpoint_at -> filename_mountpoint
+   qemu_load_u64(ctxt->cpu->cpu_index, ctxt->sys_call_table+8*166, &cur_addr);
+   target_reg = X86_REG_INVALID;
+   comm_offset = 0;
+
+   for(uint32_t i = 0; i < 120; i++)
+   {
+      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+      for(uint32_t j = 0; j < num_instr; j++)
+      {
+         cs_insn* cur_instr = &instr[j];
+         cs_x86 *detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
+         {
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
+
+         // find sys_umount
+         if(call_depth == 0)
+         {
+            // find first function accessing the current task
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_MEM
+               && op2->mem.segment == X86_REG_GS
+               && (ctxt->kern_gs_base + op2->mem.disp) == ctxt->current_task)
+            {
+               call_depth++;
+            }else
+            // we shouldn't hit any calls before accessing current_task
+            // so follow the calls if we do find them...
+            if(cur_instr->id == X86_INS_CALL
+               && op1->type == X86_OP_IMM)
+            {
+               cur_addr = op1->imm;
+               break;
+            }
+         }else if(call_depth <= 2){
+            // follow the second call or jmp for two subsequent functions
+            if((cur_instr->id == X86_INS_CALL || cur_instr->id == X86_INS_JMP)
+               && op1->type == X86_OP_IMM)
+            {
+               inst_count++;
+               if( inst_count == 2 ){
+                  cur_addr = op1->imm;
+                  inst_count = 0;
+                  call_depth++;
+                  break;
+               }
+            }
+         }else if(call_depth == 3){
+            // do we know which register is the current task?
+            if(target_reg != X86_REG_INVALID)
+            {
+               if(cur_instr->id == X86_INS_MOV
+                  && op1->type == X86_OP_REG
+                  && op2->type == X86_OP_MEM
+                  && op2->mem.base == target_reg)
+               {
+                  // actually nameidata so subtract the distance...
+                  comm_offset = (op2->mem.disp - LINUX_COMM_NAME_SIZE);
+                  cs_free(instr, num_instr);
+                  return comm_offset;
+               }
+            }else{
+               // find register holding current task
+               if(cur_instr->id == X86_INS_MOV
+                  && op1->type == X86_OP_REG
+                  && op2->type == X86_OP_MEM
+                  && op2->mem.segment == X86_REG_GS
+                  && (ctxt->kern_gs_base + op2->mem.disp) == ctxt->current_task)
+               {
+                  target_reg = op1->reg;
+               }
+            }
+         }
+
+         cur_addr += cur_instr->size;
+      }
+
+      cs_free(instr, num_instr);
+   }
+
+   return 0;
+}
+
+static int64_t find_pid_offset(Linux* ctxt)
+{
+   uint64_t cur_addr = 0;
+   uint32_t num_instr = 0;
+   x86_reg target_reg = X86_REG_INVALID;
+   cs_insn* instr = NULL;
+   cur_addr = ctxt->do_trap;
+   int64_t pid_offset = 0;
+
+   for(uint32_t i = 0; i < 150; i++)
+   {
+      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+      for(uint32_t j = 0; j < num_instr; j++)
+      {
+         cs_insn* cur_instr = &instr[j];
+         cs_x86 *detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
+         {
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
+
+         if(target_reg != X86_REG_INVALID)
+         {
+            // find offset of pid into task_struct
+            if(cur_instr->id == X86_INS_MOV)
+            {
+               // pid is 32 bit and passed as 3rd arg when calling printk
+               if(op1->type == X86_OP_REG
+                  && op1->size == X86_REG_EDX
+                  && op2->type == X86_OP_MEM
+                  && op2->mem.base == target_reg)
+               {
+                  pid_offset = op2->mem.disp;
+               }
+            }else if(cur_instr->id == X86_INS_CALL && pid_offset > 0){
+               // was edx set prior to this call?
+               cs_free(instr, num_instr);
+               return pid_offset;
+            }
+         }else{
+            // find register holding current task
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_MEM
+               && op2->mem.segment == X86_REG_GS
+               && (ctxt->kern_gs_base + op2->mem.disp) == ctxt->current_task)
+            {
+                  target_reg = op1->reg;
+            }
+         }
+
+         cur_addr += cur_instr->size;
+      }
+
+      cs_free(instr, num_instr);
+   }
+
+   // printk lookup failed... look in sys_exit -> do_exit
+   qemu_load_u64(ctxt->cpu->cpu_index, ctxt->sys_call_table+8*60, &cur_addr);
+   target_reg = X86_REG_INVALID;
+
+   for(uint32_t i = 0; i < 120; i++)
+   {
+      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+      for(uint32_t j = 0; j < num_instr; j++)
+      {
+         cs_insn* cur_instr = &instr[j];
+         cs_x86 *detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
+         {
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
+
+         // do we know which register is the current task?
+         if(target_reg != X86_REG_INVALID)
+         {
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op1->size == 4
+               && op2->type == X86_OP_MEM
+               && op2->mem.base == target_reg)
+            {
+               pid_offset = op2->mem.disp;
+               cs_free(instr, num_instr);
+               return pid_offset;
+            }
+         }else{
+            // find register holding current task
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_MEM
+               && op2->mem.segment == X86_REG_GS
+               && (ctxt->kern_gs_base + op2->mem.disp) == ctxt->current_task)
+            {
+               target_reg = op1->reg;
+            }else
+            // we shouldn't hit any calls before accessing current_task
+            // so follow the calls if we do find them...
+            if(cur_instr->id == X86_INS_CALL
+               && op1->type == X86_OP_IMM)
+            {
+               cur_addr = op1->imm;
+               break;
+            }
+         }
+
+         cur_addr += cur_instr->size;
+      }
+
+      cs_free(instr, num_instr);
+   }
+
+   return 0;
+}
+
+static int64_t find_mm_offset(Linux* ctxt)
+{
+   uint64_t cur_addr = 0;
+   uint32_t num_instr = 0;
+   x86_reg target_reg = X86_REG_INVALID;
+   cs_insn* instr = NULL;
+   cur_addr = ctxt->__do_page_fault;
+
+   for(uint32_t i = 0; i < 150; i++)
+   {
+      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+      for(uint32_t j = 0; j < num_instr; j++)
+      {
+         cs_insn* cur_instr = &instr[j];
+         cs_x86 *detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
+         {
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
+
+         if(target_reg != X86_REG_INVALID)
+         {
+            // find offset of mm into task_struct
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_MEM
+               && op2->mem.base == target_reg)
+            {
+               cs_free(instr, num_instr);
+               return op2->mem.disp;
+            }
+         }else{
+            // find register holding current task
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_MEM
+               && op2->mem.segment == X86_REG_GS
+               && (ctxt->kern_gs_base + op2->mem.disp) == ctxt->current_task)
+            {
+               target_reg = op1->reg;
+            }else
+            // we shouldn't hit any calls before accessing current_task
+            // so follow the calls if we do find them...
+            if(cur_instr->id == X86_INS_CALL
+               && op1->type == X86_OP_IMM)
+            {
+               cur_addr = op1->imm;
+               break;
+            }
+         }
+
+         cur_addr += cur_instr->size;
+      }
+
+      cs_free(instr, num_instr);
+   }
+
+   return 0;
+}
+
+static int64_t find_fs_offset(Linux* ctxt)
+{
+   uint64_t cur_addr = 0;
+   uint32_t num_instr = 0;
+   x86_reg target_reg = X86_REG_INVALID;
+   cs_insn* instr = NULL;
+
+   // load address for sys_umount
+   qemu_load_u64(ctxt->cpu->cpu_index, ctxt->sys_call_table+8*166, &cur_addr);
+
+   // perform an indirect lookup in sys_umount
+   for(uint32_t i = 0; i < 150; i++)
+   {
+      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+      for(uint32_t j = 0; j < num_instr; j++)
+      {
+         cs_insn* cur_instr = &instr[j];
+         cs_x86 *detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
+         {
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
+
+         if(target_reg != X86_REG_INVALID)
+         {
+            // find offset of fs into task_struct
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_MEM
+               && op2->mem.base == target_reg)
+            {
+               cs_free(instr, num_instr);
+               // actually nsproxy so subtract the distance...
+               return (op2->mem.disp - 0x10);
+            }
+         }else{
+            // find register holding current task
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_MEM
+               && op2->mem.segment == X86_REG_GS
+               && (ctxt->kern_gs_base + op2->mem.disp) == ctxt->current_task)
+            {
+               target_reg = op1->reg;
+            }else
+            // we shouldn't hit any calls before accessing current_task
+            // so follow the calls if we do find them...
+            if(cur_instr->id == X86_INS_CALL
+               && op1->type == X86_OP_IMM)
+            {
+               cur_addr = op1->imm;
+               break;
+            }
+         }
+
+         cur_addr += cur_instr->size;
+      }
+
+      cs_free(instr, num_instr);
+   }
+
+   return 0;
+}
+
+
+static int64_t find_pids_offset(Linux* ctxt)
+{
+   uint64_t cur_addr = 0;
+   uint32_t num_instr = 0;
+   int instr_count = 0;
+   x86_reg target_reg = X86_REG_INVALID;
+   cs_insn* instr = NULL;
+   int set_pid_type = -1;
+   bool in_change_pid = false;
+   x86_reg passed_reg = X86_REG_INVALID;
+   int64_t pids_offset = 0;
+
+   // load address for sys_setpgid
+   qemu_load_u64(ctxt->cpu->cpu_index, ctxt->sys_call_table+8*109, &cur_addr);
+
+   // perform a direct lookup in sys_setpgid
+   for(uint32_t i = 0; i < 150; i++)
+   {
+      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+      for(uint32_t j = 0; j < num_instr; j++)
+      {
+         cs_insn* cur_instr = &instr[j];
+         cs_x86 *detail = &(cur_instr->detail->x86);
+         cs_x86_op *op1 = NULL;
+         cs_x86_op *op2 = NULL;
+         switch(detail->op_count)
+         {
+            case 2:
+               op2 = &(detail->operands[1]);
+            case 1:
+               op1 = &(detail->operands[0]);
+               break;
+         }
+
+         // follow edi (pid) into p = find_task_by_vpid(pid);
+         // follow p into change_pid(p, PIDTYPE_PGID, pgrp); where PIDTYPE_PGID is 1
+         if(in_change_pid)
+         {
+            // check if the register is being moved
+            if(cur_instr->id == X86_INS_MOV
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_REG
+               && op2->reg == target_reg)
+            {
+               // move the register
+               target_reg = op1->reg;
+            }else
+            // this works for both "pids" and "pids_links"
+            // note: skip lea for head node access with check for greater than zero
+            if(cur_instr->id == X86_INS_LEA
+               && op1->type == X86_OP_REG
+               && op2->type == X86_OP_MEM
+               && op2->mem.base == target_reg
+               && op2->mem.disp > 0)
+            {
+               // if there was no thread_pid access then this is "pids"
+               pids_offset = op2->mem.disp;
+               cs_free(instr, num_instr);
+               return pids_offset;
+            }
+         }else{
+            // looking for change_pid in sys_setpgid
+            if(target_reg != X86_REG_INVALID)
+            {
+               // check if the pid type is being set
+               if(cur_instr->id == X86_INS_MOV
+                  && op1->type == X86_OP_REG
+                  && op1->reg == X86_REG_ESI
+                  && op2->type == X86_OP_IMM
+                  && set_pid_type < 0)
+               {
+                  // found a usage, wait for call to validate
+                  set_pid_type = op2->imm;
+               }else
+               // check if the register is being used in call
+               if(cur_instr->id == X86_INS_MOV
+                  && op1->type == X86_OP_REG
+                  && op1->reg == X86_REG_RDI
+                  && op2->type == X86_OP_REG
+                  && op2->reg == target_reg)
+               {
+                  // found an arg pass, wait for call to validate
+                  passed_reg = op1->reg;
+               }else
+               // we might need to follow this call
+               if(cur_instr->id == X86_INS_CALL
+                  && op1->type == X86_OP_IMM)
+               {
+                  // validate both arguments are set for change_pid
+                  if(set_pid_type >= 0
+                     && passed_reg != X86_REG_INVALID)
+                  {
+                     cur_addr = op1->imm;
+                     target_reg = passed_reg;
+                     in_change_pid = true;
+                     break;
+                  }
+
+                  set_pid_type = -1;
+                  passed_reg = X86_REG_INVALID;
+               }
+            }else{
+               // first, get to find_task_by_vpid
+               if(cur_instr->id == X86_INS_CALL
+                  && op1->type == X86_OP_IMM
+                  && instr_count < 2)
+               {
+                  instr_count++;
+                  if(instr_count == 2){
+                     // follow return value
+                     passed_reg = X86_REG_RAX;
+                  }
+               }else
+               // follow return register mov
+               if(cur_instr->id == X86_INS_MOV
+                  && op1->type == X86_OP_REG
+                  && op2->type == X86_OP_REG
+                  && op2->reg == passed_reg)
+               {
+                  // move the register and transition
+                  // to look for change_pid
+                  target_reg = op1->reg;
+                  passed_reg = X86_REG_INVALID;
+               }
+            }
+         }
+
+         cur_addr += cur_instr->size;
+      }
+
+      cs_free(instr, num_instr);
+   }
+
+   return 0;
+}
+
 static ProcessList* linux_get_process_list(OSHandler* ctxt)
 {
    Linux* os = LINUX(ctxt);
@@ -1674,120 +1921,27 @@ static ProcessList* linux_get_process_list(OSHandler* ctxt)
    return proc_list;
 }
 
-static bool scan_for_ubuntu(Linux* ctxt)
+static bool scan_for_linux(Linux* ctxt)
 {
+   int64_t reg_val = 0;
    bool ret = true;
    ctxt->do_divide_error = 0;
-    ctxt->do_error_trap = 0;
-    ctxt->do_trap = 0;
-    ctxt->current_task = 0;
-    ctxt->kern_gs_base = 0;
-
-   ret &= parse_div0_idte(ctxt);
-   if(!ret)
-   {
-      fprintf(stderr, "Failed to parse div0 idte\n");
-      return false;
-   }
-
-   ret &= parse_divE_idte(ctxt);
-   if(!ret)
-   {
-      fprintf(stderr, "Failed to parse divE idte\n");
-      return false;
-   }
-
-   ret &= parse_do_page_fault2(ctxt);
-   if(!ret)
-   {
-      fprintf(stderr, "Failed to parse do_page_fault\n");
-      return false;
-   }
-
-   ret &= parse_vmalloc_fault(ctxt);
-   if(!ret)
-   {
-      fprintf(stderr, "Failed to parse vmalloc_fault\n");
-      return false;
-   }
-
-   ret &= parse_do_divide_error2(ctxt);
-   if(!ret)
-   {
-      fprintf(stderr, "Failed to parse do divide error\n");
-      return false;
-   }
-
-   ret &= parse_do_error_trap(ctxt);
-   if(!ret)
-   {
-      fprintf(stderr, "Failed to parse do error trap\n");
-      return false;
-   }
-
-   ret &= parse_do_trap(ctxt);
-   if(!ret)
-   {
-      fprintf(stderr, "Failed to parse do trap\n");
-      return false;
-   }
-
+   ctxt->do_error_trap = 0;
+   ctxt->do_trap = 0;
+   ctxt->current_task = 0;
+   ctxt->kern_gs_base = 0;
+   
    ret &= parse_do_syscall(ctxt);
    if(!ret)
    {
-      fprintf(stderr, "Failed to parse do trap\n");
+      fprintf(stderr, "Failed to parse do syscall\n");
       return false;
    }
 
-   if (ret)
-   {
-      ctxt->task_comm_offset = 0x5d8;
-      ctxt->task_pid_offset = 0x428;
-      ctxt->task_mm_offset = 0x380;
-      ctxt->task_fs_offset = 0x610;
-      ctxt->mm_struct_pgd_offset = 0x40;
-      ctxt->vm_area_file_offset = 0x90;
-   }
-   // EOUTPUT("after parse do trap\n");
-
-   return ret;
-}
-
-static bool scan_for_debian(Linux* ctxt)
-{
-   bool ret = true;
-   ctxt->do_divide_error = 0;
-    ctxt->do_error_trap = 0;
-    ctxt->do_trap = 0;
-    ctxt->current_task = 0;
-    ctxt->kern_gs_base = 0;
-
-   
    ret &= parse_div0_idte(ctxt);
    if(!ret)
    {
       fprintf(stderr, "Failed to parse div0 idte\n");
-      return false;
-   }
-
-   ret &= parse_divE_idte(ctxt);
-   if(!ret)
-   {
-      fprintf(stderr, "Failed to parse divE idte\n");
-      return false;
-   }
-
-   ret &= parse_do_page_fault(ctxt);
-   if(!ret)
-   {
-      fprintf(stderr, "Failed to parse do_page_fault\n");
-      return false;
-   }
-
-   ret &= parse_vmalloc_fault(ctxt);
-   if(!ret)
-   {
-      fprintf(stderr, "Failed to parse vmalloc_fault\n");
       return false;
    }
 
@@ -1812,22 +1966,81 @@ static bool scan_for_debian(Linux* ctxt)
       return false;
    }
 
-   ret &= parse_do_syscall(ctxt);
+   ret &= parse_divE_idte(ctxt);
    if(!ret)
    {
-      fprintf(stderr, "Failed to parse do trap\n");
+      fprintf(stderr, "Failed to parse divE idte\n");
       return false;
    }
 
-   // EOUTPUT("after parse do trap\n");
+   ret &= parse_do_page_fault(ctxt);
+   if(!ret)
+   {
+      fprintf(stderr, "Failed to parse do_page_fault\n");
+      return false;
+   }
+
+   ret &= parse_inner_do_page_fault(ctxt);
+   if(!ret)
+   {
+      fprintf(stderr, "Failed to parse inner_do_page_fault\n");
+      return false;
+   }
+
+   ret &= parse_vmalloc_fault(ctxt);
+   if(!ret)
+   {
+      fprintf(stderr, "Failed to parse vmalloc_fault\n");
+      return false;
+   }
+
+   ret &= parse_sys_mprotect(ctxt);
+   if(!ret)
+   {
+      fprintf(stderr, "Failed to parse sys_mprotect\n");
+      return false;
+   }
+
    if (ret)
    {
-      ctxt->task_comm_offset = 0x648;
-      ctxt->task_pid_offset = 0x490;
-      ctxt->task_mm_offset = 0x3e0;
-      ctxt->task_fs_offset = 0x680;
-      ctxt->mm_struct_pgd_offset = 0x40;
-      ctxt->vm_area_file_offset = 0x90;
+      reg_val = find_comm_offset(ctxt);
+      if(reg_val <= 0){
+         fprintf(stderr, "Failed to parse comm_offset\n");
+         return false;
+      }
+      ctxt->task_comm_offset = reg_val;
+      //EOUTPUT("comm_offset = %lX\n", ctxt->task_comm_offset);
+   
+      reg_val = find_pid_offset(ctxt);
+      if(reg_val <= 0){
+         fprintf(stderr, "Failed to parse pid_offset\n");
+         return false;
+      }
+      ctxt->task_pid_offset = reg_val;
+      //EOUTPUT("pid_offset = %lX\n", ctxt->task_pid_offset);
+
+      reg_val = find_mm_offset(ctxt);
+      if(reg_val <= 0){
+         fprintf(stderr, "Failed to parse mm_offset\n");
+         return false;
+      }
+      ctxt->task_mm_offset = reg_val;
+      //EOUTPUT("mm_offset = %lX\n", ctxt->task_mm_offset);
+
+      reg_val = find_fs_offset(ctxt);
+      if(reg_val <= 0){
+         fprintf(stderr, "Failed to parse fs_offset\n");
+         return false;
+      }
+      ctxt->task_fs_offset = reg_val;
+      //EOUTPUT("fs_offset = %lX\n", ctxt->task_fs_offset);
+
+      // pids_offset is optional, when not set a constant offset is used
+      reg_val = find_pids_offset(ctxt);
+      if(reg_val > 0){
+         ctxt->task_pids_offset = reg_val;
+      }
+      //EOUTPUT("pids_offset = %lX\n", ctxt->task_pids_offset);
    }
 
    return ret;
@@ -1881,11 +2094,6 @@ static bool fix_offsets_for_kaslr(Linux* ctxt)
       ctxt->page_offset_base = 0xffff880000000000;
    }
 
-   if (ctxt->mm_struct_pgd_offset == 0)
-      ctxt->mm_struct_pgd_offset = 0x40;
-   if (ctxt->vm_area_file_offset == 0)
-      ctxt->vm_area_file_offset = 0x90;
-
    return true;
 }
 
@@ -1912,6 +2120,7 @@ static Process* linux_get_process_detail(OSHandler* ctxt, ProcessInfo *pi)
 
 static void linux_get_process_string(OSHandler* ctxt, ProcessInfo *pi, QString **pqstr)
 {
+   // set the process information for a process listing
    Process *p = linux_get_process_detail(ctxt, pi);
    if( p ) {
       QString *qstr = *pqstr;
@@ -1931,13 +2140,18 @@ static OSHandler *linux_scan_for_context(OSHandler* ctxt, OSArch *arch)
    }
 
    OSHandler *os = NULL;
-   if(ctxt && object_dynamic_cast(OBJECT(ctxt), TYPE_LINUX)) {
+   if(ctxt) {
       // We can reuse this context.
       os = ctxt;
    }else{
       // The provided context is un-usable so make a new one.
       os = OSHANDLER(object_new(TYPE_LINUX));
    }
+
+   if(!object_dynamic_cast(OBJECT(os), TYPE_LINUX)){
+      return NULL;
+   }
+
    Linux *l = LINUX(os);
 
    // Shameless duplication of CPUState
@@ -1949,7 +2163,8 @@ static OSHandler *linux_scan_for_context(OSHandler* ctxt, OSArch *arch)
       l->task_mm_offset != 0 &&
       l->task_pid_offset != 0 &&
       l->task_comm_offset != 0 &&
-      l->task_fs_offset != 0)
+      l->task_fs_offset != 0 &&
+      l->task_pids_offset != 0)
    {
       if(fix_offsets_for_kaslr(l)){
          cleanup_disassemble(l);
@@ -1963,12 +2178,10 @@ static OSHandler *linux_scan_for_context(OSHandler* ctxt, OSArch *arch)
    l->current_task = 0;
    l->kern_gs_base = 0;
 
-   if (!scan_for_debian(l)){
-      if(!scan_for_ubuntu(l)){
-         object_unref(OBJECT(l));
-         cleanup_disassemble(l);
-         return NULL;
-      }
+   if (!scan_for_linux(l)){
+      object_unref(OBJECT(l));
+      cleanup_disassemble(l);
+      return NULL;
    }
 
    cleanup_disassemble(l);
@@ -2027,19 +2240,19 @@ static ProcessInfo *linux_get_processinfo_by_active(OSHandler* os, CPUState* cpu
 
 static ProcessInfo *linux_get_processinfo_by_name(OSHandler* os, const char *name)
 {
-    ProcessList *procs = linux_get_process_list(os);
-    if(procs){
-        for (ProcessList* cur_proc = procs; cur_proc; cur_proc = cur_proc->next)
-        {
-            const Process* task = cur_proc->value;
-            if( !strncmp(task->name, name, LINUX_COMM_NAME_SIZE) ){
+   ProcessList *procs = linux_get_process_list(os);
+   if(procs){
+      for (ProcessList* cur_proc = procs; cur_proc; cur_proc = cur_proc->next)
+      {
+         const Process* task = cur_proc->value;
+         if( !strncmp(task->name, name, LINUX_COMM_NAME_SIZE) ){
             ProcessInfo *pi = g_memdup(task->info, sizeof(ProcessInfo));
-                qapi_free_ProcessList(procs);
+            qapi_free_ProcessList(procs);
             return pi;
-            }
-        }
-        qapi_free_ProcessList(procs);
-    }
+         }
+      }
+     qapi_free_ProcessList(procs);
+   }
 
    return NULL;
 }
@@ -2047,21 +2260,21 @@ static ProcessInfo *linux_get_processinfo_by_name(OSHandler* os, const char *nam
 // Object setup: constructor
 static void linux_initfn(Object *obj)
 {
-    OSHandler *os = OSHANDLER(obj);
-    Linux *l = LINUX(os);
+   OSHandler *os = OSHANDLER(obj);
+   Linux *l = LINUX(os);
 
-    qstring_append(os->process_header, "\t\tTGID \tNAME");
+   // string to be printed for the process listing header
+   qstring_append(os->process_header, "\t\tTGID \tNAME");
 
-    object_property_add_uint64_ptr2(obj, "task_mm_offset", &(l->task_mm_offset), NULL);
-    object_property_add_uint64_ptr2(obj, "task_pid_offset", &(l->task_pid_offset), NULL);
-    object_property_add_uint64_ptr2(obj, "task_comm_offset", &(l->task_comm_offset), NULL);
-    object_property_add_uint64_ptr2(obj, "task_fs_offset", &(l->task_fs_offset), NULL);
-    object_property_add_uint64_ptr2(obj, "do_trap", &(l->do_trap), NULL);
-    object_property_add_uint64_ptr2(obj, "vmalloc_base", &(l->vmalloc_base), NULL);
-    object_property_add_uint64_ptr2(obj, "page_offset_base", &(l->page_offset_base), NULL);
-    object_property_add_uint64_ptr2(obj, "do_divide_error", &(l->do_divide_error), NULL);
-    object_property_add_uint64_ptr2(obj, "mm_struct_pgd_offset", &(l->mm_struct_pgd_offset), NULL);
-    object_property_add_uint64_ptr2(obj, "vm_area_file_offset", &(l->vm_area_file_offset), NULL);
+   object_property_add_uint64_ptr2(obj, "task_mm_offset", &(l->task_mm_offset), NULL);
+   object_property_add_uint64_ptr2(obj, "task_pid_offset", &(l->task_pid_offset), NULL);
+   object_property_add_uint64_ptr2(obj, "task_comm_offset", &(l->task_comm_offset), NULL);
+   object_property_add_uint64_ptr2(obj, "task_fs_offset", &(l->task_fs_offset), NULL);
+   object_property_add_uint64_ptr2(obj, "task_pids_offset", &(l->task_pids_offset), NULL);
+   object_property_add_uint64_ptr2(obj, "do_trap", &(l->do_trap), NULL);
+   object_property_add_uint64_ptr2(obj, "vmalloc_base", &(l->vmalloc_base), NULL);
+   object_property_add_uint64_ptr2(obj, "page_offset_base", &(l->page_offset_base), NULL);
+   object_property_add_uint64_ptr2(obj, "do_divide_error", &(l->do_divide_error), NULL);
 }
 
 // Object setup: destructor

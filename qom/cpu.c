@@ -366,7 +366,6 @@ static void cpu_common_initfn(Object *obj)
     cpu->nr_cores = 1;
     cpu->nr_threads = 1;
     cpu->rapid_analysis = NULL;
-    cpu->active_bp = NULL;
     cpu->register_control_initialized = false;
 
     qemu_mutex_init(&cpu->work_mutex);

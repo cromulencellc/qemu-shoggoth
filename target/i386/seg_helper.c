@@ -961,7 +961,6 @@ static void do_interrupt64(CPUX86State *env, int intno, int is_int,
                    get_seg_base(e1, e2),
                    get_seg_limit(e1, e2),
                    e2);
-
     env->eip = offset;
 }
 #endif
@@ -980,6 +979,7 @@ void helper_syscall(CPUX86State *env, int next_eip_addend)
 void helper_syscall(CPUX86State *env, int next_eip_addend)
 {
     int selector;
+    CPUState *cpu = CPU(x86_env_get_cpu(env));
 
     if( is_syscall_instrumentation_enabled() ) {
         // rdi	rsi	rdx	r10	r8	r9
@@ -994,7 +994,7 @@ void helper_syscall(CPUX86State *env, int next_eip_addend)
     }
 
     if( is_rapid_analysis_active() ){
-        if( rapid_analysis_handle_syscall(7,
+        if( rapid_analysis_handle_syscall(cpu, 7,
                        env->regs[R_EAX],
                        env->regs[R_EDI],
                        env->regs[R_ESI],
@@ -1002,6 +1002,7 @@ void helper_syscall(CPUX86State *env, int next_eip_addend)
                        env->regs[R_R10],
                        env->regs[R_R8],
                        env->regs[R_R9]) ){
+            env->eip += next_eip_addend;
             return;
         }
     }
@@ -1107,6 +1108,18 @@ void helper_sysret(CPUX86State *env, int dflag)
                                DESC_G_MASK | DESC_B_MASK | DESC_P_MASK |
                                DESC_S_MASK | (3 << DESC_DPL_SHIFT) |
                                DESC_W_MASK | DESC_A_MASK);
+    }
+
+    if( is_syscall_exit_instrumentation_enabled() ) {
+        // rdi	rsi	rdx	r10	r8	r9
+        notify_syscall_exit(7,
+                       env->regs[R_EAX],
+                       env->regs[R_EDI],
+                       env->regs[R_ESI],
+                       env->regs[R_EDX],
+                       env->regs[R_R10],
+                       env->regs[R_R8],
+                       env->regs[R_R9]);
     }
 }
 #endif
@@ -2296,6 +2309,7 @@ void helper_lret_protected(CPUX86State *env, int shift, int addend)
 void helper_sysenter(CPUX86State *env)
 {
     // The syscall number is RAX
+    CPUState *cpu = CPU(x86_env_get_cpu(env));
     if( is_syscall_instrumentation_enabled() ) {
         notify_syscall(7,
                        env->regs[R_EAX],
@@ -2308,7 +2322,7 @@ void helper_sysenter(CPUX86State *env)
     }
 
     if( is_rapid_analysis_active() ){
-        if( rapid_analysis_handle_syscall(7,
+        if( rapid_analysis_handle_syscall(cpu, 7,
                        env->regs[R_EAX],
                        env->regs[R_EDI],
                        env->regs[R_ESI],
@@ -2388,6 +2402,18 @@ void helper_sysexit(CPUX86State *env, int dflag)
     }
     env->regs[R_ESP] = env->regs[R_ECX];
     env->eip = env->regs[R_EDX];
+
+    if( is_syscall_exit_instrumentation_enabled() ) {
+        // rdi	rsi	rdx	r10	r8	r9
+        notify_syscall_exit(7,
+                       env->regs[R_EAX],
+                       env->regs[R_EDI],
+                       env->regs[R_ESI],
+                       env->regs[R_EDX],
+                       env->regs[R_R10],
+                       env->regs[R_R8],
+                       env->regs[R_R9]);
+    }
 }
 
 target_ulong helper_lsl(CPUX86State *env, target_ulong selector1)

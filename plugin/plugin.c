@@ -19,6 +19,7 @@
 #include "plugin/plugin.h"
 #include "qemu/option.h"
 #include "qemu-options.h"
+#include "plugin/plugin_mgr.h"
 
 #include <stdlib.h>
 #include <dlfcn.h>
@@ -79,7 +80,7 @@ static PluginObject *plugin_create_instance(Plugin *this, const char *args)
         args_in = args + 1;
     }
     
-    PluginObject *po = plugin_object_create(this->type_info->name, args_in);
+    PluginObject *po = plugin_object_create(this->type_info.name, args_in);
     PluginObjectClass *po_class = PLUGIN_OBJECT_GET_CLASS(po);
     QemuOpts *plugin_options = NULL;
 
@@ -117,7 +118,6 @@ static void plugin_initfn(Object *obj)
     p->dl_handle = NULL;
     p->options = NULL;
     p->commands = NULL;
-    p->type_info = NULL;
     p->loader_pattern = NULL;
     p->loader_type = NULL;
 }
@@ -135,7 +135,6 @@ static void plugin_finalize(Object *obj)
 
     p->options = NULL;
     p->commands = NULL;
-    p->type_info = NULL;
     p->loader_pattern = NULL;
     p->loader_type = NULL;
 }
@@ -201,11 +200,15 @@ Plugin *plugin_create_extended(Plugin *base, const char *name, const char *file_
     snprintf(p->plugin_name, MAX_PLUGIN_NAME, "%s", name);
     snprintf(p->plugin_path, PATH_MAX, "%s", file_path);
 
-    // Copy over the dynamic and setup information
+    // Copy over the dynamic and type information
+    p->type_info = *base->loader_type;
     p->dl_handle = base->dl_handle;
     p->options = base->options;
     p->commands = base->commands;
-    p->type_info = base->loader_type;
+
+    // Change the plugin type and register the extended type
+    p->type_info.name = p->plugin_name;
+    type_register_static(&p->type_info);
 
     return p;
 }
@@ -213,8 +216,8 @@ Plugin *plugin_create_extended(Plugin *base, const char *name, const char *file_
 void qemu_plugin_register_type(void *opaque, TypeInfo *plugin_type)
 {
     Plugin *p = PLUGIN(OBJECT(opaque));
-    type_register_static(plugin_type);
-    p->type_info = plugin_type;
+    p->type_info = *plugin_type;
+    type_register_static(&p->type_info);
 }
 
 void qemu_plugin_register_options(void *opaque, QemuOptsList *opts)
@@ -232,7 +235,19 @@ void qemu_plugin_register_commands(void *opaque, QemuOptsList *commands)
 void qemu_plugin_register_loader(void *opaque, const char *pattern, TypeInfo *plugin_subtype)
 {
     Plugin *p = PLUGIN(OBJECT(opaque));
-    type_register_static(plugin_subtype);
     p->loader_pattern = pattern;
     p->loader_type = plugin_subtype;
+}
+
+PluginObject *qemu_plugin_find_plugin(const char *name)
+{
+    PluginInstanceList *pil;
+    PLUGIN_FOREACH(pil) {
+        PluginObject *plugin = pil->instance;
+        if(!strcmp(object_get_typename(OBJECT(plugin)), name)){
+            return plugin;
+        }
+    }
+
+    return NULL;
 }

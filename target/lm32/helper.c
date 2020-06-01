@@ -60,7 +60,7 @@ void lm32_breakpoint_insert(CPULM32State *env, int idx, target_ulong address)
 {
     LM32CPU *cpu = lm32_env_get_cpu(env);
 
-    cpu_breakpoint_insert(CPU(cpu), address, BP_CPU, NULL,
+    cpu_breakpoint_insert(CPU(cpu), address, BP_CPU,
                           &env->cpu_breakpoint[idx]);
 }
 

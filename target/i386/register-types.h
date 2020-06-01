@@ -1,16 +1,19 @@
- /*
- * Authors:
- *  Adam Critchley <adamc@cromulence.com>
+/*
+ * Rapid Analysis QEMU System Emulator
  *
- *  Government Funds with Cromulence LLC IP
+ * Copyright (c) 2020 Cromulence LLC
+ *
+ * Distribution Statement A
+ *
+ * Approved for Public Release, Distribution Unlimited
+ *
+ * Authors:
+ *  Adam Critchley <shoggoth@cromulence.com>
+ *
+ * This work is licensed under the terms of the GNU GPL, version 2 or later.
+ * See the COPYING file in the top-level directory.
  * 
- *  Neither party is granted any right or license other than the licenses
- *  and covenants expressly set out herein. Other than the licenses and covenants
- *  expressly set out herein, Cromulence LLC retains all right, title and interest to
- *  Reference Code and Technology Specifications and You retain all right, title and interest
- *  in Your Modifications and associated specifications. Except as expressly permitted
- *  herein, You must not otherwise use any package, class or interface naming conventions
- *  that appear to originate from Original Contributor.
+ * The creation of this code was funded by the US Government.
  */
 
 #ifndef __REGISTER_TYPES_H__

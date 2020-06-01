@@ -22,6 +22,7 @@
 #include "plugin/cpu_cb.h"
 #include "plugin/net_cb.h"
 #include "plugin/vm_cb.h"
+#include "plugin/cli_cb.h"
 #include "plugin/plugin_mgr.h"
 #include "migration/snapshot.h"
 #include "cpu.h"
@@ -88,9 +89,9 @@ void notify_ra_stop(CPUState *cpu, SHA1_HASH_TYPE job_hash)
                 // Free the pointers (not RST though)
                 if (result_message) g_free(result_message);
                 if (work_results) g_free(work_results);                    
-            }             
+            }
         }
-    }    
+    }
 }
 
 void notify_ra_idle(void)
@@ -161,12 +162,12 @@ void notify_write_memory(CPUState *cs, uint64_t paddr, const uint8_t *value, int
    PluginInstanceList *p = NULL;
    QLIST_FOREACH(p, &plugin_instance_list, next)
    {
-        // Check if the callback is set
-        if (p->instance->cb.on_memory_write)
-        {
-            // Call the plugin callback
-            p->instance->cb.on_memory_write(p->instance, paddr, value, ram_ptr, size);
-        }
+       // Check if the callback is set
+       if (p->instance->cb.on_memory_write)
+       {
+           // Call the plugin callback
+           p->instance->cb.on_memory_write(p->instance, paddr, value, ram_ptr, size);
+       }
    }
 }
 
@@ -180,14 +181,18 @@ void notify_breakpoint_hit(CPUState *cs, OSBreakpoint* bp)
     QLIST_FOREACH(p, &plugin_instance_list, next)
     {
         // Check if the callback is set
-        if (p->instance->cb.on_breakpoint_hit)
+        if (p->instance->cb.on_breakpoint)
         {
             vaddr pc = cpu_class->get_pc(cs);
+            int bp_id = -1;
+            if(bp){
+                bp_id = bp->id;
+            }
 
             // Call the plugin callback
-            p->instance->cb.on_breakpoint_hit(p->instance, cs->cpu_index, pc, bp->id);
+            p->instance->cb.on_breakpoint(p->instance, cs->cpu_index, pc, bp_id);
         }
-    }    
+    }
 }
 
 void notify_exception(int32_t exception)
@@ -202,7 +207,7 @@ void notify_exception(int32_t exception)
             // Call the plugin callback
             p->instance->cb.on_exception(p->instance, exception);
         }
-    } 
+    }
 }
 
 void notify_syscall(uint64_t number, ...)
@@ -220,9 +225,29 @@ void notify_syscall(uint64_t number, ...)
             // Call the plugin callback
             p->instance->cb.on_syscall(p->instance, number, valist);
         }
-    } 
+    }
 
-    va_end(valist); 
+    va_end(valist);
+}
+
+void notify_syscall_exit(uint64_t number, ...)
+{
+    va_list valist;
+    va_start(valist, number);
+
+    // Loop through the plugins
+    PluginInstanceList *p = NULL;
+    QLIST_FOREACH(p, &plugin_instance_list, next)
+    {
+        // Check if the callback is set
+        if (p->instance->cb.on_syscall_exit)
+        {
+            // Call the plugin callback
+            p->instance->cb.on_syscall_exit(p->instance, number, valist);
+        }
+    }
+
+    va_end(valist);
 }
 
 void notify_interrupt(int mask)
@@ -237,7 +262,7 @@ void notify_interrupt(int mask)
             // Call the plugin callback
             p->instance->cb.on_interrupt(p->instance, mask);
         }
-    } 
+    }
 }
 
 void notify_receving_packet(uint8_t **pkt_buf, uint32_t *pkt_size)
@@ -267,7 +292,22 @@ void notify_sending_packet(uint8_t **pkt_buf, uint32_t *pkt_size)
             // Call the plugin callback
             p->instance->cb.on_packet_send(p->instance, pkt_buf, pkt_size);
         }
-    } 
+    }
+}
+
+void notify_vm_startup(void)
+{
+    // Loop through the plugins
+    PluginInstanceList *p = NULL;
+    QLIST_FOREACH(p, &plugin_instance_list, next)
+    {
+        // Check if the on_vm_startup callback is set
+        if (p->instance->cb.on_vm_startup)
+        {
+            // Call the plugin callback
+            p->instance->cb.on_vm_startup(p->instance);                
+        }
+    }
 }
 
 void notify_vm_shutdown(void)
@@ -276,11 +316,30 @@ void notify_vm_shutdown(void)
     PluginInstanceList *p = NULL;
     QLIST_FOREACH(p, &plugin_instance_list, next)
     {
-        // Check if the on_packet_send callback is set
+        // Check if the on_vm_shutdown callback is set
         if (p->instance->cb.on_vm_shutdown)
         {
             // Call the plugin callback
             p->instance->cb.on_vm_shutdown(p->instance);                
         }
     }
+}
+
+bool notify_command(const char *cmd, const char *args)
+{
+    // Loop through the plugins
+    PluginInstanceList *p = NULL;
+    QLIST_FOREACH(p, &plugin_instance_list, next)
+    {
+        // Check if the on_command callback is set
+        if (p->instance->cb.on_command)
+        {
+            // Call the plugin callback
+            if(p->instance->cb.on_command(p->instance, cmd, args)){
+                return true;
+            }
+        }
+    }
+
+    return false;
 }

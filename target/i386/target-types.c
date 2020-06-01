@@ -8,7 +8,7 @@
  * Approved for Public Release, Distribution Unlimited
  *
  * Authors:
- *  Adam Critchley <adamc@cromulence.com>
+ *  Adam Critchley <shoggoth@cromulence.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -170,39 +170,58 @@ int get_target_register_id(const char *reg_name)
     return -1;
 }
 
+int remove_target_breakpoint(CPUState *cpu, uint64_t bp_addr, uint64_t length, int bp_flags)
+{
+    int err = 0;
+
+    if (kvm_enabled())
+    {
+        err = kvm_remove_breakpoint(cpu, bp_addr, length, bp_flags);
+        if(err) {
+            return -1;
+        }
+    }else{
+        switch (bp_flags) {
+            case GDB_BREAKPOINT_SW:
+            case GDB_BREAKPOINT_HW:
+                err = cpu_breakpoint_remove(cpu, bp_addr, BP_GDB);
+                if (err) {
+                    return -1;
+                }
+                break;
+            default:
+                return -ENOSYS;
+        }
+    }
+
+    return 1;
+}
+
 int set_target_breakpoint(CPUState *cpu, uint64_t bp_addr, uint64_t length, int bp_flags)
 {
     int err = 0;
-    ProcessInfo *pi = NULL;
 
-    if( is_oshandler_active() ){
-        OSHandler *os_handler = oshandler_get_instance();
-        OSHandlerClass *os_cc = OSHANDLER_GET_CLASS(os_handler);
-
-        pi = os_cc->get_processinfo_by_active(os_handler, cpu);
-    }
-
-    if (kvm_enabled()) 
+    if (kvm_enabled())
     {
         err = kvm_insert_breakpoint(cpu, bp_addr, length, bp_flags);
         if(err) {
             return -1;
         }
+    }else{
+        switch (bp_flags) {
+            case GDB_BREAKPOINT_SW:
+            case GDB_BREAKPOINT_HW:
+                err = cpu_breakpoint_insert(cpu, bp_addr, BP_GDB, NULL);
+                if (err) {
+                    return -1;
+                }
+                break;
+            default:
+                return -ENOSYS;
+        }
     }
 
-    switch (bp_flags) {
-        case GDB_BREAKPOINT_SW:
-        case GDB_BREAKPOINT_HW:
-            err = cpu_breakpoint_insert(cpu, bp_addr, BP_GDB, pi, NULL);
-            if (err) {
-                return -1;
-            }
-            break;
-        default:
-            return -ENOSYS;
-    }  
-
-    return 1;  
+    return 1;
 }
 
 uint8_t get_target_cpu_register(CPUState *cpu, int reg_id, uint8_t **data)

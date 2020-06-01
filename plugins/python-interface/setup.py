@@ -7,7 +7,7 @@ setuptools.setup(
     name="pyqemu",
     version="0.1",
     author="Cromulence LLC",
-    author_email="opensource@cromulence.com",
+    author_email="shoggoth@cromulence.com",
     description="Python interface for plugins to interface with Shoggoth",
     long_description=long_desc,
     long_description_content_type="text/markdown",

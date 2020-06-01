@@ -58,7 +58,6 @@
 #include "io/channel-buffer.h"
 #include "io/channel-file.h"
 #include "sysemu/replay.h"
-#include "qemu/benchmark.h"
 #include "block/block_int.h"
 #include "qapi/qmp/qdict.h"
 #include "qjson.h"

@@ -46,7 +46,7 @@ struct Plugin {
     void *dl_handle;
     char plugin_name[MAX_PLUGIN_NAME];
     char plugin_path[PATH_MAX];
-    TypeInfo *type_info;
+    TypeInfo type_info;
     QemuOptsList *options;
     QemuOptsList *commands;
     const char *loader_pattern;
@@ -69,6 +69,8 @@ void qemu_plugin_register_type(void *opaque, TypeInfo *plugin_type);
 void qemu_plugin_register_options(void *opaque, QemuOptsList *opts);
 void qemu_plugin_register_commands(void *opaque, QemuOptsList *commands);
 void qemu_plugin_register_loader(void *opaque, const char *pattern, TypeInfo *plugin_subtype);
+
+PluginObject *qemu_plugin_find_plugin(const char *name);
 
 Plugin *plugin_create(const char *name, const char *file_path);
 Plugin *plugin_create_extended(Plugin *base, const char *name, const char *file_path);

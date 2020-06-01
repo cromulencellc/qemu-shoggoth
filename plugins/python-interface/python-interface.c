@@ -23,6 +23,7 @@
 // This is the interface to QEMU
 #include "qemu/qemu-plugin.h"
 #include "plugin/plugin-object.h"
+#include "plugin/plugin-command.h"
 #include "plugin/qemu-registers.h"
 #include "plugin/qemu-memory.h"
 #include "plugin/qemu-processes.h"
@@ -36,7 +37,10 @@
 #include "qapi/qapi-commands-oshandler.h"
 #include "python-qapi-commands.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/hw_accel.h"
 #include "monitor/monitor.h"
+#include "migration/snapshot.h"
+#include "qemu/timer.h"
 
 // These macros define object operations
 #define TYPE_PYTHON "python-interface"
@@ -86,11 +90,14 @@ struct PythonCallbacks
     PyObject *memory_read;
     PyObject *memory_write;
     PyObject *on_syscall;
+    PyObject *on_syscall_exit;
     PyObject *vm_change_state_handler;
     PyObject *on_interrupt;
     PyObject *on_packet_recv;
     PyObject *on_packet_send;
+    PyObject *on_vm_startup;
     PyObject *on_vm_shutdown;
+    PyObject *on_command;
 };
 
 struct PythonInterface 
@@ -119,6 +126,9 @@ struct PythonPluginObjectClass
 {
     PythonInterfaceClass parent;
 };
+
+static QList *PyQList_AsQList(PyObject *qobj);
+static QDict *PyQDict_AsQDict(PyObject *qobj);
 
 static void python_call_check(void)
 {
@@ -195,26 +205,12 @@ static void python_on_ra_start(void *opaque, CommsWorkItem *work)
     // For each work item, add a pointer and type id
     QLIST_FOREACH(wi, &work->entry_list, next)
     {
-        PyObject *entry, *offset, *entry_type;
-        
-        // Create a tuple
-        entry = PyTuple_New(2);
-        python_error_check(entry);
+        PyObject *entry;
 
-        // Create the offset 
-        offset = PyLong_FromLong(wi->offset);
-        python_error_check(offset);
-
-        // create the type id
-        entry_type = PyLong_FromLong(wi->entry_type);
-        python_error_check(entry_type);        
-
-        // Fill the tuple and add it to the list
-        python_put_check(PyTuple_SetItem(entry, 0, offset));
-        python_put_check(PyTuple_SetItem(entry, 1, entry_type));
+        // Fill the tuple with the offset and type id then put it in the list
+        entry = Py_BuildValue("Ii", wi->offset, wi->entry_type);
         python_put_check(PyList_Append(item_list, entry));
         Py_DECREF(entry);
-      
     }
 
     // Add the list to the work item
@@ -254,7 +250,7 @@ static void python_on_ra_stop(void *opaque, CommsResultsItem *work_results)
     // Add the byte string to the work item
     python_put_check(PyObject_SetAttrString(comms_message, "buffer", buffer));   
 
-    // Build an args tuple 
+    // Build an args tuple from the work item
     callback_args = PyTuple_New(1);
     python_error_check(callback_args);
     python_put_check(PyTuple_SetItem(callback_args, 0, comms_message)); 
@@ -284,63 +280,34 @@ static void python_on_ra_idle(void *opaque)
 static void python_on_execute_instruction(void *opaque, uint64_t vaddr, void *addr)
 {
     // Variables
-    PyObject *code_addr, *code, *callback_args;
+    PyObject *callback_args;
     PythonInterface *p = PYTHON(opaque);
 
-    // convert the code address to python int
-    code_addr = PyLong_FromUnsignedLong(vaddr);
-    python_error_check(code_addr);
-
-    // convert the code segment into a byte array
-    // We're going to make the length 20 
-    code = PyByteArray_FromStringAndSize((const char *)addr, 20);
-    python_error_check(code);
-
     // Create a tuple to contain arguments
-    callback_args = PyTuple_New(2);
+    callback_args = Py_BuildValue("Ky#", vaddr, addr, 15);
     python_error_check(callback_args);
-
-    // Set args
-    python_put_check(PyTuple_SetItem(callback_args, 0, code_addr)); 
-    python_put_check(PyTuple_SetItem(callback_args, 1, code)); 
 
     // Call the callback and check for an error
     PyObject_CallObject(p->py_callbacks.execute_instruction, callback_args);
-    python_call_check(); 
+    python_call_check();
 
     // decref
-    Py_DECREF(code_addr);
-    Py_DECREF(code);
+    Py_DECREF(callback_args);
 }
 
-static void python_on_breakpoint_hit(void *opaque, int cpu_idx, uint64_t vaddr, int bp_id)
+static void python_on_breakpoint(void *opaque, int cpu_idx, uint64_t vaddr, int bp_id)
 {
     // Variables
-    PyObject *address, *id, *callback_args, *cpu_id;
+    PyObject *callback_args;
     PythonInterface *p = PYTHON(opaque);
 
-    // Convert the cpu index to a python object
-    cpu_id = PyLong_FromLong(cpu_idx);
-    python_error_check(cpu_id);
-
-    // Convert the breakpoint address to a python object
-    address = PyLong_FromUnsignedLong(vaddr);
-    python_error_check(address);
-
-    // Convert the id to python object
-    id = PyLong_FromLong(bp_id);
-    python_error_check(id);
-
-    // Build an args tuple 
-    callback_args = PyTuple_New(3);
+    // Build an args tuple from the cpu index, breakpoint address, and id
+    callback_args = Py_BuildValue("iKi", cpu_idx, vaddr, bp_id);
     python_error_check(callback_args);
-    python_put_check(PyTuple_SetItem(callback_args, 0, cpu_id));
-    python_put_check(PyTuple_SetItem(callback_args, 1, address)); 
-    python_put_check(PyTuple_SetItem(callback_args, 2, id)); 
 
     // Call the callback and check for an error
     PyObject_CallObject(p->py_callbacks.breakpoint_hit, callback_args);
-    python_call_check();  
+    python_call_check();
 
     // decref
     Py_DECREF(callback_args);      
@@ -349,21 +316,16 @@ static void python_on_breakpoint_hit(void *opaque, int cpu_idx, uint64_t vaddr, 
 static void python_on_exception(void *opaque, int32_t exception)
 {
     // Variables
-    PyObject *exception_index, *callback_args;
+    PyObject *callback_args;
     PythonInterface *p = PYTHON(opaque);
 
-    // Convert the exception index to a python object
-    exception_index = PyLong_FromLong(exception);
-    python_error_check(exception_index);
-
     // Build an args tuple 
-    callback_args = PyTuple_New(1);
+    callback_args = Py_BuildValue("(i)", exception);
     python_error_check(callback_args);
-    python_put_check(PyTuple_SetItem(callback_args, 0, exception_index)); 
 
     // Call the callback and check for an error
     PyObject_CallObject(p->py_callbacks.exception, callback_args);
-    python_call_check(); 
+    python_call_check();
 
     // decref
     Py_DECREF(callback_args); 
@@ -371,16 +333,11 @@ static void python_on_exception(void *opaque, int32_t exception)
 
 static void python_on_memory_write(void *opaque, uint64_t paddr, const uint8_t *value, void *addr, int size)
 {
-    PyObject *callback_args, *pydata, *pypaddr;
+    PyObject *callback_args;
     PythonInterface *p = PYTHON(opaque);
 
-    pypaddr = PyLong_FromUnsignedLong(paddr);
-    pydata = PyBytes_FromStringAndSize((const char *)value, size);
-
-    callback_args = PyTuple_New(3);
+    callback_args = Py_BuildValue("KKy#", paddr, value, addr, size);
     python_error_check(callback_args);
-    python_put_check(PyTuple_SetItem(callback_args, 0, pypaddr));
-    python_put_check(PyTuple_SetItem(callback_args, 1, pydata));
 
     // Call the callback and check for an error
     PyObject_CallObject(p->py_callbacks.memory_write, callback_args);
@@ -392,16 +349,11 @@ static void python_on_memory_write(void *opaque, uint64_t paddr, const uint8_t *
 
 static void python_on_memory_read(void *opaque, uint64_t paddr, uint8_t *value, void *addr, int size)
 {
-    PyObject *callback_args, *pydata, *pypaddr;
+    PyObject *callback_args;
     PythonInterface *p = PYTHON(opaque);
 
-    pypaddr = PyLong_FromUnsignedLong(paddr);
-    pydata = PyBytes_FromStringAndSize((const char *)value, size);
-
-    callback_args = PyTuple_New(3);
+    callback_args = Py_BuildValue("KKy#", paddr, value, addr, size);
     python_error_check(callback_args);
-    python_put_check(PyTuple_SetItem(callback_args, 0, pypaddr));
-    python_put_check(PyTuple_SetItem(callback_args, 1, pydata));
 
     // Call the callback and check for an error
     PyObject_CallObject(p->py_callbacks.memory_read, callback_args);
@@ -414,11 +366,11 @@ static void python_on_memory_read(void *opaque, uint64_t paddr, uint8_t *value, 
 static void python_on_syscall(void *opaque, uint64_t number, va_list args)
 {
     PythonInterface *p = PYTHON(opaque);
-    PyObject *syscall_number, *arg_list, *callback_args;
+    unsigned long syscall_number;
+    PyObject *arg_list, *callback_args;
 
     // Prepare syscall number, its the first entry in the arg list
-    syscall_number = PyLong_FromUnsignedLong(va_arg(args, uint64_t));
-    python_error_check(syscall_number);
+    syscall_number = va_arg(args, uint64_t);
 
     // Prepare list
     arg_list = PyList_New(number - 1);
@@ -431,73 +383,81 @@ static void python_on_syscall(void *opaque, uint64_t number, va_list args)
         python_put_check(PyList_SetItem(arg_list, x, PyLong_FromUnsignedLong(va_arg(args, uint64_t))));
     }
 
-    callback_args = PyTuple_New(2);
+    callback_args = Py_BuildValue("KO", syscall_number, arg_list);
     python_error_check(callback_args);
-
-    python_put_check(PyTuple_SetItem(callback_args, 0, syscall_number));
-    python_put_check(PyTuple_SetItem(callback_args, 1, arg_list));
 
     // Call the callback and check for an error
     PyObject_CallObject(p->py_callbacks.on_syscall, callback_args);
-    python_call_check();    
+    python_call_check();
 
     // decref
-    Py_DECREF(callback_args); 
+    Py_DECREF(callback_args);
+}
+
+static void python_on_syscall_exit(void *opaque, uint64_t number, va_list args)
+{
+    PythonInterface *p = PYTHON(opaque);
+    PyObject *arg_list, *callback_args;
+
+    // Prepare list
+    arg_list = PyList_New(number);
+    python_error_check(arg_list);
+
+    // place the remaining args in the list to be treated as syscall arguments
+    int x;
+    for (x = 0; x < number; ++x)
+    {
+        python_put_check(PyList_SetItem(arg_list, x, PyLong_FromUnsignedLong(va_arg(args, uint64_t))));
+    }
+
+    callback_args = Py_BuildValue("(O)", arg_list);
+    python_error_check(callback_args);
+
+    // Call the callback and check for an error
+    PyObject_CallObject(p->py_callbacks.on_syscall_exit, callback_args);
+    python_call_check();
+
+    // decref
+    Py_DECREF(callback_args);
 }
 
 static void python_change_state_handler(void *opaque, int running, RunState state)
 {
     PythonInterface *p = PYTHON(opaque);
-    PyObject *running_arg, *state_arg, *callback_args;
+    PyObject *callback_args;
 
-    running_arg = PyLong_FromLong(running);
-    python_error_check(running_arg);
-
-    state_arg = PyLong_FromLong(state);
-    python_error_check(state_arg);
-
-    callback_args = PyTuple_New(2);
+    callback_args = Py_BuildValue("KK", running, state);
     python_error_check(callback_args);
-    python_put_check(PyTuple_SetItem(callback_args, 0, running_arg));
-    python_put_check(PyTuple_SetItem(callback_args, 1, state_arg)); 
 
     PyObject_CallObject(p->py_callbacks.vm_change_state_handler, callback_args);
-    python_call_check(); 
+    python_call_check();
 
-    Py_DECREF(callback_args);   
+    Py_DECREF(callback_args);
 }
 
 static void python_on_interrupt(void *opaque, int mask)
 {
     PythonInterface *p = PYTHON(opaque);
-    PyObject *mask_arg, *callback_args;
+    PyObject *callback_args;
 
-    mask_arg = PyLong_FromLong(mask);
-    python_error_check(mask_arg);
-
-    callback_args = PyTuple_New(1);
+    callback_args = Py_BuildValue("(i)", mask);
     python_error_check(callback_args);
-    python_put_check(PyTuple_SetItem(callback_args, 0, mask_arg));  
 
     PyObject_CallObject(p->py_callbacks.on_interrupt, callback_args);
-    python_call_check(); 
+    python_call_check();
 
-    Py_DECREF(callback_args);  
+    Py_DECREF(callback_args);
 }
 
 static void python_on_packet_recv(void *opaque, uint8_t **pkt_buf, uint32_t *pkt_size)
 {
     PythonInterface *p = PYTHON(opaque);
-    PyObject *buff_arg, *buff_return, *bytes, *callback_args;
+    PyObject *buff_return, *bytes, *callback_args;
     char *replacement_data;
     Py_ssize_t len = 0;
 
-    buff_arg = PyBytes_FromStringAndSize((const char *) *pkt_buf, *pkt_size);
-    python_error_check(buff_arg);
-
-    callback_args = PyTuple_New(1);
+    callback_args = Py_BuildValue("(y#)", *pkt_buf, *pkt_size);
     python_error_check(callback_args);
-    python_put_check(PyTuple_SetItem(callback_args, 0, buff_arg)); 
 
     buff_return = PyObject_CallObject(p->py_callbacks.on_packet_recv, callback_args);
     python_error_check(buff_return);
@@ -529,22 +489,18 @@ static void python_on_packet_recv(void *opaque, uint8_t **pkt_buf, uint32_t *pkt
     }
 
     Py_DECREF(callback_args);
-    Py_DECREF(buff_return);       
+    Py_DECREF(buff_return);
 }
 
 static void python_on_packet_send(void *opaque, uint8_t **pkt_buf, uint32_t *pkt_size)
 {
     PythonInterface *p = PYTHON(opaque);
-    PyObject *buff_arg, *buff_return, *bytes, *callback_args;
+    PyObject *buff_return, *bytes, *callback_args;
     char *replacement_data;
     Py_ssize_t len = 0;
 
-    buff_arg = PyBytes_FromStringAndSize((const char *) *pkt_buf, *pkt_size);
-    python_error_check(buff_arg);
-
-    callback_args = PyTuple_New(1);
+    callback_args = Py_BuildValue("(y#)", *pkt_buf, *pkt_size);
     python_error_check(callback_args);
-    python_put_check(PyTuple_SetItem(callback_args, 0, buff_arg)); 
 
     buff_return = PyObject_CallObject(p->py_callbacks.on_packet_send, callback_args);
     python_error_check(buff_return);
@@ -575,7 +531,19 @@ static void python_on_packet_send(void *opaque, uint8_t **pkt_buf, uint32_t *pkt
     }    
         
     Py_DECREF(callback_args);
-    Py_DECREF(buff_return);             
+    Py_DECREF(buff_return);
+}
+
+static void python_on_vm_startup(void *opaque)
+{
+    PythonInterface *p = PYTHON(opaque);
+
+    // This function requires no args
+    // So, we will simply call the script
+    PyObject_CallObject(p->py_callbacks.on_vm_startup, NULL);
+
+    // Check for issues with the call
+    python_call_check();
 }
 
 static void python_on_vm_shutdown(void *opaque)
@@ -587,7 +555,26 @@ static void python_on_vm_shutdown(void *opaque)
     PyObject_CallObject(p->py_callbacks.on_vm_shutdown, NULL);
 
     // Check for issues with the call
-    python_call_check();    
+    python_call_check();
+}
+
+static bool python_on_command(void *opaque, const char *cmd, const char *args)
+{
+    PythonInterface *p = PYTHON(opaque);
+
+    PyObject *callback_args;
+
+    callback_args = Py_BuildValue("zz", cmd, args);
+    python_error_check(callback_args);
+
+    PyObject *ret = PyObject_CallObject(p->py_callbacks.on_command, callback_args);
+    python_call_check();
+
+    bool handled = (Py_True == ret);
+    Py_DECREF(callback_args);
+    Py_DECREF(ret);
+
+    return handled;
 }
 
 static PyObject *python_get_virtual_memory(PyObject *self, PyObject *args)
@@ -604,16 +591,16 @@ static PyObject *python_get_virtual_memory(PyObject *self, PyObject *args)
 
         uint8_t *data = (uint8_t *)PyByteArray_AsString(pydata);
         qemu_get_virtual_memory(cpu_id, address, size, &data);
+        return pydata;
     }
     else
     {
         char message[500];
         snprintf(message, sizeof(message), "python_get_virtual_memory requires cpu id (int), address (long int), and  size (int).");
         PyErr_SetString(PyExc_TypeError, message);
-        return NULL;
     }
 
-    return pydata;
+    Py_RETURN_NONE;
 }
 
 static PyObject *python_set_virtual_memory(PyObject *self, PyObject *args)
@@ -634,7 +621,6 @@ static PyObject *python_set_virtual_memory(PyObject *self, PyObject *args)
         char message[500];
         snprintf(message, sizeof(message), "python_set_virtual_memory requires cpu id (int), address (long int), and  data (bytearray).");
         PyErr_SetString(PyExc_TypeError, message);
-        return NULL;
     }
 
     Py_RETURN_NONE;
@@ -653,16 +639,16 @@ static PyObject *python_get_physical_memory(PyObject *self, PyObject *args)
 
         uint8_t *data = (uint8_t *)PyByteArray_AsString(pydata);
         qemu_get_physical_memory(address, size, &data);
+        return pydata;
     }
     else
     {
         char message[500];
         snprintf(message, sizeof(message), "python_get_physical_memory requires address (long int) and size (int).");
         PyErr_SetString(PyExc_TypeError, message);
-        return NULL;
     }
 
-    return pydata;
+    Py_RETURN_NONE;
 }
 
 static PyObject *python_set_physical_memory(PyObject *self, PyObject *args)
@@ -682,7 +668,6 @@ static PyObject *python_set_physical_memory(PyObject *self, PyObject *args)
         char message[500];
         snprintf(message, sizeof(message), "python_set_physical_memory requires address (long int) and data (bytearray).");
         PyErr_SetString(PyExc_TypeError, message);
-        return NULL;
     }
 
     Py_RETURN_NONE;
@@ -696,68 +681,68 @@ static PyObject *python_get_cpu_register(PyObject *self, PyObject *args)
 
     if (PyArg_ParseTuple(args, "is", &cpu_id, &reg_name))
     {
-        
-        PyObject *buffer, *size;
-        uint8_t *data, amt_read;
-        int reg_id;
+        uint8_t *data;
+        int reg_id, amt_read;
 
         reg_id = qemu_get_cpu_register_id(reg_name);
-        if (reg_id < 0)
+        if (reg_id >= 0)
         {
+            amt_read = qemu_get_cpu_register(cpu_id, reg_id, &data);
+            reg_obj = Py_BuildValue("y#i", data, amt_read, amt_read);
+            python_error_check(reg_obj);
+            return reg_obj;
+        }else{
             char message[500];
             snprintf(message, sizeof(message), "%s is not a valid register", reg_name);
             PyErr_SetString(PyExc_ValueError, message);
-            return NULL;
-        }
-
-        amt_read = qemu_get_cpu_register(cpu_id, reg_id, &data);
-
-        buffer = PyByteArray_FromStringAndSize((const char *)data, amt_read);
-        python_error_check(buffer);
-
-        size = PyLong_FromLong(amt_read);
-        python_error_check(size);        
-
-        reg_obj = PyTuple_New(2);
-        python_error_check(reg_obj);
-        python_put_check(PyTuple_SetItem(reg_obj, 0, buffer)); 
-        python_put_check(PyTuple_SetItem(reg_obj, 1, size));
+	}
     }
     else
     {
         char message[500];
         snprintf(message, sizeof(message), "python_get_cpu_register requires cpu id (int) and register name (string).");
         PyErr_SetString(PyExc_TypeError, message);
-        return NULL;
     }
 
-    return reg_obj;
+    Py_RETURN_NONE;
 }
 
 static PyObject *python_set_breakpoint(PyObject *self, PyObject *args)
 {
-    BP_ID* result = NULL;
+    OSBreakpoint* result = NULL;
     uint64_t bp_adder = 0;
-    uint64_t pid =0;
-    Error* err = NULL;
+    uint64_t process_pid = 0;
+    int is_hwbp = 0;
 
-    if (PyArg_ParseTuple(args, "iK", &pid, &bp_adder))
+    if (PyArg_ParseTuple(args, "iKp", &process_pid, &bp_adder, &is_hwbp))
     {
-        result = qmp_os_set_breakpoint(pid, bp_adder, &err);
-
-        if (err)
-        {
-            PyErr_SetString(continue_vm_error, error_get_pretty(err));
-            return NULL;
+        OSPid os_pid = NULL_PID;
+        if(process_pid > 0){
+            os_pid = qemu_get_ospid(process_pid);
         }
-        return PyLong_FromLong(result->id);
+
+        OSBreakpointType bp_type = OS_BREAKPOINT_SW;
+        if(is_hwbp){
+            bp_type = OS_BREAKPOINT_HW;
+        }
+    
+        result = qemu_set_os_breakpoint_full(os_pid, bp_adder, 1, bp_type);
+
+        if(os_pid != NULL_PID){
+            qemu_free_ospid(os_pid);
+        }
+
+        if (result){
+            return PyLong_FromLong(result->id);
+        }
+
+        PyErr_SetString(continue_vm_error, "python_set_breakpoint failed to set breakpoint on address");
     }
     else
     {
         char message[500];
-        snprintf(message, sizeof(message), "python_set_breakpoint requires address (uint64_t).");
+        snprintf(message, sizeof(message), "python_set_breakpoint requires process pid (int), address (uint64_t), and is_hardware (bool).");
         PyErr_SetString(PyExc_TypeError, message);
-        return NULL;
     }
     
     Py_RETURN_NONE;
@@ -766,25 +751,21 @@ static PyObject *python_set_breakpoint(PyObject *self, PyObject *args)
 static PyObject *python_clear_breakpoint(PyObject *self, PyObject *args)
 {
     uint64_t bp_id = 0;
-    Error* err = NULL;
 
     if (PyArg_ParseTuple(args, "K", &bp_id))
     {
-        qmp_os_clear_breakpoint(bp_id, &err);
-
-        if (err)
-        {
-            PyErr_SetString(continue_vm_error, error_get_pretty(err));
-            return NULL;  
+        OSBreakpoint *bp = qemu_find_os_breakpoint(bp_id);
+        if(bp){
+            qemu_remove_os_breakpoint(bp);
+        }else{
+            PyErr_SetString(continue_vm_error, "python_clear_breakpoint failed to find breakpoint with id");
         }
-        Py_RETURN_NONE;
     }
     else
     {
         char message[500];
         snprintf(message, sizeof(message), "python_clear_breakpoint requires BP_ID (uint64_t).");
         PyErr_SetString(PyExc_TypeError, message);
-        return NULL;        
     }
     
     Py_RETURN_NONE;    
@@ -808,7 +789,7 @@ static PyObject *python_set_cpu_register(PyObject *self, PyObject *args)
             char message[500];
             snprintf(message, sizeof(message), "%s is not a valid register", reg_name);
             PyErr_SetString(PyExc_ValueError, message);
-            return NULL;
+            Py_RETURN_NONE; 
         }
 
         qemu_set_cpu_register(cpu_id, reg_id, size, data);
@@ -818,7 +799,6 @@ static PyObject *python_set_cpu_register(PyObject *self, PyObject *args)
         char message[500];
         snprintf(message, sizeof(message), "python_set_cpu_register requires cpu id (int), register name (string), and data (bytearray).");
         PyErr_SetString(PyExc_TypeError, message);
-        return NULL;
     }
 
     Py_RETURN_NONE; 
@@ -847,18 +827,15 @@ static PyObject *python_get_register_names(PyObject *self, PyObject *args)
     return pyregs;
 }
 
-static QList *PyQList_AsQList(PyObject *qobj);
-static QDict *PyQDict_AsQDict(PyObject *qobj);
-
 static int PyQObject_Determine_Type(PyObject *qobj)
 {
-        PyObject *type_id = PyObject_GetAttrString(qobj, "o_type");
-        if (!type_id) return -1;
-        
-        int ret_val = PyLong_AsLong(type_id);
-        if (type_id) Py_DECREF(type_id);
+    PyObject *type_id = PyObject_GetAttrString(qobj, "o_type");
+    if (!type_id) return -1;
+    
+    int ret_val = PyLong_AsLong(type_id);
+    if (type_id) Py_DECREF(type_id);
 
-        return ret_val;
+    return ret_val;
 }
 
 static QList *PyQList_AsQList(PyObject *qobj)
@@ -1101,7 +1078,7 @@ static PyObject *python_qmp_command(PyObject *self, PyObject *args)
     {
         QDict* qdict = PyQDict_AsQDict(qmp);
         if (PyErr_Occurred()) {
-            return NULL;
+            Py_RETURN_NONE;
         }
         QObject* request = QOBJECT(qdict);
         QDict* result = NULL;
@@ -1110,7 +1087,7 @@ static PyObject *python_qmp_command(PyObject *self, PyObject *args)
         if (qdict_haskey(result, "error"))
         {
             PyErr_Format(PyExc_TypeError, "QMP Error: %s Description %s",  qdict_get_str(qdict_get_qdict(result, "error"), "class"), qdict_get_str(qdict_get_qdict(result, "error"), "desc"));
-            return NULL;
+            Py_RETURN_NONE;
         }
         QString* json = qobject_to_json(QOBJECT(result));
         PyObject* res = PyUnicode_FromString(qstring_get_str(json));
@@ -1122,7 +1099,6 @@ static PyObject *python_qmp_command(PyObject *self, PyObject *args)
         char message[500];
         snprintf(message, sizeof(message), "python_qmp_command requires qmp_command (Qdict).");
         PyErr_SetString(PyExc_TypeError, message);
-        return NULL;
     }
 
     Py_RETURN_NONE;
@@ -1160,24 +1136,26 @@ static PyObject *python_qmp_emit(PyObject *self, PyObject *args)
         char message[500];
         snprintf(message, sizeof(message), "python_qmp_emit requires event number (int) and data (qdict).");
         PyErr_SetString(PyExc_TypeError, message);
-        return NULL;
     }
 
-    Py_RETURN_NONE;       
+    Py_RETURN_NONE;
 }
 
 static PyObject *python_vm_stop(PyObject *self, PyObject *args)
 {
-    Error *err = NULL;
-    stop_vm(&err);
-    
-    if (err)
+    int reason;
+
+    if (PyArg_ParseTuple(args, "i", &reason))
     {
-        PyErr_SetString(stop_vm_error, error_get_pretty(err));
-        return NULL;        
+        qemu_vm_stop(reason);
+    }else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_vm_stop requires reason (int).");
+        PyErr_SetString(PyExc_TypeError, message);
     }
 
-    Py_RETURN_NONE;     
+    Py_RETURN_NONE;
 }
 
 static PyObject *python_vm_singlestep(PyObject *self, PyObject *args)
@@ -1209,14 +1187,7 @@ static PyObject *python_vm_singlestep(PyObject *self, PyObject *args)
 
 static PyObject *python_vm_continue(PyObject *self, PyObject *args)
 {
-    Error *err = NULL;
-    continue_vm(&err);
-
-    if (err)
-    {
-        PyErr_SetString(continue_vm_error, error_get_pretty(err));
-        return NULL;
-    }
+    qemu_vm_continue();
 
     Py_RETURN_NONE;
 }
@@ -1224,8 +1195,7 @@ static PyObject *python_vm_continue(PyObject *self, PyObject *args)
 
 static PyObject *python_vm_shutdown(PyObject *self, PyObject *args)
 {
-    Error *err = NULL;
-    shutdown_vm(&err);
+    qemu_vm_shutdown();
 
     // Does not raise an error
     Py_RETURN_NONE;
@@ -1233,20 +1203,29 @@ static PyObject *python_vm_shutdown(PyObject *self, PyObject *args)
 
 static PyObject *python_vm_restart(PyObject *self, PyObject *args)
 {
-    Error *err = NULL;
-    reset_vm(&err);
+    qemu_vm_reset();
 
     // Does not raise an error
-    Py_RETURN_NONE;    
+    Py_RETURN_NONE;
 }
 
 static PyObject *python_vm_quit(PyObject *self, PyObject *args)
 {
-    Error *err = NULL;
-    quit_vm(&err);
+    qemu_vm_quit();
 
     // Does not raise an error
-    Py_RETURN_NONE;    
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_vm_get_state(PyObject *self, PyObject *args)
+{
+    PyObject *callback_args;
+
+    callback_args = Py_BuildValue("i", qemu_vm_get_state());
+    python_error_check(callback_args);
+
+    // Does not raise an error
+    return callback_args;
 }
 
 static PyObject *python_ra_add_job(PyObject *self, PyObject *args)
@@ -1290,46 +1269,471 @@ static PyObject *python_ra_add_job(PyObject *self, PyObject *args)
     }else{
         snprintf(message, sizeof(message), "Unable to parse job add arguments");
         PyErr_SetString(PyExc_ValueError, message);
-        Py_RETURN_NONE;
     }
-    // PyObject *obj = NULL;
 
-    // if (PyArg_ParseTuple(args, "iO", &queue_idx, &obj)) {
-    //     if (queue_idx < 0)
-    //     {
-    //         snprintf(message, sizeof(message), "%d is not a valid queue identifier", queue_idx);
-    //         PyErr_SetString(PyExc_ValueError, message);
-    //         Py_RETURN_NONE;
-    //     }
+    Py_RETURN_NONE;
+}
 
-    //     PyObject *msg = PyByteArray_FromObject(obj);
-    //     uint8_t *msg_data = (uint8_t *) PyByteArray_AsString(msg);
-    //     Py_ssize_t msg_size = PyByteArray_Size(msg);
-    //     CommsMessage *dup_msg = (CommsMessage *)g_memdup(msg_data, msg_size);
-    //     if(!dup_msg)
-    //     {
-    //         snprintf(message, sizeof(message), "Unable to duplicate message memory");
-    //         PyErr_SetString(PyExc_ValueError, message);
-    //         Py_RETURN_NONE;
-    //     }
+static PyObject *python_send_key(PyObject *self, PyObject *args)
+{
+    char *key_string = NULL;
 
-    //     CommsQueue *q = get_comms_queue(queue_idx);
-    //     if (!q)
-    //     {
-    //         snprintf(message, sizeof(message), "Unable to get queue number %d", queue_idx);
-    //         PyErr_SetString(PyExc_ValueError, message);
-    //         g_free(dup_msg);
-    //         Py_RETURN_NONE;
-    //     }
+    if (PyArg_ParseTuple(args, "s", &key_string)) 
+    {
+        qemu_vm_send_key(key_string);
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_send_key keys (string).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
 
-    //     if(!racomms_queue_add_job(q, dup_msg))
-    //     {
-    //         snprintf(message, sizeof(message), "Unable to parse job add message");
-    //         PyErr_SetString(PyExc_ValueError, message);
-    //         Py_RETURN_NONE;
-    //     }
-    // }
-    // Does not raise an error
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_send_key_string(PyObject *self, PyObject *args)
+{
+    char *key_string = NULL;
+
+    if (PyArg_ParseTuple(args, "s", &key_string)) 
+    {
+        qemu_vm_send_keystring(key_string);
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_send_key_string key_string (string).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_init_oshandler(PyObject *self, PyObject *args)
+{
+    char *hint_string = NULL;
+    PyObject *os_string;
+
+    if (PyArg_ParseTuple(args, "z", &hint_string))
+    {
+        const char *os_found = qemu_init_oshandler(0, hint_string);
+        printf("Found os %s!\n", os_found);
+
+        if(os_found){
+            os_string = PyByteArray_FromStringAndSize(os_found, strlen(os_found));
+            python_error_check(os_string);
+            return os_string;
+        }
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_init_oshandler os_hint (string).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_get_process_vma_list(PyObject *self, PyObject *args)
+{
+    uint64_t process_pid = 0;
+
+    if (PyArg_ParseTuple(args, "i", &process_pid) && process_pid > 0)
+    {
+        OSPid os_pid = qemu_get_ospid(process_pid);
+        if(os_pid == NULL_PID){
+            PyErr_SetString(continue_vm_error, "python_get_process_vma_list failed to find process");
+            Py_RETURN_NONE;
+        }
+
+        Process *ps = qemu_get_process(os_pid);
+        if(ps){
+            uint64_t start, end, flags, pgprot;
+            PyObject *vma_list = PyList_New(0);
+            void *next_vma = qemu_get_process_vma_first(ps);
+
+            while(next_vma)
+            {
+                PyObject *entry;
+                qemu_get_process_vma_next(ps, &next_vma, &start, &end, &flags, &pgprot, NULL);
+
+                // Fill the tuple with the vma info then put it in the list
+                entry = Py_BuildValue("KKK", start, end, flags);
+                python_put_check(PyList_Append(vma_list, entry));
+                Py_DECREF(entry);
+            }
+
+            qemu_free_process(ps);
+            qemu_free_ospid(os_pid);
+            return vma_list;
+        }
+
+        qemu_free_ospid(os_pid);
+        PyErr_SetString(continue_vm_error, "python_get_process_vma_list failed to get process information");
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_get_process_vma_list requires pid (int).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_get_process_detail_list(PyObject *self, PyObject *args)
+{
+    ProcessList *plist = qemu_get_process_list();
+    if(plist){
+        uint64_t pid, base, dir;
+        const char *name;
+        PyObject *detail_list = PyList_New(0);
+
+        for(ProcessList *p = plist; p; p = p->next)
+        {
+            PyObject *entry;
+            qemu_get_process_detail(p->value, &pid, &base, &dir, &name);
+
+            // Fill the tuple with the vma info then put it in the list
+            entry = Py_BuildValue("zKKK", name, pid, base, name);
+            python_put_check(PyList_Append(detail_list, entry));
+            Py_DECREF(entry);
+        }
+
+        qemu_free_process_list(plist);
+        return detail_list;
+    }
+
+    PyErr_SetString(continue_vm_error, "python_get_process_detail_list failed to get process information");
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_get_process_pid_by_name(PyObject *self, PyObject *args)
+{
+    char *name = NULL;
+
+    if (PyArg_ParseTuple(args, "s", &name)) 
+    {
+        OSPid pid = qemu_get_ospid_by_name(name);
+
+        if( pid != NULL_PID ){
+            return PyLong_FromLong(qemu_get_pid_by_os_process(pid));
+        }
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_get_process_pid_by_name name (string).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_get_process_pid_by_active(PyObject *self, PyObject *args)
+{
+    uint64_t cpu_idx = 0;
+
+    if (PyArg_ParseTuple(args, "i", &cpu_idx) && cpu_idx > 0)
+    {
+        OSPid pid = qemu_get_ospid_by_active(cpu_idx);
+
+        if( pid != NULL_PID ){
+            return PyLong_FromLong(qemu_get_pid_by_os_process(pid));
+        }
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_get_process_pid_by_name name (string).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_load_snapshot(PyObject *self, PyObject *args)
+{
+    char *snapshot_name;
+
+    if (PyArg_ParseTuple(args, "s", &snapshot_name))
+    {
+        Error *err = NULL;
+        load_snapshot(snapshot_name, &err);
+        if( err ){
+            PyErr_SetString(PyExc_TypeError, "Failed to load snapshot");
+        }
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_load_snapshot snapshot_name (string).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_save_snapshot(PyObject *self, PyObject *args)
+{
+    char *snapshot_name;
+
+    if (PyArg_ParseTuple(args, "s", &snapshot_name))
+    {
+        Error *err = NULL;
+        save_snapshot(snapshot_name, &err);
+        if( err ){
+            PyErr_SetString(PyExc_TypeError, "Failed to save snapshot");
+        }
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_save_snapshot snapshot_name (string).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static void python_timer_delete(PyObject *self)
+{
+    // convert pytimer to timer
+    QEMUTimer *timer = (QEMUTimer*)PyCapsule_GetPointer(self, NULL);
+
+    timer_del(timer);
+}
+
+static void python_timer_trigger(void *callable_pyobject)
+{
+    PyObject *timer = (PyObject *)callable_pyobject;
+
+    PyObject_CallObject(timer, NULL);
+    python_call_check();
+}
+
+static PyObject *python_timer_create(PyObject *self, PyObject *args)
+{
+    int clock_type;
+    PyObject *pytimer, *callable_pyobject;
+    QEMUTimer *timer;
+
+    if (PyArg_ParseTuple(args, "iO", &clock_type, &callable_pyobject))
+    {
+        if(!PyCallable_Check(callable_pyobject)){
+            PyErr_SetString(PyExc_TypeError, "Python object needs to be callable");
+            Py_RETURN_NONE;
+        }
+
+        timer = timer_new_ms(clock_type, python_timer_trigger, callable_pyobject);
+
+        // convert timer to pytimer
+        pytimer = PyCapsule_New(timer, NULL, python_timer_delete);
+
+        return pytimer;
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_timer_create clock_type (int), callable_pyobject (object)");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_timer_start(PyObject *self, PyObject *args)
+{
+    int clock_type;
+    int64_t clock_frequency;
+    PyObject *pytimer;
+    QEMUTimer *timer;
+
+    if (PyArg_ParseTuple(args, "ikO", &clock_type, &clock_frequency, &pytimer))
+    {
+        // convert pytimer to timer
+        timer = (QEMUTimer*)PyCapsule_GetPointer(pytimer, NULL);
+
+        timer_mod(timer, qemu_clock_get_ms(clock_type) + clock_frequency);
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_timer_start clock_type (int), clock_frequency (int64_t), pytimer (object)");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_save_screenshot(PyObject *self, PyObject *args)
+{
+    char *file_name;
+
+    if (PyArg_ParseTuple(args, "s", &file_name))
+    {
+        if(!qemu_vm_save_screenshot(file_name, false, NULL, false, 0)){
+            PyErr_SetString(PyExc_TypeError, "python_save_screenshot error taking screenshot");
+        }
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_save_screenshot  file_name (string)");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_is_kvm_enabled(PyObject *self, PyObject *args)
+{
+    if(kvm_enabled()){
+        Py_RETURN_TRUE;
+    }
+
+    Py_RETURN_FALSE;
+}
+
+static PyObject *python_is_tcg_enabled(PyObject *self, PyObject *args)
+{
+    if(tcg_enabled()){
+        Py_RETURN_TRUE;
+    }
+
+    Py_RETURN_FALSE;
+}
+
+static PyObject *python_get_snapshots(PyObject *self, PyObject *args)
+{
+    ImageInfoList *snapshots = NULL;
+    ImageInfoList *infoiter;
+
+    qemu_vm_get_snapshots(&snapshots);
+
+    PyObject *snaps_list = PyList_New(0);
+
+    for (infoiter = snapshots; infoiter; infoiter = infoiter->next)
+    {
+        ImageInfo *imginfo = infoiter->value;
+
+        if (imginfo->has_snapshots) {
+            SnapshotInfoList *snapiter;
+
+            for (snapiter = imginfo->snapshots; snapiter; snapiter = snapiter->next) {
+                PyObject *entry;
+                SnapshotInfo *snapinfo = snapiter->value;
+                // Fill the tuple with the snapshot info then put it in the list
+                entry = Py_BuildValue("{z:z,z:z,z:k,z:k,z:k,z:k,z:k}",
+                    "name", snapinfo->name,
+                    "id", snapinfo->id,
+                    "size", snapinfo->vm_state_size,
+                    "date_s", snapinfo->date_sec,
+                    "date_ns", snapinfo->date_nsec,
+                    "vmclock_s",snapinfo->vm_clock_sec,
+                    "vmclock_ns",snapinfo->vm_clock_nsec);
+                python_put_check(PyList_Append(snaps_list, entry));
+                Py_DECREF(entry);
+            }
+        }
+    }
+
+    qapi_free_ImageInfoList(snapshots);
+
+    return snaps_list;
+}
+
+static PyObject *python_add_command(PyObject *self, PyObject *args)
+{
+    PluginObject *po = NULL;
+    const char *plugin_name;
+    const char *cmd_name;
+    const char *cmd_desc;
+
+    if (PyArg_ParseTuple(args, "zss", &plugin_name, &cmd_name, &cmd_desc))
+    {
+        if(plugin_name){
+            po = qemu_plugin_find_plugin(plugin_name);
+            if(!po){
+                PyErr_SetString(PyExc_TypeError, "python_add_command could not find provider plugin");
+            }
+        }
+
+        qemu_command_add(po, cmd_name, cmd_desc, NULL);
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_add_command  cmd_name (string) cmd_desc (string)");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_remove_command(PyObject *self, PyObject *args)
+{
+    PluginObject *po = NULL;
+    const char *plugin_name;
+    const char *cmd_name;
+
+    if (PyArg_ParseTuple(args, "zs", &plugin_name, &cmd_name))
+    {
+        if(plugin_name){
+            po = qemu_plugin_find_plugin(plugin_name);
+            if(!po){
+                PyErr_SetString(PyExc_TypeError, "python_remove_command could not find provider plugin");
+            }
+        }
+
+        qemu_command_remove(po, cmd_name);
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_remove_command  cmd_name (string)");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_command_print(PyObject *self, PyObject *args)
+{
+    const char *print_str;
+
+    if (PyArg_ParseTuple(args, "s", &print_str))
+    {
+        qemu_command_printf("%s", print_str);
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_command_print  print_str (string)");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_command_pretty_print(PyObject *self, PyObject *args)
+{
+    const char *print_str;
+
+    if (PyArg_ParseTuple(args, "s", &print_str))
+    {
+        qemu_command_pretty_printf("%s", print_str);
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_command_pretty_print  print_str (string)");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
     Py_RETURN_NONE;
 }
 
@@ -1434,10 +1838,48 @@ static PyMethodDef pyToQemu[] = {
      "Restarts the VM."},
     {"quit_vm", python_vm_quit, METH_VARARGS,
      "Quits VM execution."},
+    {"get_vm_state", python_vm_get_state, METH_VARARGS,
+     "Returns the current state of the VM."},
     {"ra_add_job", python_ra_add_job, METH_VARARGS,
      "Add work to the rapid analysis queue."},
-    {"quit_vm", python_vm_quit, METH_VARARGS,
-     "Quits VM execution."},
+    {"send_key", python_send_key, METH_VARARGS,
+     "Send one keypress of the combined values."},
+    {"send_key_string", python_send_key_string, METH_VARARGS,
+     "Send succession of keys that correspond to string."},
+    {"init_oshandler", python_init_oshandler, METH_VARARGS,
+     "Initialize the OS handler. Will use existing OS handler otherwise it will create a new one."},
+    {"get_process_vma_list", python_get_process_vma_list, METH_VARARGS,
+     "Get a list of the VMA information in tuples."},
+    {"get_process_pid_by_name", python_get_process_pid_by_name, METH_VARARGS,
+     "Get a pid given the name."},
+    {"get_process_pid_by_active", python_get_process_pid_by_active, METH_VARARGS,
+     "Get a pid given the active process."},
+    {"load_snapshot", python_load_snapshot, METH_VARARGS,
+     "Loads a snapshot from the VM."},
+    {"save_snapshot", python_save_snapshot, METH_VARARGS,
+     "Saves a snapshot from the VM."},
+    {"qtimer_create", python_timer_create, METH_VARARGS,
+     "Create a timer for periodic notifications."},
+    {"qtimer_start", python_timer_start, METH_VARARGS,
+     "Start a timer."},
+     {"save_screenshot", python_save_screenshot, METH_VARARGS,
+     "Save a screenshot of the VM to the specified file path."},
+     {"is_kvm_enabled", python_is_kvm_enabled, METH_VARARGS,
+     "Returns true when KVM mode is enabled."},
+     {"is_tcg_enabled", python_is_tcg_enabled, METH_VARARGS,
+     "Returns true when TCG mode is enabled."},
+     {"get_snapshots", python_get_snapshots, METH_VARARGS,
+     "Returns info for the snapshots in the current block drive."},
+     {"get_process_detail_list", python_get_process_detail_list, METH_VARARGS,
+     "Get a list of all processes in the guest OS."},
+     {"add_command", python_add_command, METH_VARARGS,
+     "Add the command to this plugin\'s list of handled commands."},
+     {"remove_command", python_remove_command, METH_VARARGS,
+     "Removes the command from this plugin\'s list of handled commands."},
+     {"command_print", python_command_print, METH_VARARGS,
+     "Print to the command console."},
+     {"command_pretty_print", python_command_pretty_print, METH_VARARGS,
+     "Pretty print to the command console."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -1464,7 +1906,7 @@ static bool python_load_plugin(void *opaque, const char *path, QemuOpts *opts)
 {
     // Variables
     PluginObjectClass *poc = PLUGIN_OBJECT_GET_CLASS(opaque);
-    PyObject *inst_name, *script_loc, *args_list, *error, *plugin_load;
+    PyObject *args_list, *error, *plugin_load;
     PyObject *module_loader;
 
     PythonInterface *p = PYTHON(opaque);
@@ -1501,19 +1943,13 @@ static bool python_load_plugin(void *opaque, const char *path, QemuOpts *opts)
     // We'll use the module name we generated and the 
     // file path passed in to load a Python module from a
     // given source file.
-    inst_name = PyUnicode_FromString(p->instance_name);
-    script_loc = PyUnicode_FromString(p->script_path);
-
-    // Make sure we have valid names
-    if (inst_name && script_loc)
+    if (p->instance_name && p->script_path)
     {
         // Build args to the load_source function
         // This is a module name (we made one up) and
         // the path to the script. 
-        args_list = PyTuple_New(2);
+        args_list = Py_BuildValue("UU", p->instance_name, p->script_path);
         python_error_check(args_list);
-        PyTuple_SetItem(args_list, 0, inst_name);
-        PyTuple_SetItem(args_list, 1, script_loc);
         
         // Now we can call the load_source function
         p->script_module = PyObject_CallObject(module_loader, args_list);
@@ -1655,7 +2091,7 @@ static void python_set_callbacks(void *opaque, PluginCallbacks *callbacks)
     p->py_callbacks.breakpoint_hit = PyObject_GetAttrString(p->script_module, "on_breakpoint_hit");
     if (p->py_callbacks.breakpoint_hit && PyCallable_Check(p->py_callbacks.breakpoint_hit))
     {
-        callbacks->on_breakpoint_hit = python_on_breakpoint_hit;
+        callbacks->on_breakpoint = python_on_breakpoint;
     }
     else
     {
@@ -1712,6 +2148,16 @@ static void python_set_callbacks(void *opaque, PluginCallbacks *callbacks)
         PyErr_Clear();
     }
 
+    p->py_callbacks.on_syscall_exit = PyObject_GetAttrString(p->script_module, "on_syscall_exit");
+    if (p->py_callbacks.on_syscall_exit && PyCallable_Check(p->py_callbacks.on_syscall_exit))
+    {
+        callbacks->on_syscall_exit = python_on_syscall_exit;
+    }
+    else
+    {
+        PyErr_Clear();
+    }
+
     p->py_callbacks.vm_change_state_handler = PyObject_GetAttrString(p->script_module, "on_vm_change_state");
     if (p->py_callbacks.vm_change_state_handler && PyCallable_Check(p->py_callbacks.vm_change_state_handler))
     {
@@ -1752,10 +2198,30 @@ static void python_set_callbacks(void *opaque, PluginCallbacks *callbacks)
         PyErr_Clear();
     }
 
+    p->py_callbacks.on_vm_startup = PyObject_GetAttrString(p->script_module, "on_vm_startup");
+    if (p->py_callbacks.on_vm_startup)
+    {
+        callbacks->on_vm_startup = python_on_vm_startup;
+    }
+    else
+    {
+        PyErr_Clear();   
+    }
+
     p->py_callbacks.on_vm_shutdown = PyObject_GetAttrString(p->script_module, "on_vm_shutdown");
     if (p->py_callbacks.on_vm_shutdown)
     {
         callbacks->on_vm_shutdown = python_on_vm_shutdown;
+    }
+    else
+    {
+        PyErr_Clear();   
+    }
+
+    p->py_callbacks.on_command = PyObject_GetAttrString(p->script_module, "on_command");
+    if (p->py_callbacks.on_command)
+    {
+        callbacks->on_command = python_on_command;
     }
     else
     {
@@ -1780,11 +2246,13 @@ static void python_iface_initfn(Object *obj)
     p->py_callbacks.memory_read = NULL;
     p->py_callbacks.memory_write = NULL;
     p->py_callbacks.on_syscall = NULL;
+    p->py_callbacks.on_syscall_exit = NULL;
     p->py_callbacks.vm_change_state_handler = NULL;
     p->py_callbacks.on_interrupt = NULL;
     p->py_callbacks.on_packet_recv = NULL;
     p->py_callbacks.on_packet_send = NULL;
     p->py_callbacks.on_vm_shutdown = NULL;
+    p->py_callbacks.on_command = NULL;
 
 }
 
@@ -1876,11 +2344,16 @@ static void python_iface_finalize(Object *obj)
     {
         Py_DECREF(p->py_callbacks.on_packet_send);
         p->py_callbacks.on_packet_send = NULL;
-    }    
+    }
     if (p->py_callbacks.on_vm_shutdown)
     {
         Py_DECREF(p->py_callbacks.on_vm_shutdown);
         p->py_callbacks.on_vm_shutdown = NULL;
+    }
+    if (p->py_callbacks.on_command)
+    {
+        Py_DECREF(p->py_callbacks.on_command);
+        p->py_callbacks.on_command = NULL;
     }
 }
 
@@ -1985,8 +2458,13 @@ bool plugin_setup(void *plugin, const char *path)
     python_lib = dlopen(buf, RTLD_LAZY | RTLD_GLOBAL);
     if (!python_lib)
     {
-        printf("Python-Interface: Could not open python libraries %s\n", buf);
-        return false;
+        snprintf(buf, sizeof(buf), "libpython%d.%d.so", PY_MAJOR_VERSION, PY_MINOR_VERSION);
+        python_lib = dlopen(buf, RTLD_LAZY | RTLD_GLOBAL);
+        if (!python_lib)
+        {
+            printf("Python-Interface: Could not open python libraries %s\n", buf);
+            return false;
+        }
     }
 
     // Initialize the Python environment
@@ -2073,7 +2551,7 @@ bool plugin_setup(void *plugin, const char *path)
         if (error)
         {
             PyErr_Print();
-        } 
+        }
 
         // We have an error and need to stop 
         return false;

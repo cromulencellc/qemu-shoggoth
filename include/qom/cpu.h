@@ -29,8 +29,6 @@
 #include "qemu/queue.h"
 #include "qemu/thread.h"
 #include "ra-types.h"
-#include "qapi/qapi-types-oshandler.h"
-#include "oshandler/oshandler.h"
 
 typedef int (*WriteCoreDumpFunction)(const void *buf, size_t size,
                                      void *opaque);
@@ -239,7 +237,6 @@ typedef struct icount_decr_u16 {
 typedef struct CPUBreakpoint {
     vaddr pc;
     int flags; /* BP_* */
-    ProcessInfo *user;
     QTAILQ_ENTRY(CPUBreakpoint) entry;
 } CPUBreakpoint;
 
@@ -440,7 +437,6 @@ struct CPUState {
 
     int hvf_fd;
     Object *rapid_analysis;
-    OSBreakpoint *active_bp;
 
     bool register_control_initialized;
     /* track IOMMUs whose translations we've cached in the TCG TLB */
@@ -1057,7 +1053,7 @@ void cpu_single_step(CPUState *cpu, int enabled);
 #define BP_WATCHPOINT_HIT_WRITE 0x80
 #define BP_WATCHPOINT_HIT (BP_WATCHPOINT_HIT_READ | BP_WATCHPOINT_HIT_WRITE)
 
-int cpu_breakpoint_insert(CPUState *cpu, vaddr pc, int flags, ProcessInfo *user,
+int cpu_breakpoint_insert(CPUState *cpu, vaddr pc, int flags,
                           CPUBreakpoint **breakpoint);
 int cpu_breakpoint_remove(CPUState *cpu, vaddr pc, int flags);
 void cpu_breakpoint_remove_by_ref(CPUState *cpu, CPUBreakpoint *breakpoint);

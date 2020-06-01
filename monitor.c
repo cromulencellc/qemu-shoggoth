@@ -240,6 +240,8 @@ struct Monitor {
     guint out_watch;
     /* Read under either BQL or mon_lock, written with BQL+mon_lock.  */
     int mux_out;
+
+    void (*cmd_handler)(const char *);
 };
 
 /* Shared monitor I/O thread */
@@ -807,6 +809,11 @@ static void monitor_qapi_event_init(void)
 
 static void handle_hmp_command(Monitor *mon, const char *cmdline);
 
+void monitor_redirect_handler(Monitor *mon, void (*handler)(const char *))
+{
+    mon->cmd_handler = handler;
+}
+
 static void monitor_data_init(Monitor *mon, bool skip_flush,
                               bool use_io_thread)
 {
@@ -820,6 +827,7 @@ static void monitor_data_init(Monitor *mon, bool skip_flush,
     mon->use_io_thread = use_io_thread;
     mon->qmp.qmp_requests = g_queue_new();
     mon->qmp.qmp_responses = g_queue_new();
+    mon->cmd_handler = NULL;
 }
 
 static void monitor_data_destroy(Monitor *mon)
@@ -3476,23 +3484,27 @@ static void handle_hmp_command(Monitor *mon, const char *cmdline)
 
     trace_handle_hmp_command(mon, cmdline);
 
-    cmd = monitor_parse_command(mon, cmdline, &cmdline, mon->cmd_table);
-    if (!cmd) {
-        return;
-    }
-
-    qdict = monitor_parse_arguments(mon, &cmdline, cmd);
-    if (!qdict) {
-        while (cmdline > cmd_start && qemu_isspace(cmdline[-1])) {
-            cmdline--;
+    if( mon->cmd_handler ){
+        mon->cmd_handler(cmdline);
+    }else{
+        cmd = monitor_parse_command(mon, cmdline, &cmdline, mon->cmd_table);
+        if (!cmd) {
+            return;
         }
-        monitor_printf(mon, "Try \"help %.*s\" for more information\n",
-                       (int)(cmdline - cmd_start), cmd_start);
-        return;
-    }
 
-    cmd->cmd(mon, qdict);
-    qobject_unref(qdict);
+        qdict = monitor_parse_arguments(mon, &cmdline, cmd);
+        if (!qdict) {
+            while (cmdline > cmd_start && qemu_isspace(cmdline[-1])) {
+                cmdline--;
+            }
+            monitor_printf(mon, "Try \"help %.*s\" for more information\n",
+                        (int)(cmdline - cmd_start), cmd_start);
+            return;
+        }
+
+        cmd->cmd(mon, qdict);
+        qobject_unref(qdict);
+    }
 }
 
 static void cmd_completion(Monitor *mon, const char *name, const char *list)

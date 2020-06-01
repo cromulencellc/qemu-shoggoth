@@ -485,6 +485,30 @@ ETEXI
     },
 
 STEXI
+@item maps
+@findex maps
+Display maps for the process in focus
+ETEXI
+    {
+        .name       = "maps",
+        .args_type  = "",
+        .help       = "",
+        .cmd        = hmp_maps,
+    },
+
+STEXI
+@item debug
+@findex debug
+Change prompt to the plugin driven command interface
+ETEXI
+    {
+        .name       = "debug",
+        .args_type  = "",
+        .help       = "",
+        .cmd        = hmp_debug,
+    },
+
+STEXI
 @item ps
 @findex ps
 Get a process list

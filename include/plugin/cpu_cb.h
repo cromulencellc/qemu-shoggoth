@@ -16,9 +16,13 @@
  * The creation of this code was funded by the US Government.
  */
 
+#ifndef __CPU_CB_H__
+#define __CPU_CB_H__
+
 #include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qom/cpu.h"
+#include "oshandler/ostypes.h"
 
 void notify_exec_instruction(CPUState *cs, uint64_t vaddr);
 void notify_read_memory(CPUState *cs, uint64_t paddr, uint8_t *value, int size);
@@ -26,10 +30,14 @@ void notify_write_memory(CPUState *cs, uint64_t paddr, const uint8_t *value, int
 void notify_breakpoint_hit(CPUState *cs, OSBreakpoint* bp);
 void notify_exception(int32_t exception);
 void notify_syscall(uint64_t number, ...);
+void notify_syscall_exit(uint64_t number, ...);
 void notify_interrupt(int mask);
 
 bool is_memread_instrumentation_enabled(void);
 bool is_memwrite_instrumentation_enabled(void);
 bool is_exec_instrumentation_enabled(void);
 bool is_syscall_instrumentation_enabled(void);
+bool is_syscall_exit_instrumentation_enabled(void);
 bool is_interrupt_instrumentation_enabled(void);
+
+#endif

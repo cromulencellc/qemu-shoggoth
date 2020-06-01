@@ -24,6 +24,7 @@
 #include "qemu/help_option.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
+#include "plugin/plugin-error.h"
 #include "sysemu/sysemu.h"
 #include <fnmatch.h>
 #include "ra.h"
@@ -40,9 +41,11 @@ bool is_memread_instrumentation_enabled(void);
 bool is_memwrite_instrumentation_enabled(void);
 bool is_exec_instrumentation_enabled(void);
 bool is_syscall_instrumentation_enabled(void);
+bool is_syscall_exit_instrumentation_enabled(void);
 bool is_interrupt_instrumentation_enabled(void);
 bool is_recvpacket_instrumentation_enabled(void);
 bool is_sendpacket_instrumentation_enabled(void);
+bool is_vm_startup_instrumentation_enabled(void);
 bool is_vm_shutdown_instrumentation_enabled(void);
 bool is_ra_stop_instrumentation_enabled(void);
 
@@ -50,9 +53,11 @@ static bool memread_instrumentation_enabled = false;
 static bool memwrite_instrumentation_enabled = false;
 static bool exec_instrumentation_enabled = false;
 static bool syscall_instrumentation_enabled = false;
+static bool syscall_exit_instrumentation_enabled = false;
 static bool interrupt_instrumentation_enabled = false;
 static bool packetrecv_instrumentation_enabled = false;
 static bool packetsend_instrumentation_enabled = false;
+static bool vm_startup_instrumentation_enabled = false;
 static bool vm_shutdown_instrumentation_enabled = false;
 static bool ra_stop_instrumentation_enabled = false;
 
@@ -201,6 +206,7 @@ void plugin_init_globals(void)
     QLIST_INIT(&plugin_list);
     QLIST_INIT(&plugin_instance_list);
     build_plugin_dir_contents();
+    qemu_plugin_last_error = NULL;
 }
 
 void plugin_init_plugins(void)
@@ -220,9 +226,11 @@ void plugin_init_plugins(void)
             memwrite_instrumentation_enabled |= cb->on_memory_write != NULL;
             exec_instrumentation_enabled |= cb->on_execute_instruction != NULL;
             syscall_instrumentation_enabled |= cb->on_syscall != NULL;
+            syscall_exit_instrumentation_enabled |= cb->on_syscall_exit != NULL;
             interrupt_instrumentation_enabled |= cb->on_interrupt != NULL;
             packetrecv_instrumentation_enabled |= cb->on_packet_recv != NULL;
             packetsend_instrumentation_enabled |= cb->on_packet_send != NULL;
+            vm_startup_instrumentation_enabled |= cb->on_vm_startup != NULL;
             vm_shutdown_instrumentation_enabled |= cb->on_vm_shutdown != NULL;
             ra_stop_instrumentation_enabled |= cb->on_ra_stop != NULL;
 
@@ -288,10 +296,14 @@ bool is_exec_instrumentation_enabled(void)
     return exec_instrumentation_enabled;
 }
 
-
 bool is_syscall_instrumentation_enabled(void)
 {
-    return syscall_instrumentation_enabled;    
+    return syscall_instrumentation_enabled;
+}
+
+bool is_syscall_exit_instrumentation_enabled(void)
+{
+    return syscall_exit_instrumentation_enabled;
 }
 
 bool is_interrupt_instrumentation_enabled(void)
@@ -307,6 +319,11 @@ bool is_recvpacket_instrumentation_enabled(void)
 bool is_sendpacket_instrumentation_enabled(void)
 {
     return packetsend_instrumentation_enabled;
+}
+
+bool is_vm_startup_instrumentation_enabled(void)
+{
+    return vm_startup_instrumentation_enabled;
 }
 
 bool is_vm_shutdown_instrumentation_enabled(void)

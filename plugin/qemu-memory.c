@@ -8,7 +8,7 @@
  * Approved for Public Release, Distribution Unlimited
  *
  * Authors:
- *  Adam Critchley <adamc@cromulence.com>
+ *  Adam Critchley <shoggoth@cromulence.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -35,12 +35,10 @@ bool qemu_get_virtual_memory(int cpu_id, uint64_t address, uint8_t size, uint8_t
         CPUClass *cc = CPU_GET_CLASS(cpu);
         if (cc->memory_rw_debug) {
             if(cc->memory_rw_debug(cpu, address, *data, size, 0) != 0){
-                printf("qemu_get_virtual_memory: Cannot read data address %lX!\n", address);
                 return false;
             }
         }else{
             if(cpu_memory_rw_debug(cpu, address, *data, size, 0) != 0){
-                printf("qemu_get_virtual_memory:  Cannot read data address %lX!\n", address);
                 return false;
             }
         }
@@ -58,12 +56,10 @@ bool qemu_set_virtual_memory(int cpu_id, uint64_t address, uint8_t size, uint8_t
 
         if (cc->memory_rw_debug) {
             if(cc->memory_rw_debug(cpu, address, data, size, 1) != 0){
-                printf("qemu_get_virtual_memory:  Cannot write data address %lX!\n", address);
                 return false;
             }
         }else{
             if(cpu_memory_rw_debug(cpu, address, data, size, 1) != 0){
-                printf("qemu_get_virtual_memory:  Cannot write data address %lX!\n", address);
                 return false;
             }
         }
@@ -82,7 +78,6 @@ void qemu_get_physical_memory(uint64_t address, uint64_t size, uint8_t **data)
         // Get the pointer to physical memory in host memory.
         *data = qemu_map_ram_ptr_nofault(NULL, address, NULL);
         if (!*data) {
-            printf("qemu_get_physical_memory: No host memory for data address %lX!\n", address);
             return;
         }
     }

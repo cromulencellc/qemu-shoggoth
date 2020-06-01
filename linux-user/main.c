@@ -193,7 +193,7 @@ CPUArchState *cpu_copy(CPUArchState *env)
     QTAILQ_INIT(&new_cpu->breakpoints);
     QTAILQ_INIT(&new_cpu->watchpoints);
     QTAILQ_FOREACH(bp, &cpu->breakpoints, entry) {
-        cpu_breakpoint_insert(new_cpu, bp->pc, bp->flags, NULL, NULL);
+        cpu_breakpoint_insert(new_cpu, bp->pc, bp->flags, NULL);
     }
     QTAILQ_FOREACH(wp, &cpu->watchpoints, entry) {
         cpu_watchpoint_insert(new_cpu, wp->vaddr, wp->len, wp->flags, NULL);

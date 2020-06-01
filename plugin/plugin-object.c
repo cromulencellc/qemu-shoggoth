@@ -44,11 +44,13 @@ static void plugin_object_initfn(Object *obj)
     p->cb.on_interrupt = NULL;
     p->cb.on_exception = NULL;
     p->cb.on_syscall = NULL;
+    p->cb.on_syscall_exit = NULL;
     p->cb.on_command = NULL;
-    p->cb.on_breakpoint_hit = NULL;
+    p->cb.on_breakpoint = NULL;
     p->cb.on_execute_instruction = NULL;
     p->cb.on_packet_recv = NULL;
     p->cb.on_packet_send = NULL;
+    p->cb.on_vm_startup = NULL;
     p->cb.on_vm_shutdown = NULL;
 }
 

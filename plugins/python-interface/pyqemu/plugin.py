@@ -77,6 +77,10 @@ class CPU(object):
         return VirtualMemory(self.cpu_id, address, size)
 
     @staticmethod
+    def setBreakpoint(address, ishw):
+        return set_breakpoint(0, address, ishw)
+
+    @staticmethod
     def setPhysicalMemory(address, data):
         PhysicalMemory(address, len(data))(data)
 
@@ -145,8 +149,136 @@ class RapidAnalysis(object):
     def addJob(queue, jobmsg):
         ra_add_job(queue, bytes(jobmsg))
 
-class WorkItem(object):
+class VirtualMachine(object):
+    RUN_STATE_DEBUG = 0
+    RUN_STATE_INMIGRATE = 1
+    RUN_STATE_INTERNAL_ERROR = 2
+    RUN_STATE_IO_ERROR = 3
+    RUN_STATE_PAUSED = 4
+    RUN_STATE_POSTMIGRATE = 5
+    RUN_STATE_PRELAUNCH = 6
+    RUN_STATE_FINISH_MIGRATE = 7
+    RUN_STATE_RESTORE_VM = 8
+    RUN_STATE_RUNNING = 9
+    RUN_STATE_SAVE_VM = 10
+    RUN_STATE_SHUTDOWN = 11
+    RUN_STATE_SUSPENDED = 12
+    RUN_STATE_WATCHDOG = 13
+    RUN_STATE_GUEST_PANICKED = 14
+    RUN_STATE_COLO = 15
+    RUN_STATE_WORK_WAIT = 16
+    RUN_STATE_PRECONFIG = 17
+
+    @staticmethod
+    def stop(reason=RUN_STATE_PAUSED):
+        stop_vm(reason)
+
+    @staticmethod
+    def cont():
+        continue_vm()
+
+    @staticmethod
+    def shutdown():
+        shutdown_vm()
+
+    @staticmethod
+    def restart():
+        restart_vm()
+
+    @staticmethod
+    def quit():
+        quit_vm()
+
+    @staticmethod
+    def getState():
+        return get_vm_state()
+
+    @staticmethod
+    def sendKey(key):
+        send_key(key)
+
+    @staticmethod
+    def sendKeyString(key_string):
+        send_key_string(key_string)
+
+    @staticmethod
+    def loadSnapshot(name):
+        load_snapshot(name)
+
+    @staticmethod
+    def saveSnapshot(name):
+        save_snapshot(name)
+
+    @staticmethod
+    def getSnapshots():
+        return get_snapshots()
+
+    @staticmethod
+    def saveScreenshot(name):
+        save_screenshot(name)
+
+    @staticmethod
+    def isKvmEnabled():
+        return is_kvm_enabled()
+
+    @staticmethod
+    def isTcgEnabled():
+        return is_tcg_enabled()
+
+class OSProcess(object):
+    def __init__(self, pid):
+        self.process_pid = pid
+
+    def getMappedVirtualMemory(self):
+        return get_process_vma_list(self.process_pid)
+
+    def setBreakpoint(self, address, ishw):
+        return set_breakpoint(self.process_pid, address, ishw)
+
+class OSHandler(object):
+    def __init__(self, hint=None):
+        os_string = init_oshandler(hint)
+        if os_string is None:
+            raise Exception("Unable to initialize OS handler")
+        self.os_string = os_string
+
+    def getName(self):
+        return self.os_string
+
+    def getProcess(self, pid):
+        return OSProcess(pid)
+
+    def getProcessByName(self, name):
+        return OSProcess(get_process_pid_by_name(name))
+
+    def getProcessByActive(self, cpu_idx):
+        return OSProcess(get_process_pid_by_active(cpu_idx))
+
+    def setBreakpoint(self, pid, address, ishw):
+        return set_breakpoint(pid, address, ishw)
+
+    def getProcessList(self):
+        return get_process_detail_list()
+
+class CommandLineInterface(object):
+
+    @staticmethod
+    def add(plugin, name, desc):
+        return add_command(plugin, name, desc)
+
+    @staticmethod
+    def remove(plugin, name):
+        return remove_command(plugin, name)
+
+    @staticmethod
+    def print(text):
+        command_print(text)
+
+    @staticmethod
+    def prettyPrint(text):
+        command_pretty_print(text)
     
+class WorkItem(object):    
     def __init__(self):
         self.buffer = ''
         self.item_list = []
@@ -159,6 +291,27 @@ class ResultItem(object):
     
     def __init__(self):
         self.buffer = ''
+
+class QTimer(object):
+    QEMU_CLOCK_REALTIME = 0
+    QEMU_CLOCK_VIRTUAL = 1
+    QEMU_CLOCK_HOST = 2
+    QEMU_CLOCK_VIRTUAL_RT = 3
+
+    def __init__(self, callback, clock_type=QEMU_CLOCK_REALTIME):
+        if not callable(callback):
+            raise Exception("Callback object is not callable")
+        self.cb = callback
+        self.clk_type = clock_type
+        self.timer = qtimer_create(self.clk_type, self)
+        if self.timer is None:
+            raise Exception("Cannot create timer")
+
+    def __call__(self):
+        self.cb()
+
+    def start(self, timeout):
+        qtimer_start(self.clk_type, timeout, self.timer)
 
 
 class QObjectTypes(IntEnum):

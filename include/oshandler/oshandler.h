@@ -8,7 +8,7 @@
  * Approved for Public Release, Distribution Unlimited
  *
  * Authors:
- *  Adam Critchley <adamc@cromulence.com>
+ *  Adam Critchley <shoggoth@cromulence.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -82,7 +82,7 @@ typedef struct {
     void (*release_ospid)(OSHandler* ctxt, OSPid pid);
 
     ProcessInfo* (*get_processinfo_by_pid)(OSHandler* ctxt, uint64_t pid);
-    ProcessInfo* (*get_processinfo_by_active)(OSHandler* ctxt, CPUState* cpu);
+    ProcessInfo* (*get_processinfo_by_active)(OSHandler* ctxt, CPUState *cpu);
     ProcessInfo* (*get_processinfo_by_name)(OSHandler* ctxt, const char *name);
     ProcessInfo* (*get_processinfo_by_ospid)(OSHandler* ctxt, OSPid pid);
     bool         (*is_active_by_processinfo)(OSHandler* ctxt, CPUState* cpu, ProcessInfo *pi);

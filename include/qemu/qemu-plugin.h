@@ -8,7 +8,7 @@
  * Approved for Public Release, Distribution Unlimited
  *
  * Authors:
- *  Adam Critchley <adamc@cromulence.com>
+ *  Adam Critchley <shoggoth@cromulence.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -26,11 +26,14 @@
 #include "qom/object.h"
 #include "racomms/interface.h"
 #include "racomms/racomms-types.h"
+#include "plugin/plugin-object.h"
 
 void qemu_plugin_register_type(void *opaque, TypeInfo *plugin_type);
 void qemu_plugin_register_options(void *opaque, QemuOptsList *opts);
 void qemu_plugin_register_commands(void *opaque, QemuOptsList *commands);
 void qemu_plugin_register_loader(void *opaque, const char *pattern, TypeInfo *plugin_subtype);
+
+PluginObject *qemu_plugin_find_plugin(const char *name);
 
 bool plugin_setup(void *plugin, const char *path);
 

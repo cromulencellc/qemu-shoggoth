@@ -136,6 +136,8 @@ int main(int argc, char **argv)
 #include "plugin/cpu_cb.h"
 #include "plugin/vm_cb.h"
 #include "qapi/qmp/qpointer.h"
+#include "oshandler/oshandler.h"
+#include "plugin/plugin-command.h"
 
 #define MAX_VIRTIO_CONSOLES 1
 #define MAX_SCLP_CONSOLES 1
@@ -587,7 +589,7 @@ static int default_driver_check(void *opaque, QemuOpts *opts, Error **errp)
 /***********************************************************/
 /* QEMU state */
 
-static RunState current_run_state = RUN_STATE_PRECONFIG;
+RunState current_run_state = RUN_STATE_PRECONFIG;
 
 /* We use RUN_STATE__MAX but any invalid value will do */
 static RunState vmstop_requested = RUN_STATE__MAX;
@@ -1824,14 +1826,21 @@ static bool main_loop_should_exit(void)
     }
     if (qemu_debug_requested()) {
         vm_stop(RUN_STATE_DEBUG);
+
         if (is_oshandler_active()) {
             OSHandler *os = oshandler_get_instance();
             OSHandlerClass *os_cc = OSHANDLER_GET_CLASS(os);
 
             QList *bps = os_cc->get_breakpoints(os);
+            const QListEntry *next_entry;
             const QListEntry *entry;
-            // First, enable any suppressed breakpoints.
+
+            bool bp_os = false;
+            bool bp_global = false;
             bool bp_resumed = false;
+            bool bp_suppressed = false;
+
+            // First, enable any suppressed breakpoints.
             QLIST_FOREACH_ENTRY(bps, entry) {
                 OSBreakpoint *bp = qpointer_get_pointer(qobject_to(QPointer, entry->value));
                 if (bp->suppressed) {
@@ -1841,38 +1850,37 @@ static bool main_loop_should_exit(void)
             }
 
             if (bp_resumed) {
+                // Restore the prior singlestep mode
                 cpu_single_step(debug_cpu, os->singlestep_enabled);
             }
 
             // Next, handle any OS breakpoints like normal.
-            OSBreakpoint *os_bp = NULL;
-            bool bp_ignored = false;
-            bool bp_suppressed = false;
-
-            QLIST_FOREACH_ENTRY(bps, entry) {
+            QTAILQ_FOREACH_SAFE(entry, &bps->head, next, next_entry) {
                 OSBreakpoint *bp = qpointer_get_pointer(qobject_to(QPointer, entry->value));
                 if (os_cc->breakpoint_check(os, debug_cpu, bp)) {
                     if (bp->pid != NULL_PID) {
-                        bp_ignored = true;
                         ProcessInfo *pi = os_cc->get_processinfo_by_ospid(os, bp->pid);
-                        if (pi) {   
+                        if (pi) {
                             if (os_cc->is_active_process(os, debug_cpu, pi)) {
-                                // Save off the breakpoint
-                                os_bp = bp;
+                                bp_os = true;
                                 notify_breakpoint_hit(debug_cpu, bp);
-
-                                break;
                             } else {
-                                os_cc->suppress_breakpoint(os, bp);
                                 bp_suppressed = true;
+                                os_cc->suppress_breakpoint(os, bp);
                             }
                         }
                     } else {
-                        bp_ignored = false;
-                        break;
+                        bp_global = true;
+                        notify_breakpoint_hit(debug_cpu, bp);
                     }
-                } else {
                 }
+            }
+
+            if (!bp_os && !bp_suppressed && !bp_global && !bp_resumed) {
+                // Anonymous breakpoints not registered with the OS handler
+                // Note: OS handler breakpoints will squelch anonymous
+                // breakpoints when set on the same location.
+                notify_breakpoint_hit(debug_cpu, NULL);
             }
 
             if (bp_suppressed) {
@@ -1881,14 +1889,12 @@ static bool main_loop_should_exit(void)
                 cpu_single_step(debug_cpu, SSTEP_ENABLE | SSTEP_NOIRQ | SSTEP_NOTIMER);
             }
 
-            if (bp_ignored || bp_resumed) {
-                if (os_bp) {
-                    debug_cpu->active_bp = os_bp;
-                } else {
-                    // Skip the hit breakpoint.
-                    vm_start();
-                }
+            if (!bp_os && !bp_global && bp_resumed) {
+                // Skip the hit breakpoint.
+                vm_start();
             }
+        }else{
+            notify_breakpoint_hit(debug_cpu, NULL);
         }
     }
     if (qemu_suspend_requested()) {
@@ -1945,12 +1951,6 @@ static void main_loop(void)
 #ifdef CONFIG_PROFILER
         dev_time += profile_getclock() - ti;
 #endif
-    }
-    
-    // Notify the plugin system that the VM is shutting down
-    if (is_vm_shutdown_instrumentation_enabled())
-    {
-        notify_vm_shutdown();
     }
 }
 
@@ -3132,6 +3132,7 @@ int main(int argc, char **argv, char **envp)
 #ifdef CONFIG_ENABLE_PLUGINS
     // Init the plugin systems
     plugin_init_globals();
+    plugin_command_init();
 #endif
 
     /* second pass of option parsing */
@@ -4771,7 +4772,17 @@ int main(int argc, char **argv, char **envp)
     accel_setup_post(current_machine);
     os_setup_post();
 
+    if(is_vm_startup_instrumentation_enabled())
+    {
+        notify_vm_startup();
+    }
+
     main_loop();
+
+    if(is_vm_shutdown_instrumentation_enabled())
+    {
+        notify_vm_shutdown();
+    }
 
     gdbserver_cleanup();
 
@@ -4782,6 +4793,10 @@ int main(int argc, char **argv, char **envp)
     bdrv_close_all();
 
     res_free();
+
+#ifdef CONFIG_ENABLE_PLUGINS
+    plugin_command_destroy();
+#endif
 
     if (rapid_analysis_opts) {
         rapid_analysis_cleanup(current_machine);

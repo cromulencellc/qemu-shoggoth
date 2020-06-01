@@ -41,6 +41,10 @@ typedef struct PluginInstanceList {
 typedef QLIST_HEAD(PluginInstances, PluginInstanceList) PluginInstances;
 extern PluginInstances plugin_instance_list;
 
+#define PLUGIN_FOREACH(plugin) QLIST_FOREACH(plugin, &plugin_instance_list, next)
+#define PLUGIN_FOREACH_SAFE(plugin, next_plugin) \
+    QLIST_FOREACH_SAFE(plugin, &plugin_instance_list, next, next_plugin)
+
 // Option Contents
 extern QemuOptsList qemu_plugin_opts;
 extern QemuOptsList qemu_plugins_opts;

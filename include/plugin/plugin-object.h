@@ -45,7 +45,7 @@ typedef struct PluginCallbacks PluginCallbacks;
 struct PluginCallbacks {
     /**
      * Alerts the plugin to VM state changes.
-     * 
+     *
      * @param opaque "This" pointer to the state 
      * @param running Determines if the VM is running
      * @param state The current state of the VM
@@ -55,7 +55,7 @@ struct PluginCallbacks {
     /**
      * Gets the information required to request a report from
      * the RA system. This comes in the form of a bitmask.
-     * 
+     *
      * @param opaque "This" pointer to the state 
      * @return The bitmask that contains requested information from RA
      */
@@ -63,7 +63,7 @@ struct PluginCallbacks {
     
     /**
      * Alerts the plugin to memory reads. Called after read occurs.
-     * 
+     *
      * @param opaque "This" pointer to the state 
      * @param paddr Physical address in guest memory
      * @param value Value from read (host endianess)
@@ -74,7 +74,7 @@ struct PluginCallbacks {
 
     /**
      * Alerts the plugin to memory writes. Called before write occurs.
-     * 
+     *
      * @param opaque "This" pointer to the state 
      * @param paddr Physical address in guest memory
      * @param value Value to write (host endianess)
@@ -88,7 +88,7 @@ struct PluginCallbacks {
      * implementation for this callback if monitoring of started RA system
      * is desired. work will be freed after the call back returns, if
      * data from it is required to be persistent, it should be copied. 
-     * 
+     *
      * @param opaque "This" pointer to the state
      * @param work The configuration of this analysis sesstion
      */
@@ -99,7 +99,7 @@ struct PluginCallbacks {
      * implementation for this callback if monitoring of stopped RA system
      * is desired. work_results will be freed after the call back returns, if
      * data from it is required to be persistent, it should be copied.
-     * 
+     *
      * @param opaque "This" pointer to the state
      * @param work_results The report on the current analysis session
      */
@@ -109,14 +109,14 @@ struct PluginCallbacks {
      * This callback is executed when the RA system is idle. Add an
      * implementation for this callback if monitoring of idle RA system
      * is desired.
-     * 
+     *
      * @param opaque "This" pointer to the state
      */
     void (*on_ra_idle)(void *opaque);
     
     /**
      * This callback is executed when there is an interrupt.
-     * 
+     *
      * @param opaque "This" pointer to the state
      * @param mask The mask the gives interrupt state.
      */
@@ -124,7 +124,7 @@ struct PluginCallbacks {
     
     /**
      * This callback is executed when there is an exception
-     * 
+     *
      * @param plugin "This" pointer to plugin state
      * @param exception The exception index
      */
@@ -132,7 +132,7 @@ struct PluginCallbacks {
 
     /**
      * This callback is executed when a syscall occours.
-     * 
+     *
      * @param plugin "This" pointer to plugin state
      * @param number The number of args being passed in.
      * @param ... The argument values passed to the syscall
@@ -140,25 +140,36 @@ struct PluginCallbacks {
     void (*on_syscall)(void *opaque, uint64_t number, va_list args);
 
     /**
-     * This callback is executed when a registered command is issued from the CLI.
-     * 
+     * This callback is executed when a syscall exits.
+     *
      * @param plugin "This" pointer to plugin state
+     * @param number The number of args being passed in.
+     * @param ... The argument values upon syscall exit
      */
-    void (*on_command)(void *opaque);
+    void (*on_syscall_exit)(void *opaque, uint64_t number, va_list args);
+
+    /**
+     * This callback is executed when a registered command is issued from the CLI.
+     *
+     * @param plugin "This" pointer to plugin state
+     * @param cmd String for command
+     * @param args String of arguments for command
+     */
+    bool (*on_command)(void *opaque, const char *cmd,  const char *args);
 
     /**
      * This callback is executed when the CPU hits a breakpoint.
-     * 
+     *
      * @param plugin "This" pointer to plugin state
      * @param cpu_idx The index of the cpu that hit the breakpoint
      * @param vaddr The address of the current breakpoint
      * @param bp_id The breakpoint ID
      */
-    void (*on_breakpoint_hit)(void *opaque, int cpu_idx, uint64_t vaddr, int bp_id);
+    void (*on_breakpoint)(void *opaque, int cpu_idx, uint64_t vaddr, int bp_id);
 
     /**
      * This callback is executed when an instruction is executed.
-     * 
+     *
      * @param plugin "This" pointer to plugin state
      * @param vaddr The address of the instruction
      * @param addr The segment of code
@@ -167,7 +178,7 @@ struct PluginCallbacks {
 
     /**
      * This callback is executed when a packet is received from an external interface.
-     * 
+     *
      * @param plugin "This" pointer to plugin state
      * @param pkt_buf The address of the packet buffer
      * @param pkt_size The size of the packet
@@ -176,7 +187,7 @@ struct PluginCallbacks {
 
     /**
      * This callback is executed when a packet is sent to an external interface.
-     * 
+     *
      * @param plugin "This" pointer to plugin state
      * @param pkt_buf The address of the packet buffer
      * @param pkt_size The size of the packet
@@ -184,8 +195,15 @@ struct PluginCallbacks {
     void (*on_packet_send)(void *opaque, uint8_t **pkt_buf, uint32_t *pkt_size);
 
     /**
+     * This callback is executed when the VM is ready to start.
+     *
+     * @param plugin "This" pointer to plugin state
+     */
+    void (*on_vm_startup)(void *opaque);
+
+    /**
      * This callback is executed when the VM exits.
-     * 
+     *
      * @param plugin "This" pointer to plugin state
      */
     void (*on_vm_shutdown)(void *opaque);

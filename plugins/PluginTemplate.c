@@ -15,8 +15,6 @@
  * 
  * The creation of this code was funded by the US Government.
  */
-## TODO: Add logic for report function and fix function arguemnts for callbacks
-## Ask adam about correct arguemnts for vm_state_change callback
 
 #include <stdio.h>
 
@@ -25,7 +23,7 @@
 #include "qemu/qemu-plugin.h"
 
 // These macros define object operations
-#define TYPE_${NAME} "${Name}"
+#define TYPE_${NAME} "${name}"
 #define ${NAME}(obj)                                    \
     OBJECT_CHECK(${Name}, (obj), TYPE_${NAME})
 #define ${NAME}_CLASS(klass)                                    \
@@ -34,7 +32,7 @@
     OBJECT_GET_CLASS(${Name}Class, obj, TYPE_${NAME})
 
 // This is for opts
-#define ${NAME}_OPTS  ("${name}")
+#define ${NAME}_OPTS  ("${name}-opts")
 
 // Object type data
 typedef struct ${Name} ${Name};
@@ -53,14 +51,14 @@ struct ${Name}Class
 // Object setup: constructor
 static void ${name}_initfn(Object *obj)
 {
-    ${Name} *h = (${Name} *) obj;
+    ${Name} *h = ${NAME}(obj);
     (void) h;
 }
 
 // Object setup: destructor
 static void ${name}_finalize(Object *obj)
 {
-    ${Name} *h = (${Name} *) obj;
+    ${Name} *h = ${NAME}(obj);
     (void) h;
 }
 
@@ -68,7 +66,7 @@ static void ${name}_finalize(Object *obj)
 % if callback:
     % if 'memory_read' in callback:
 
-static void ${name}_on_memory_read(void *opaque, uint64_t paddr, uint64_t value, void *addr, int size)
+static void ${name}_on_memory_read(void *opaque, uint64_t paddr, uint8_t *value, void *addr, int size)
 {
     ${Name} *h = ${NAME}(opaque);
     ${Name}Class *h_klass = ${NAME}_GET_CLASS(h);
@@ -78,7 +76,7 @@ static void ${name}_on_memory_read(void *opaque, uint64_t paddr, uint64_t value,
     % endif
     % if 'memory_write' in callback:
 
-static void ${name}_on_memory_write(void *opaque, uint64_t paddr, uint64_t value, void *addr, int size)
+static void ${name}_on_memory_write(void *opaque, uint64_t paddr, const uint8_t *value, void *addr, int size)
 {
     ${Name} *h = ${NAME}(opaque);
     ${Name}Class *h_klass = ${NAME}_GET_CLASS(h);
@@ -86,9 +84,9 @@ static void ${name}_on_memory_write(void *opaque, uint64_t paddr, uint64_t value
 }
     
     % endif
-    % if 'vm_state_change' in callback:
+    % if 'state_change' in callback:
 
-static void ${name}_on_vm_state_change(void *opaque, CommsWorkItem *work)
+static void ${name}_on_state_change(void *opaque, int running, RunState state)
 {
     ${Name} *h = ${NAME}(opaque);
     ${Name}Class *h_klass = ${NAME}_GET_CLASS(h);
@@ -158,7 +156,35 @@ static void ${name}_on_syscall(void *opaque, uint64_t number, va_list args)
     % endif
     % if 'command' in callback:
 
-static void ${name}_on_command(void *opaque)
+static bool ${name}_on_command(void *opaque, const char *cmd, const char *args)
+{
+    ${Name} *h = ${NAME}(opaque);
+    ${Name}Class *h_klass = ${NAME}_GET_CLASS(h);
+    (void) h_klass;
+    return false;
+}
+    % endif
+    % if 'breakpoint' in callback:
+
+static void ${name}_on_breakpoint(void *opaque, int cpu_idx, uint64_t vaddr, int bp_id)
+{
+    ${Name} *h = ${NAME}(opaque);
+    ${Name}Class *h_klass = ${NAME}_GET_CLASS(h);
+    (void) h_klass;
+}
+    % endif
+    % if 'syscall_exit' in callback:
+
+static void ${name}_on_syscall_exit(void *opaque, uint64_t number, va_list args)
+{
+    ${Name} *h = ${NAME}(opaque);
+    ${Name}Class *h_klass = ${NAME}_GET_CLASS(h);
+    (void) h_klass;
+}
+    % endif
+    % if 'instructions' in callback:
+
+static void ${name}_on_execute_instruction(void *opaque, uint64_t vaddr, void *addr)
 {
     ${Name} *h = ${NAME}(opaque);
     ${Name}Class *h_klass = ${NAME}_GET_CLASS(h);
@@ -178,7 +204,13 @@ static void ${name}_set_callbacks(void *opaque, PluginCallbacks *callbacks)
 {
     ## add callbacks
     % for func in callback:
+    % if 'state_change' == func:
+    callbacks->change_state_handler = ${name}_on_state_change;
+    % elif 'instructions' == func:
+    callbacks->on_execute_instruction = ${name}_on_execute_instruction;
+    % else:
     callbacks->on_${func} = ${name}_on_${func};
+    % endif
     % endfor
 }
 

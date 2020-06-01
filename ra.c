@@ -8,7 +8,7 @@
  * Approved for Public Release, Distribution Unlimited
  *
  * Authors:
- *  Adam Critchley <adamc@cromulence.com>
+ *  Adam Critchley <shoggoth@cromulence.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -505,7 +505,7 @@ void rapid_analysis_init(QemuOpts *ra_opts, MachineState *machine)
     global_rst->config_timeout = timeout;
     global_rst->job_timeout = timeout;
 
-    if(execmode && strncmp(execmode, "basic", 4)){
+    if(execmode && strncmp(execmode, "basic", 5)){
         global_rst->enable_interrupts = false;
         global_rst->skip_blocks = true;
         global_rst->skip_save = true;
@@ -637,8 +637,37 @@ void rapid_analysis_partial_cleanup(void)
     memory_channel_free_pool();
 }
 
-bool rapid_analysis_handle_syscall(uint64_t number, ...)
+static bool rapid_analysis_handle_sys_read(CPUState *cs, uint32_t fd, ram_addr_t buf, size_t count)
 {
+    RSaveTreeClass *rst_class = RSAVE_TREE_GET_CLASS(global_rst);
+    return rst_class->write_stream_data(global_rst, cs, fd, buf, count);
+}
+
+bool rapid_analysis_handle_syscall(CPUState *cpu , uint64_t number, ...)
+{
+    va_list registers;
+    bool ret;
+
+    va_start(registers, number);
+
+    /* Check if first argument (syscall number register) is read syscall number */
+    uint64_t rax = va_arg(registers, uint64_t);
+    uint64_t rdi = va_arg(registers, uint64_t);
+    uint64_t rsi = va_arg(registers, uint64_t);
+    uint64_t rdx = va_arg(registers, uint64_t);
+
+    /* TODO: make more robust, add SYS_READ macro for diffrent arch's */
+    switch (rax) {
+        case 0:
+            ret = rapid_analysis_handle_sys_read(cpu,
+                        (uint32_t)  rdi,
+                        (ram_addr_t)rsi,
+                        (size_t)    rdx );
+            return ret;
+        default:
+            break;
+    }
+
     return false;
 }
 

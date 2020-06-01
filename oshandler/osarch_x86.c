@@ -122,7 +122,7 @@ static int osarch_x86_set_breakpoint(OSArch* arch, uint64_t addr, uint64_t lengt
         switch (flags) {
             case GDB_BREAKPOINT_SW:
             case GDB_BREAKPOINT_HW:
-                err = cpu_breakpoint_insert(arch->cpu, addr, BP_GDB, pi, NULL);
+                err = cpu_breakpoint_insert(arch->cpu, addr, BP_GDB, NULL);
                 break;
             default:
                 err = -ENOSYS;

@@ -8,7 +8,7 @@
  * Approved for Public Release, Distribution Unlimited
  *
  * Authors:
- *  Joseph Walker
+ *  Adam Critchley <shoggoth@cromulence.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -16,17 +16,21 @@
  * The creation of this code was funded by the US Government.
  */
 
-#ifndef __VM_CB_H__
-#define __VM_CB_H__
+#ifndef __PLUGIN_ERROR_H__
+#define __PLUGIN_ERROR_H__
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
-#include "qom/cpu.h"
 
-void notify_vm_startup(void);
-void notify_vm_shutdown(void);
+#ifdef __cplusplus
+extern "C"{
+#endif
 
-bool is_vm_startup_instrumentation_enabled(void);
-bool is_vm_shutdown_instrumentation_enabled(void);
+extern Error *qemu_plugin_last_error;
+
+void qemu_get_last_error(Error **last_error);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

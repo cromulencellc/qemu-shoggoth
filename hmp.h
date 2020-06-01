@@ -158,7 +158,9 @@ void hmp_get_process_list(Monitor* mon, const QDict* qdict);
 void hmp_bp(Monitor *mon, const QDict *qdict);
 void hmp_bphw(Monitor *mon, const QDict *qdict);
 void hmp_remove_bp(Monitor* mon, const QDict* qdict);
+void hmp_maps(Monitor* mon, const QDict* qdict);
 void hmp_bplist(Monitor* mon, const QDict* qdict);
+void hmp_debug(Monitor* mon, const QDict* qdict);
 
 
 #endif

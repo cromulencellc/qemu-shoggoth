@@ -54,12 +54,11 @@
 #include "hw/intc/intc.h"
 #include "migration/snapshot.h"
 #include "migration/misc.h"
-#include "qemu/benchmark.h"
 #include "oshandler/oshandler.h"
 #include "qapi/qmp/qlist.h"
 #include "qapi/qmp/qpointer.h"
-#include "oshandler/oshandler.h"
 #include "qom/cpu.h"
+#include "plugin/plugin-command.h"
 
 #ifdef CONFIG_SPICE
 #include <spice/enums.h>
@@ -1372,7 +1371,7 @@ void hmp_rapid_load(Monitor *mon, const QDict *qdict)
 void hmp_os(Monitor *mon, const QDict* qdict)
 {
     Error *err = NULL;
-    const char *os_type = qdict_get_try_str(qdict, "os_type");
+    const char *os_type = qdict_get_try_str(qdict, "type");
 
     if(!is_oshandler_active())
     {
@@ -1399,7 +1398,8 @@ void hmp_set_pid(Monitor* mon, const QDict* qdict)
         OSHandlerClass *cl = OSHANDLER_GET_CLASS(os_handler); 
         os_pid = cl->get_ospid_by_pid(os_handler, pid); 
         cl->print_process_list(os_handler,
-            cl->get_processinfo_by_ospid(os_handler, os_pid));
+            cl->get_processinfo_by_ospid(os_handler, os_pid)
+        );
     }
 
     hmp_handle_error(mon, &err);
@@ -1607,6 +1607,93 @@ void hmp_remove_bp(Monitor *mon, const QDict* qdict)
     }
 }
 
+void hmp_maps(Monitor *mon, const QDict *qdict)
+{
+    uint64_t start, end, flags, pgprot;
+
+    if(!is_oshandler_active()){
+        error_printf("No os handler active. Please use \"os\" to activate one.\n");
+        return;
+    }
+
+    if(os_pid == NULL_PID){
+        error_printf("No pid is active. Please use \"pid\" to set the process focus.\n");
+        return;
+    }
+
+    OSHandler *os_handler = oshandler_get_instance();
+    OSHandlerClass *cl = OSHANDLER_GET_CLASS(os_handler);
+
+    ProcessInfo *pi = cl->get_processinfo_by_ospid(os_handler, os_pid);
+    if(!pi){
+        error_printf("Process info could not be retrieved.\n");
+        return;
+    }
+    
+    Process *ps = cl->get_process_detail(os_handler, pi);
+    if(!ps){
+        error_printf("Process mappings could not be retrieved.\n");
+        return;
+    }
+
+    monitor_printf(mon, "Location\t\t\tFlags\t\tProtections\n");
+    switch(ps->type)
+    {
+        case PROCESS_TYPES_LNX:
+        {
+            if(ps->u.lnx.task_mem){
+                VmAreaInfoList *cur = ps->u.lnx.task_mem->vm_areas;
+                while(cur){
+                    start = cur->value->vm_start;
+                    end = cur->value->vm_end;
+                    flags = cur->value->flags;
+                    pgprot = cur->value->page_prot;
+                    monitor_printf(mon, "%#"PRIx64"-%#"PRIx64"\t%#"PRIx64"\t%#"PRIx64"\n", start, end, flags, pgprot);
+                    cur = cur->next;
+                }
+            }
+        }
+            break;
+        case PROCESS_TYPES_WIN:
+        {
+            WinVADList *cur = ps->u.win.vad;
+            while(cur){
+                start = cur->value->base;
+                end = cur->value->base + cur->value->size;
+                flags = cur->value->flags;
+                monitor_printf(mon, "%#"PRIx64"-%#"PRIx64"\t%#"PRIx64"\n", start, end, flags);
+                cur = cur->next;
+            }
+        }
+            break;
+        case PROCESS_TYPES_WIN64:
+        {
+            Win64VADList *cur = ps->u.win64.vad;
+            while(cur){
+                start = cur->value->base;
+                end = cur->value->base + cur->value->size;
+                flags = cur->value->flags;
+                monitor_printf(mon, "%#"PRIx64"-%#"PRIx64"\t%#"PRIx64"\n", start, end, flags);
+                cur = cur->next;
+            }
+        }
+            break;
+        case PROCESS_TYPES_NONE:
+        case PROCESS_TYPES__MAX:
+            break;
+    }
+
+    qapi_free_Process(ps);
+}
+
+void hmp_debug(Monitor* mon, const QDict* qdict)
+{
+    // Now enable the debug CLI with our new monitor
+    monitor_printf(mon, "Commands will now be redirected to plugin command handlers.\n");
+    monitor_printf(mon, "Type \"exit\" to go back to monitor.\n");
+    plugin_command_attach_monitor(mon);
+}
+
 void hmp_savevm(Monitor *mon, const QDict *qdict)
 {
     Error *err = NULL;
@@ -1617,9 +1704,6 @@ void hmp_savevm(Monitor *mon, const QDict *qdict)
 
 void hmp_rapid_save(Monitor *mon, const QDict *qdict)
 {
-    double bm_info;
-    Benchmarker *bm; 
-    BenchmarkerClass *bm_class;
     Error *err = NULL;
 
     const char *filename = qdict_get_try_str(qdict, "file");
@@ -1628,17 +1712,7 @@ void hmp_rapid_save(Monitor *mon, const QDict *qdict)
                     "Next time use file=[*.rsave] to specify a rapid analysis file.\n");
     }
 
-    // We want to benchmark this one.
-    bm = new_benchmarker();
-    bm_class = get_benchmarker_class(bm);
-    bm_class->start_benchmark(bm);
-
     save_snapshot_rsave(filename, &err);
-
-    // Finish the benchmark;
-    bm_info = bm_class->get_millis_elapsed(bm);
-    monitor_printf(mon, "rsave command took %.2f milliseconds\n", bm_info);
-    object_unref(OBJECT(bm));
 
     hmp_handle_error(mon, &err);
 }

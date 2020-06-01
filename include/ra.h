@@ -8,7 +8,7 @@
  * Approved for Public Release, Distribution Unlimited
  *
  * Authors:
- *  Adam Critchley <adamc@cromulence.com>
+ *  Adam Critchley <shoggoth@cromulence.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -48,7 +48,7 @@ void rapid_analysis_mark_vram_dirty(CPUState *cpu, hwaddr start, hwaddr end);
 void rapid_analysis_mark_ram_clean(hwaddr start, hwaddr end);
 void rapid_analysis_set_error(uint32_t error_id_in, uint64_t error_loc_in, const char *error_text_in);
 void rapid_analysis_clear_error(void);
-bool rapid_analysis_handle_syscall(uint64_t number, ...);
+bool rapid_analysis_handle_syscall(CPUState *cs, uint64_t number, ...);
 bool rapid_analysis_has_error(void);
 uint32_t rapid_analysis_get_error_id(void);
 uint64_t rapid_analysis_get_error_loc(void);

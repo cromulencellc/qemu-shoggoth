@@ -62,8 +62,8 @@ if __name__ == '__main__':
     parser.add_argument('-cb', '--callbacks', nargs='+', metavar='--callbacks',
                         help="callback function to include in template",
                         choices=['ra_start', 'ra_stop', 'ra_idle', 'interrupt',
-                        'memory_read', 'memory_write', 'change_state_handler', 'exception', 
-                        'syscall', 'command']) 
+                        'memory_read', 'memory_write', 'state_change', 'exception',
+                        'syscall', 'syscall_exit', 'command', 'breakpoint', 'instructions'], default=[])
     
     args = parser.parse_args()
     
