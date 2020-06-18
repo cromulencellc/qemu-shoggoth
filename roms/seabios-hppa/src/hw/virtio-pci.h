@@ -2,6 +2,7 @@
 #define _VIRTIO_PCI_H
 
 #include "x86.h" // inl
+#include "byteorder.h" // cpu_to_*
 #include "biosvar.h" // GET_LOWFLAT
 
 /* The bit of the ISR which indicates a device configuration change. */

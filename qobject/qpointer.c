@@ -18,7 +18,6 @@
 
 #include "qemu/osdep.h"
 #include "qapi/qmp/qpointer.h"
-#include "qemu-common.h"
 
 
 /**

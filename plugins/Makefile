@@ -19,6 +19,7 @@
 # Collect directories
 PLUGIN_PARENT_DIR=$(SRC_PATH)/plugins/
 PLUGIN_BUILD_DIR=$(BUILD_DIR)/plugin_build/
+PLUGIN_ARTIFACTS_DIRS=
 PLUGIN_DIRS=$(sort $(dir $(wildcard $(SRC_PATH)/plugins/*/.)))
 PLUGIN_TARGETS=
 MAKE ?= make
@@ -49,10 +50,13 @@ plugins: $(all_pls) plugins_install
 # Build all targets that are also a subdirectory
 $(all_pls):
 
-plugins_install:
+plugins_install: $(all_pls) 
 	@echo "Installing $(PLUGIN_TARGETS) to $(qemu_plugindir)"
 	@mkdir -p $(qemu_plugindir)
 	@install -m 644 $(PLUGIN_TARGETS) $(qemu_plugindir)
 
 plugins_clean:
 	@rm -rf $(PLUGIN_BUILD_DIR)
+ifneq ($(PLUGIN_ARTIFACTS_DIRS),)
+	@rm -Rf $(PLUGIN_ARTIFACTS_DIRS)
+endif

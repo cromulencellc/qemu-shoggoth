@@ -35,6 +35,7 @@
 #include <xive.h>
 #include <sbe-p9.h>
 #include <phys-map.h>
+#include <occ.h>
 
 static LIST_HEAD(psis);
 static u64 psi_link_timer;
@@ -74,7 +75,7 @@ void psi_disable_link(struct psi *psi)
 
 		/* Mask errors in SEMR */
 		reg = in_be64(psi->regs + PSIHB_SEMR);
-		reg = ((0xfffull << 36) | (0xfffull << 20));
+		reg &= ((0xfffull << 36) | (0xfffull << 20));
 		out_be64(psi->regs + PSIHB_SEMR, reg);
 		printf("PSI: SEMR set to %llx\n", reg);
 
@@ -377,7 +378,7 @@ static int64_t psi_p7_get_xive(struct irq_source *is, uint32_t isn __unused,
 static uint64_t psi_p7_irq_attributes(struct irq_source *is __unused,
 				      uint32_t isn __unused)
 {
-	return IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TARGET_FREQUENT;
+	return IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TARGET_FREQUENT | IRQ_ATTR_TYPE_LSI;
 }
 
 static const uint32_t psi_p8_irq_to_xivr[P8_IRQ_PSI_IRQ_COUNT] = {
@@ -530,7 +531,7 @@ static uint64_t psi_p8_irq_attributes(struct irq_source *is, uint32_t isn)
 	    psi_ext_irq_policy == EXTERNAL_IRQ_POLICY_LINUX)
 		return IRQ_ATTR_TARGET_LINUX;
 
-	attr = IRQ_ATTR_TARGET_OPAL;
+	attr = IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TYPE_LSI;
 	if (idx == P8_IRQ_PSI_EXTERNAL || idx == P8_IRQ_PSI_LPC ||
 	    idx == P8_IRQ_PSI_FSP)
 		attr |= IRQ_ATTR_TARGET_FREQUENT;
@@ -605,7 +606,7 @@ static void psihb_p9_interrupt(struct irq_source *is, uint32_t isn)
 		printf("PSI: DIO irq received\n");
 		break;
 	case P9_PSI_IRQ_PSU:
-		sbe_interrupt(psi->chip_id);
+		p9_sbe_interrupt(psi->chip_id);
 		break;
 	}
 }
@@ -634,7 +635,7 @@ static uint64_t psi_p9_irq_attributes(struct irq_source *is __unused,
 	 if (is_lpc_serirq)
 		 return lpc_get_irq_policy(psi->chip_id, idx - P9_PSI_IRQ_LPC_SIRQ0);
 
-	return IRQ_ATTR_TARGET_OPAL;
+	return IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TYPE_LSI;
 }
 
 static char *psi_p9_irq_name(struct irq_source *is, uint32_t isn)
@@ -663,24 +664,6 @@ static char *psi_p9_irq_name(struct irq_source *is, uint32_t isn)
 		return NULL;
 	return strdup(names[idx]);
 }
-
-static void psi_p9_irq_ndd1_eoi(struct irq_source *is, uint32_t isn)
-{
-	struct psi *psi = is->data;
-	unsigned int idx = isn & 0xf;
-
-	if (idx >= P9_PSI_IRQ_LPC_SIRQ0 &&
-	    idx <= P9_PSI_IRQ_LPC_SIRQ3)
-		lpc_p9_sirq_eoi(psi->chip_id, idx - P9_PSI_IRQ_LPC_SIRQ0);
-	__xive_source_eoi(is, isn);
-}
-
-static const struct irq_source_ops psi_p9_ndd1_irq_ops = {
-	.interrupt = psihb_p9_interrupt,
-	.attributes = psi_p9_irq_attributes,
-	.name = psi_p9_irq_name,
-	.eoi = psi_p9_irq_ndd1_eoi,
-};
 
 static const struct irq_source_ops psi_p9_irq_ops = {
 	.interrupt = psihb_p9_interrupt,
@@ -823,7 +806,6 @@ static void psi_init_p8_interrupts(struct psi *psi)
 static void psi_init_p9_interrupts(struct psi *psi)
 {
 	struct proc_chip *chip;
-	bool is_p9ndd1;
 	u64 val;
 
 	/* Grab chip */
@@ -852,24 +834,12 @@ static void psi_init_p9_interrupts(struct psi *psi)
 	out_be64(psi->regs + PSIHB_IVT_OFFSET, val);
 
 	/* Register sources */
-	is_p9ndd1 = (chip->ec_level < 0x20 &&
-		     chip->type == PROC_CHIP_P9_NIMBUS);
-
-	if (is_p9ndd1) {
-		prlog(PR_DEBUG,
-		      "PSI[0x%03x]: Interrupts sources registered for P9N DD1.x\n",
-		      psi->chip_id);
-		xive_register_hw_source(psi->interrupt, P9_PSI_NUM_IRQS,
-					12, psi->esb_mmio, XIVE_SRC_LSI,
-					psi, &psi_p9_ndd1_irq_ops);
-	} else {
-		prlog(PR_DEBUG,
-		      "PSI[0x%03x]: Interrupts sources registered for P9 DD2.x\n",
-		      psi->chip_id);
-		xive_register_hw_source(psi->interrupt, P9_PSI_NUM_IRQS,
-					12, psi->esb_mmio, XIVE_SRC_LSI,
-					psi, &psi_p9_irq_ops);
-	}
+	prlog(PR_DEBUG,
+	      "PSI[0x%03x]: Interrupts sources registered for P9 DD2.x\n",
+	      psi->chip_id);
+	xive_register_hw_source(psi->interrupt, P9_PSI_NUM_IRQS,
+				12, psi->esb_mmio, XIVE_SRC_LSI,
+				psi, &psi_p9_irq_ops);
 
 	/* Reset irq handling and switch to ESB mode */
 	out_be64(psi->regs + PSIHB_INTERRUPT_CONTROL, PSIHB_IRQ_RESET);

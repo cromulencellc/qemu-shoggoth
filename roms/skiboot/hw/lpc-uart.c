@@ -218,7 +218,7 @@ static uint8_t *out_buf;
 static uint32_t out_buf_prod;
 static uint32_t out_buf_cons;
 
-/* Asynchronous flush */
+/* Asynchronous flush, uart_lock must be held */
 static int64_t uart_con_flush(void)
 {
 	bool tx_was_full = tx_full;
@@ -388,10 +388,16 @@ static int64_t uart_opal_read(int64_t term_number, int64_t *length,
 
 static int64_t uart_opal_flush(int64_t term_number)
 {
+	int64_t rc;
+
 	if (term_number != 0)
 		return OPAL_PARAMETER;
 
-	return uart_con_flush();
+	lock(&uart_lock);
+	rc = uart_con_flush();
+	unlock(&uart_lock);
+
+	return rc;
 }
 
 static void __uart_do_poll(u8 trace_ctx)
@@ -599,7 +605,7 @@ void early_uart_init(void)
 
 	if (uart_init_hw(baud, clk)) {
 		set_console(&uart_con_driver);
-		prlog(PR_NOTICE, "UART: Using UART at %p\n", mmio_uart_base);
+		prlog(PR_DEBUG, "UART: Using UART at %p\n", mmio_uart_base);
 	} else {
 		prerror("UART: Early init failed!");
 		mmio_uart_base = NULL;

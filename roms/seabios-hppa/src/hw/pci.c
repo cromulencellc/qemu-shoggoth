@@ -8,6 +8,7 @@
 #include "output.h" // dprintf
 #include "pci.h" // pci_config_writel
 #include "pci_regs.h" // PCI_VENDOR_ID
+#include "byteorder.h" // cpu_to_le16
 #include "util.h" // udelay
 #include "x86.h" // outl
 

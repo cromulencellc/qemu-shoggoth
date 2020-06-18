@@ -50,6 +50,10 @@ struct idt64_entry {
    uint32_t zero;     // reserved
 } __attribute__((packed));
 
+typedef struct OSArchX86ProcessState{
+   uint64_t cr3;
+} OSArchX86ProcessState;
+
 #define INVALID_CR3      ((uint64_t)-1)
 #define TARGET_PAGE_BITS 12
 
@@ -248,6 +252,39 @@ static OSArch *osarch_x86_detect(CPUState *cpu)
     return NULL;
 }
 
+static void* osarch_x86_process_enter(OSArch* arch, ProcessInfo *pi)
+{
+	cpu_synchronize_state(arch->cpu);
+    OSArchX86* arch_x86 = OSARCHX86(arch);
+    OSArchX86ProcessState *ps = g_new0(OSArchX86ProcessState, 1);
+    target_ulong old_cr3 = INVALID_CR3;
+
+    if( !ps ) {
+        return NULL;
+    }
+
+    if( pi ) {
+        old_cr3 = os_switch_cr3(arch_x86, arch->cpu, pi->cr3);
+    }
+
+    ps->cr3 = old_cr3;
+
+    return ps;
+}
+
+static void osarch_x86_process_exit(OSArch* arch, void *state)
+{
+	cpu_synchronize_state(arch->cpu);
+    OSArchX86* arch_x86 = OSARCHX86(arch);
+    OSArchX86ProcessState *ps = (OSArchX86ProcessState *)state;
+
+    if( ps ) {
+        os_switch_cr3(arch_x86, arch->cpu, ps->cr3);
+    }
+
+    g_free(ps);
+}
+
 static void osarch_x86_initfn(Object* obj)
 {
 	OSArch* arch = OSARCH(obj);
@@ -273,6 +310,8 @@ static void osarch_x86_class_init(ObjectClass *klass, void* class_data)
     arch_cc->get_process_string      = osarch_x86_get_process_string;
     arch_cc->breakpoint_check        = osarch_x86_breakpoint_check;
     arch_cc->get_active_pagetable    = osarch_x86_get_active_pagetable;
+    arch_cc->process_enter           = osarch_x86_process_enter;
+    arch_cc->process_exit            = osarch_x86_process_exit;
 }
 
 static const TypeInfo osarch_x86_info = {

@@ -1,4 +1,4 @@
-/* Copyright 2013-2017 IBM Corp.
+/* Copyright 2013-2018 IBM Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <inttypes.h>
 #include <device.h>
 #include "spira.h"
 #include <cpu.h>
@@ -87,16 +88,15 @@ __section(".cpuctrl.data") struct cpu_ctl_init_data cpu_ctl_init_data = {
  * To help the FSP distinguishing between TCE tokens and actual physical
  * addresses, we set the top bit to 1 on physical addresses
  */
-#define ADDR_TOP_BIT	(1ul << 63)
 
 __section(".mdst.data") struct dump_mdst_table init_mdst_table[2] = {
 	{
-		.addr = CPU_TO_BE64(INMEM_CON_START | ADDR_TOP_BIT),
+		.addr = CPU_TO_BE64(INMEM_CON_START | HRMOR_BIT),
 		.type = CPU_TO_BE32(DUMP_REGION_CONSOLE),
 		.size = CPU_TO_BE32(INMEM_CON_LEN),
 	},
 	{
-		.addr = CPU_TO_BE64(HBRT_CON_START | ADDR_TOP_BIT),
+		.addr = CPU_TO_BE64(HBRT_CON_START | HRMOR_BIT),
 		.type = CPU_TO_BE32(DUMP_REGION_HBRT_LOG),
 		.size = CPU_TO_BE32(HBRT_CON_LEN),
 	},
@@ -281,7 +281,10 @@ static struct dt_node *add_xscom_node(uint64_t base, uint32_t hw_id,
 	}
 	dt_add_property_u64s(node, "reg", addr, size);
 
-	/* Derive bus frquency */
+	/*
+	 * The bus-frequency of the xscom node is actually the PIB/PCB
+	 * frequency. It is derived from the nest-clock via a 4:1 divider
+	 */
 	freq = dt_prop_get_u64_def(dt_root, "nest-frequency", 0);
 	freq /= 4;
 	if (freq)
@@ -505,6 +508,7 @@ static bool add_xscom_sppcrd(uint64_t xscom_base)
 	for_each_ntuple_idx(&spira.ntuples.proc_chip, hdif, i,
 			    SPPCRD_HDIF_SIG) {
 		const struct sppcrd_chip_info *cinfo;
+		const struct spira_fru_id *fru_id = NULL;
 		unsigned int csize;
 		u32 ve, version;
 
@@ -548,13 +552,21 @@ static bool add_xscom_sppcrd(uint64_t xscom_base)
 			dt_add_property_cells(vpd_node, "ibm,chip-id",
 					      be32_to_cpu(cinfo->xscom_id));
 
+		fru_id = HDIF_get_idata(hdif, SPPCRD_IDATA_FRU_ID, NULL);
+		if (fru_id)
+			slca_vpd_add_loc_code(np, be16_to_cpu(fru_id->slca_index));
+
 		/* Add module VPD on version A and later */
 		if (version >= 0x000a) {
 			vpd = HDIF_get_idata(hdif, SPPCRD_IDATA_MODULE_VPD,
 					     &vpd_sz);
-			if (CHECK_SPPTR(vpd))
+			if (CHECK_SPPTR(vpd)) {
 				dt_add_property(np, "ibm,module-vpd", vpd,
 						vpd_sz);
+				vpd_data_parse(np, vpd, vpd_sz);
+				if (vpd_node)
+					dt_add_proc_vendor(vpd_node, vpd, vpd_sz);
+			}
 		}
 
 		/*
@@ -571,6 +583,9 @@ static bool add_xscom_sppcrd(uint64_t xscom_base)
 			parse_i2c_devs(hdif, SPPCRD_IDATA_HOST_I2C, np);
 			add_vas_node(np, i);
 			add_ecid_data(hdif, np);
+
+			if (be32_to_cpu(cinfo->verif_exist_flags) & CHIP_VERIFY_MASTER_PROC)
+				dt_add_property(np, "primary", NULL, 0);
 		}
 
 		/*
@@ -933,6 +948,42 @@ static void add_nmmu(void)
 	}
 }
 
+static void dt_init_secureboot_node(const struct iplparams_sysparams *sysparams)
+{
+	struct dt_node *node;
+	u16 sys_sec_setting;
+	u16 hw_key_hash_size;
+
+	node = dt_new(dt_root, "ibm,secureboot");
+	assert(node);
+
+	dt_add_property_string(node, "compatible", "ibm,secureboot-v2");
+
+	sys_sec_setting = be16_to_cpu(sysparams->sys_sec_setting);
+	if (sys_sec_setting & SEC_CONTAINER_SIG_CHECKING)
+		dt_add_property(node, "secure-enabled", NULL, 0);
+	if (sys_sec_setting & SEC_HASHES_EXTENDED_TO_TPM)
+		dt_add_property(node, "trusted-enabled", NULL, 0);
+
+	hw_key_hash_size = be16_to_cpu(sysparams->hw_key_hash_size);
+
+	/* Prevent hw-key-hash buffer overflow by truncating hw-key-hash-size if
+	 * it is bigger than the hw-key-hash buffer.
+	 * Secure boot will be enforced later in skiboot, if the hw-key-hash-size
+	 * was not supposed to be SYSPARAMS_HW_KEY_HASH_MAX.
+	 */
+	if (hw_key_hash_size > SYSPARAMS_HW_KEY_HASH_MAX) {
+		prlog(PR_ERR, "IPLPARAMS: hw-key-hash-size=%d too big, "
+		      "truncating to %d\n", hw_key_hash_size,
+		      SYSPARAMS_HW_KEY_HASH_MAX);
+		hw_key_hash_size = SYSPARAMS_HW_KEY_HASH_MAX;
+	}
+
+	dt_add_property(node, "hw-key-hash", sysparams->hw_key_hash,
+			hw_key_hash_size);
+	dt_add_property_cells(node, "hw-key-hash-size", hw_key_hash_size);
+}
+
 static void add_iplparams_sys_params(const void *iplp, struct dt_node *node)
 {
 	const struct iplparams_sysparams *p;
@@ -1019,6 +1070,9 @@ static void add_iplparams_sys_params(const void *iplp, struct dt_node *node)
 	sys_attributes = be32_to_cpu(p->sys_attributes);
 	if (sys_attributes & SYS_ATTR_RISK_LEVEL)
 		dt_add_property(node, "elevated-risk-level", NULL, 0);
+
+	if (version >= 0x60 && proc_gen >= proc_gen_p9)
+		dt_init_secureboot_node(p);
 }
 
 static void add_iplparams_ipl_params(const void *iplp, struct dt_node *node)
@@ -1046,9 +1100,15 @@ static void add_iplparams_ipl_params(const void *iplp, struct dt_node *node)
 	dt_add_property_strings(node, "cec-ipl-side",
 				(p->ipl_side & IPLPARAMS_CEC_FW_IPL_SIDE_TEMP) ?
 				"temp" : "perm");
-	dt_add_property_strings(node, "fsp-ipl-side",
-				(p->ipl_side & IPLPARAMS_FSP_FW_IPL_SIDE_TEMP) ?
-				"temp" : "perm");
+	if (proc_gen >= proc_gen_p9) {
+		dt_add_property_strings(node, "sp-ipl-side",
+					(p->ipl_side & IPLPARAMS_FSP_FW_IPL_SIDE_TEMP) ?
+					"temp" : "perm");
+	} else {
+		dt_add_property_strings(node, "fsp-ipl-side",
+					(p->ipl_side & IPLPARAMS_FSP_FW_IPL_SIDE_TEMP) ?
+					"temp" : "perm");
+	}
 	dt_add_property_cells(node, "os-ipl-mode", p->os_ipl_mode);
 	dt_add_property_strings(node, "cec-major-type",
 				p->cec_ipl_maj_type ? "hot" : "cold");
@@ -1129,6 +1189,58 @@ static void add_iplparams_platform_dump(const void *iplp, struct dt_node *node)
 	}
 }
 
+static void add_iplparams_features(const struct HDIF_common_hdr *iplp)
+{
+	const struct iplparams_feature *feature;
+	const struct HDIF_array_hdr *array;
+	struct dt_node *fw_features;
+	unsigned int count, i;
+	char name[65];
+
+	array = HDIF_get_iarray(iplp, IPLPARAMS_FEATURES, &count);
+	if (!array || !count)
+		return;
+
+	opal_node = dt_new_check(dt_root, "ibm,opal");
+	fw_features = dt_new(opal_node, "fw-features");
+	if (!fw_features)
+		return;
+
+	HDIF_iarray_for_each(array, i, feature) {
+		struct dt_node *n;
+		uint64_t flags;
+
+		/* the name field isn't necessarily null terminated */
+		BUILD_ASSERT(sizeof(name) > sizeof(feature->name));
+		strncpy(name, feature->name, sizeof(name)-1);
+		name[sizeof(name)-1] = '\0';
+		flags = be64_to_cpu(feature->flags);
+
+		if (strlen(name) == 0) {
+			prlog(PR_DEBUG, "IPLPARAMS: FW feature name is NULL\n");
+			continue;
+		}
+
+		prlog(PR_DEBUG, "IPLPARAMS: FW feature %s = %016"PRIx64"\n",
+				name, flags);
+
+		/* get rid of tm-suspend-mode-enabled being disabled */
+		if (strcmp(name, "tm-suspend-mode-enabled") == 0)
+			strcpy(name, "tm-suspend-mode");
+
+		n = dt_new(fw_features, name);
+
+		/*
+		 * This is a bit overkill, but we'll want seperate properties
+		 * for each flag bit(s).
+		 */
+		if (flags & PPC_BIT(0))
+			dt_add_property(n, "enabled", NULL, 0);
+		else
+			dt_add_property(n, "disabled", NULL, 0);
+	}
+}
+
 static void add_iplparams(void)
 {
 	struct dt_node *iplp_node;
@@ -1149,6 +1261,7 @@ static void add_iplparams(void)
 	add_iplparams_ipl_params(ipl_parms, iplp_node);
 	add_iplparams_serials(ipl_parms, iplp_node);
 	add_iplparams_platform_dump(ipl_parms, iplp_node);
+	add_iplparams_features(ipl_parms);
 }
 
 /* Various structure contain a "proc_chip_id" which is an arbitrary
@@ -1368,7 +1481,7 @@ static void add_npu(struct dt_node *xscom, const struct HDIF_array_hdr *links,
 		 * this is going to break.
 		 */
 
-		prlog(PR_DEBUG, "NPU: %04x:%d: Link (%d) targets slot %u",
+		prlog(PR_DEBUG, "NPU: %04x:%d: Link (%d) targets slot %u\n",
 			chip_id, link_count, link_count, slot_id);
 
 		if (link_count >= 6) {
@@ -1431,7 +1544,13 @@ static void add_npu(struct dt_node *xscom, const struct HDIF_array_hdr *links,
 				continue;
 			}
 
-			name = dt_prop_get_def(slot, "ibm,slot-label",
+			/*
+			 * The slot_id points to a node that indicates that
+			 * this GPU should appear under the slot. Grab the
+			 * slot-label from the parent node that represents
+			 * the actual slot.
+			 */
+			name = dt_prop_get_def(slot->parent, "ibm,slot-label",
 						(char *)"<SLOT NAME MISSING>");
 
 			prlog(PR_DEBUG, "NPU: %04x:%d: Target slot %s\n",
@@ -1522,7 +1641,7 @@ static void fixup_spira(void)
 	if (!HDIF_check(&spiras->hdr, SPIRAS_HDIF_SIG))
 		return;
 
-	prlog(PR_NOTICE, "SPIRA-S found.\n");
+	prlog(PR_DEBUG, "SPIRA-S found.\n");
 
 	spira.ntuples.sp_subsys = spiras->ntuples.sp_subsys;
 	spira.ntuples.ipl_parms = spiras->ntuples.ipl_parms;
@@ -1545,6 +1664,7 @@ static void fixup_spira(void)
 	spira.ntuples.proc_chip = spiras->ntuples.proc_chip;
 	spira.ntuples.hs_data = spiras->ntuples.hs_data;
 	spira.ntuples.ipmi_sensor = spiras->ntuples.ipmi_sensor;
+	spira.ntuples.node_stb_data = spiras->ntuples.node_stb_data;
 }
 
 int parse_hdat(bool is_opal)
@@ -1581,11 +1701,11 @@ int parse_hdat(bool is_opal)
 	/* IPL params */
 	add_iplparams();
 
-	/* Parse MS VPD */
-	memory_parse();
-
 	/* Add XSCOM node (must be before chiptod, IO and FSP) */
 	add_xscom();
+
+	/* Parse MS VPD */
+	memory_parse();
 
 	/* Add any FSPs */
 	fsp_parse();
@@ -1617,6 +1737,10 @@ int parse_hdat(bool is_opal)
 	slca_dt_add_sai_node();
 
 	add_stop_levels();
+
+	/* Parse node secure and trusted boot data */
+	if (proc_gen >= proc_gen_p9)
+		node_stb_parse();
 
 	prlog(PR_DEBUG, "Parsing HDAT...done\n");
 

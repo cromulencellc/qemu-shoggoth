@@ -45,6 +45,22 @@
 #define VBE_DISPI_LFB_ENABLED            0x40
 #define VBE_DISPI_NOCLEARMEM             0x80
 
+/* --- VModes */
+
+struct _vMode {
+    UInt32 width;
+    UInt32 height;
+};
+
+struct vMode {
+    struct vMode *next;
+    struct _vMode *mode;
+};
+
+extern struct vMode *vModes;
+extern struct _vMode defaultVModes[];
+extern struct _vMode *getVMode(UInt16 idx);
+
 /* --- Internal APIs */
 
 extern OSStatus	QemuVga_Init();
@@ -55,6 +71,8 @@ extern OSStatus	QemuVga_Close();
 
 extern void QemuVga_EnableInterrupts(void);
 extern void QemuVga_DisableInterrupts(void);
+
+extern UInt16 QemuVga_ReadEdidModes(void);
 
 extern OSStatus	QemuVga_SetDepth(UInt32 bpp);
 

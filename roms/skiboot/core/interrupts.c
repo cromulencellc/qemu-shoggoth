@@ -25,6 +25,8 @@
 #include <device.h>
 #include <ccan/str/str.h>
 #include <timer.h>
+#include <sbe-p8.h>
+#include <sbe-p9.h>
 
 /* ICP registers */
 #define ICP_XIRR		0x4	/* 32-bit access */
@@ -224,14 +226,21 @@ void add_opal_interrupts(void)
 			continue;
 		for (isn = is->start; isn < is->end; isn++) {
 			uint64_t attr = is->ops->attributes(is, isn);
+			uint32_t iflags;
 			char *name;
 
 			if (attr & IRQ_ATTR_TARGET_LINUX)
 				continue;
+			if (attr & IRQ_ATTR_TYPE_MSI)
+				iflags = 0;
+			else
+				iflags = 1;
 			name = is->ops->name ? is->ops->name(is, isn) : NULL;
 			ns = name ? strlen(name) : 0;
-			prlog(PR_DEBUG, "irq %x name: %s (%d/%d)\n",
-			      isn, name ? name : "<null>", ns, tns);
+			prlog(PR_DEBUG, "irq %x name: %s %s\n",
+			      isn,
+			      name ? name : "<null>",
+			      iflags ? "[level]" : "[edge]");
 			names = realloc(names, tns + ns + 1);
 			if (name) {
 				strcpy(names + tns, name);
@@ -240,20 +249,32 @@ void add_opal_interrupts(void)
 			} else
 				names[tns++] = 0;
 			i = count++;
-			irqs = realloc(irqs, 4 * count);
-			irqs[i] = isn;
+			irqs = realloc(irqs, 8 * count);
+			irqs[i*2] = isn;
+			irqs[i*2+1] = iflags;
 		}
 	}
 	unlock(&irq_lock);
 
-	/* The opal-interrupts property has one cell per interrupt,
-	 * it is not a standard interrupt property.
+	/* First create the standard "interrupts" property and the
+	 * corresponding names property
+	 */
+	dt_add_property_cells(opal_node, "interrupt-parent", get_ics_phandle());
+	dt_add_property(opal_node, "interrupts", irqs, count * 8);
+	dt_add_property(opal_node, "opal-interrupts-names", names, tns);
+	dt_add_property(opal_node, "interrupt-names", names, tns);
+
+	/* Now "reduce" it to the old style "opal-interrupts" property
+	 * format by stripping out the flags. The "opal-interrupts"
+	 * property has one cell per interrupt, it is not a standard
+	 * "interrupt" property.
 	 *
 	 * Note: Even if empty, create it, otherwise some bogus error
 	 * handling in Linux can cause problems.
 	 */
+	for (i = 1; i < count; i++)
+		irqs[i] = irqs[i * 2];
 	dt_add_property(opal_node, "opal-interrupts", irqs, count * 4);
-	dt_add_property(opal_node, "opal-interrupts-names", names, tns);
 
 	free(irqs);
 	free(names);
@@ -468,8 +489,8 @@ static int64_t opal_handle_interrupt(uint32_t isn, __be64 *outstanding_event_mas
 	/* Run it */
 	is->ops->interrupt(is, isn);
 
-	/* Check timers if SLW timer isn't working */
-	if (!slw_timer_ok())
+	/* Check timers if SBE timer isn't working */
+	if (!p8_sbe_timer_ok() && !p9_sbe_timer_ok())
 		check_timers(true);
 
 	/* Update output events */

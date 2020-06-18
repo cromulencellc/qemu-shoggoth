@@ -73,7 +73,7 @@ ASM_ENTRY(boot_abort)
 	
 	/* check if i/o is possible, if yes then print message */
 	li	r10, ABORT_CANIO
-	andi.	r3, r31, r10
+	and.	r3, r31, r10
 	bne	abort_noio
 
 	/* use i/o ..., first print reference message */

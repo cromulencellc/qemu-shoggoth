@@ -19,7 +19,6 @@
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
-#include "hw/devices.h"
 #include "net/net.h"
 #include "qapi/error.h"
 #include "qemu/timer.h"
@@ -716,7 +715,7 @@ static int dp8393x_receive_filter(dp8393xState *s, const uint8_t * buf,
     return -1;
 }
 
-static ssize_t dp8393x_receive(NetClientState *nc, uint8_t * buf,
+static ssize_t dp8393x_receive(NetClientState *nc, const uint8_t * buf,
                                size_t size)
 {
     dp8393xState *s = qemu_get_nic_opaque(nc);

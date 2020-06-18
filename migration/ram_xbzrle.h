@@ -24,5 +24,8 @@ int ram_xbzrle_save_queue_pages(const char *rbname, ram_addr_t start, ram_addr_t
 int ram_xbzrle_postcopy_send_discard_bitmap(MigrationState *ms);
 void ram_xbzrle_postcopy_chunk_hostpages_pass(MigrationState *ms, bool unsent_pass,
                                           RAMBlock *block, PostcopyDiscardState *pds);
+void ram_xbzrle_precopy_enable_free_page_optimization(void);
+void ram_xbzrle_update_dirty_pages(RAMBlock *rb, size_t start, size_t npages);
+uint64_t ram_xbzrle_get_total_transferred_pages(void);
 
 #endif

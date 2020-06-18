@@ -63,7 +63,11 @@ I - Device-tree updates
 
       For any of these, a size of 0 means this level is not supported.
 
- 3) Interrupt descriptors
+    - ``single-escalation-support`` (option). When present, indicatges that
+      the "single escalation" feature is supported, thus enabling the use
+      of the OPAL_XIVE_VP_SINGLE_ESCALATION flag.
+
+3) Interrupt descriptors
 
     The interrupt descriptors (aka "interrupts" properties and parts
     of "interrupt-map" properties) remain 2 cells. The first cell is
@@ -506,6 +510,12 @@ with a virtual processor and a priority.
 	       XIVE source. Those interrupts have no triggers, and will not
 	       be masked by opal_set_irq_config() with a prio of 0xff.
 
+  ..note::     The state of the OPAL_XIVE_VP_SINGLE_ESCALATION flag passed to
+	       opal_xive_set_vp_info() can change the escalation irq number,
+	       so make sure you only retrieve this after having set the flag
+	       to the desired value. When set, all priorities will have the
+	       same escalation interrupt.
+
 * out_qflags: will contain flags defined as follow:
 
   - OPAL_XIVE_EQ_ENABLED
@@ -555,13 +565,17 @@ and priority and adjust the behaviour of the queue via flags.
   .. note:: This call will reset the generation bit to 1 and the queue
 	    production pointer to 0.
 
-  .. note:: The PQ bits of the escalation interrupts will be set to 00
-	    when OPAL_XIVE_EQ_ENABLED is set, and to 01 (masked) when
-	    disabling it.
+  .. note:: The PQ bits of the escalation interrupts and of the queue
+            notification will be set to 00 when OPAL_XIVE_EQ_ENABLED is
+	    set, and to 01 (masked) when disabling it.
 
   .. note:: This must be called at least once on a queue with the flag
 	    OPAL_XIVE_EQ_ENABLED in order to enable it after it has been
 	    allocated (along with its owner VP).
+
+  .. note:: When the queue is disabled (flag OPAL_XIVE_EQ_ENABLED cleared)
+	    all other flags and arguments are ignored and the queue
+	    configuration is wiped.
 
 OPAL_XIVE_DONATE_PAGE
 ^^^^^^^^^^^^^^^^^^^^^
@@ -643,7 +657,12 @@ This call returns information about a VP:
 
   - OPAL_XIVE_VP_ENABLED
 
-    This must be set for the VP to be usable and cleared before freeing it
+    Returns the enabled state of the VP
+
+  - OPAL_XIVE_VP_SINGLE_ESCALATION (if available)
+
+    Returns whether single escalation mode is enabled for this VP
+    (see opal_xive_set_vp_info()).
 
 * cam_value: This is the value to program into the thread management
   area to dispatch that VP (ie, an encoding of the block + index).
@@ -672,8 +691,28 @@ This call configures a VP:
     .. note:: This can be used to disable the boot time VPs though this
 	      isn't recommended. This must be used to enable allocated VPs.
 
+  - OPAL_XIVE_VP_SINGLE_ESCALATION (if available)
+
+    If this is set, the queues are configured such that all priorities
+    turn into a single escalation interrupt. This results in the loss of
+    priority 7 which can no longer be used. This this needs to be set
+    before any interrupt is routed to that priority and queue 7 must not
+    have been already enabled.
+
+    This feature is available if the "single-escalation-property" is
+    present in the xive device-tree node.
+
+    .. warning:: When enabling single escalation, and pre-existing routing
+		 and configuration of the individual queues escalation
+		 is lost (except queue 7 which is the new merged escalation).
+		 When further disabling it, the previous value is not
+		 retrieved and the field cleared, escalation is disabled on
+		 all the queues.
+
 * report_cl_pair: This is the real address of the reporting cache line
   pair for that VP or 0 to disable.
+
+    .. note:: When disabling a VP, all other VP settings are lost.
 
 
 OPAL_XIVE_ALLOCATE_IRQ

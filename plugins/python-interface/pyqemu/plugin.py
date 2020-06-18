@@ -76,9 +76,11 @@ class CPU(object):
     def getVirtualMemoryObj(self, address, size):
         return VirtualMemory(self.cpu_id, address, size)
 
-    @staticmethod
-    def setBreakpoint(address, ishw):
-        return set_breakpoint(0, address, ishw)
+    def setBreakpoint(self, address, ishw):
+        return set_breakpoint(self.cpu_id, address, ishw)
+
+    def getArch(self):
+        return get_cpu_type(self.cpu_id)
 
     @staticmethod
     def setPhysicalMemory(address, data):
@@ -234,6 +236,20 @@ class OSProcess(object):
 
     def setBreakpoint(self, address, ishw):
         return set_breakpoint(self.process_pid, address, ishw)
+
+    def setMemory(self, cpu, address, data):
+        if cpu is None:
+            cpu_id = 0
+        else:
+            cpu_id = cpu.cpu_id
+        set_process_memory(cpu_id, self.process_pid, address, data)
+
+    def getMemory(self, cpu, address, size):
+        if cpu is None:
+            cpu_id = 0
+        else:
+            cpu_id = cpu.cpu_id
+        return bytearray(get_process_memory(cpu_id, self.process_pid, address, size))
 
 class OSHandler(object):
     def __init__(self, hint=None):

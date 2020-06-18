@@ -5,7 +5,7 @@
 /*                                                                        */
 /* OpenPOWER HostBoot Project                                             */
 /*                                                                        */
-/* Contributors Listed Below - COPYRIGHT 2015,2017                        */
+/* Contributors Listed Below - COPYRIGHT 2015,2018                        */
 /* [+] International Business Machines Corp.                              */
 /*                                                                        */
 /*                                                                        */
@@ -56,7 +56,7 @@ HCD_CONST64(PPMR_MAGIC_NUMBER,                  ULL(0x50504d525f312e30))  // PPM
 HCD_CONST64(PGPE_MAGIC_NUMBER,                  ULL(0x504750455F312E30))  // PGPE_1.0
 
 HCD_CONST(CME_BUILD_VERSION,                    0x001) // CME__1.0
-HCD_CONST(SGPE_BUILD_VERSION,                   0x001) // SGPE_1.0
+HCD_CONST(SGPE_BUILD_VERSION,                   0x003) // SGPE_3.0
 HCD_CONST(PGPE_BUILD_VERSION,                   0x001) // PGPE_1.0
 
 HCD_CONST64(CPMR_MAGIC_NUMBER_BASE,                  ULL(0x43504d525f302e30))  // CPMR_0.0
@@ -171,6 +171,7 @@ HCD_CONST(QPMR_STOP_FFDC_OFFSET_BYTE,           0x58)
 HCD_CONST(QPMR_STOP_FFDC_LENGTH_BYTE,           0x5C)
 HCD_CONST(QPMR_SGPE_BOOT_PROG_CODE,             0x60)
 HCD_CONST(QPMR_SGPE_IMAGE_SIZE,                 0x64)
+HCD_CONST(QPMR_QUAD_MAX_SCOM_ENTRY_BYTE,        0x68)
 
 /// SGPE Boot
 
@@ -261,15 +262,29 @@ HCD_CONST(QUAD_SCOM_RESTORE_HOMER_OFFSET,
 
 HCD_CONST(MAX_L2_SCOM_ENTRIES,                  16)
 HCD_CONST(MAX_L3_SCOM_ENTRIES,                  16)
-HCD_CONST(MAX_EQ_SCOM_ENTRIES,                  15)
-HCD_CONST(QUAD_SCOM_RESTORE_REGS_PER_QUAD,
-          (MAX_EQ_SCOM_ENTRIES + MAX_L2_SCOM_ENTRIES + MAX_L3_SCOM_ENTRIES + 1))
+
+//HW423686
+//Inorder to continue IMA after STOP11 on all four cores of a quad, 2
+//EQ SCOM registers need to restored per core. STOP API desgin allowed
+//only 15 SCOM restore entries per EQ. Out of total budget, 12 are
+//consumed during IPL. Hence it was not possible to manage IMA within
+//this limit. As a resolution, limit for EQ SCOM restore entries has
+//been changed to 31. Below is the break down for EQ SCOM Restore
+//Entries
+
+// Power Management         12
+// Core IMA                 08
+// PRD FIR Mask             05
+// Reserve                  06
+
+HCD_CONST(MAX_EQ_SCOM_ENTRIES,                  31)
+HCD_CONST(QUAD_SCOM_RESTORE_REGS_PER_QUAD,      256)
 
 HCD_CONST(QUAD_SCOM_RESTORE_SIZE_PER_QUAD,
           (SCOM_RESTORE_ENTRY_SIZE* QUAD_SCOM_RESTORE_REGS_PER_QUAD))
 
 HCD_CONST(QUAD_SCOM_RESTORE_SIZE_TOTAL,         (6 * ONE_KB)) //rounded to 6KB
-
+HCD_CONST(LEGACY_SCOM_RESTORE_VER,              0x02)
 //---------------------------------------------------------------------------------------
 
 /// CPMR Header
@@ -282,6 +297,9 @@ HCD_CONST(CPMR_ATTN_WORD1_BYTE,                 0x04)
 HCD_CONST(CPMR_MAGIC_NUMBER_BYTE,               0x08)
 HCD_CONST(CPMR_BUILD_DATE_BYTE,                 0x10)
 HCD_CONST(CPMR_BUILD_VER_BYTE,                  0x14)
+HCD_CONST(CPMR_SELF_RESTORE_VER_BYTE,           0x1C)
+HCD_CONST(CPMR_STOP_API_VER_BYTE,               0x1D)
+HCD_CONST(CPMR_URMOR_FIX_BYTE,                  0x1E)
 HCD_CONST(CPMR_CME_HCODE_OFFSET_BYTE,           0x20)
 HCD_CONST(CPMR_CME_HCODE_LENGTH_BYTE,           0x24)
 HCD_CONST(CPMR_CORE_COMMON_RING_OFFSET_BYTE,    0x28)
@@ -294,8 +312,9 @@ HCD_CONST(CPMR_CORE_SCOM_RESTORE_OFFSET_BYTE,   0x40)
 HCD_CONST(CPMR_CORE_SCOM_RESTORE_LENGTH_BYTE,   0x44)
 HCD_CONST(CPMR_SELF_RESTORE_OFFSET_BYTE,        0x48)
 HCD_CONST(CPMR_SELF_RESTORE_LENGTH_BYTE,        0x4C)
+HCD_CONST(CPMR_MAX_SCOM_REST_PER_CORE_BYTE,     0x50)
 
-/// Self Restore
+/// Self Restore without SMF Support
 
 HCD_CONST(SELF_RESTORE_CPMR_OFFSET,             CPMR_HEADER_SIZE)
 HCD_CONST(SELF_RESTORE_INT_SIZE,                (8 * ONE_KB))
@@ -314,7 +333,25 @@ HCD_CONST(SELF_RESTORE_CORE_REGS_SIZE,
 HCD_CONST(SELF_RESTORE_SIZE_TOTAL,
           (SELF_RESTORE_CODE_SIZE + SELF_RESTORE_CORE_REGS_SIZE))
 
+// Self Restore Region With SMF Support
+HCD_CONST(SMF_THREAD_LAUNCHER_SIZE,         1024)
+HCD_CONST(SMF_SELF_RESTORE_CODE_SIZE,
+          (SELF_RESTORE_INT_SIZE + SMF_THREAD_LAUNCHER_SIZE))
 
+HCD_CONST(SMF_CORE_RESTORE_THREAD_AREA_SIZE,         HALF_KB)
+HCD_CONST(SMF_SELF_SAVE_THREAD_AREA_SIZE,            256)
+HCD_CONST(SMF_CORE_RESTORE_CORE_AREA_SIZE,           HALF_KB)
+HCD_CONST(SMF_CORE_SAVE_CORE_AREA_SIZE,              HALF_KB)
+
+HCD_CONST(SMF_SELF_RESTORE_CORE_REGS_SIZE,
+          MAX_CORES_PER_CHIP * ((SMF_CORE_RESTORE_THREAD_AREA_SIZE* MAX_THREADS_PER_CORE ) +
+                                (SMF_SELF_SAVE_THREAD_AREA_SIZE*     MAX_THREADS_PER_CORE ) +
+                                SMF_CORE_RESTORE_CORE_AREA_SIZE +
+                                SMF_CORE_SAVE_CORE_AREA_SIZE ))
+
+HCD_CONST(SMF_SELF_RESTORE_SIZE_TOTAL,
+          (SMF_SELF_RESTORE_CODE_SIZE + SMF_SELF_RESTORE_CORE_REGS_SIZE))
+HCD_CONST( EC_LEVEL_URMOR_FIX, 0x23 )
 /// Core Scom
 
 HCD_CONST(CORE_SCOM_RESTORE_CPMR_OFFSET,        (256 * ONE_KB))
@@ -414,7 +451,6 @@ HCD_CONST(CME_TRACE_REGION_SIZE,                (16 * ONE_KB))
 HCD_CONST(CPMR_TRACE_REGION_SIZE,               (CME_TRACE_REGION_SIZE* MAX_CMES_PER_CHIP)) // 192K
 HCD_CONST(CPMR_DEBUG_REGION_OFFSET,             CPMR_TRACE_REGION_OFFSET + CPMR_TRACE_REGION_SIZE)
 HCD_CONST(CPMR_DEBUG_REGION_SIZE,               (64 * ONE_KB)) // 192K + 64K = 256K
-
 
 
 //---------------------------------------------------------------------------------------

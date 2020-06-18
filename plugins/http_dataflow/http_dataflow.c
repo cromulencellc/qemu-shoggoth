@@ -117,7 +117,7 @@ static void http_dataflow_on_packet_recv(void *opaque, uint8_t **pkt_buf, uint32
     }
 }
 
-static void http_dataflow_on_memory_read(void *opaque, uint64_t paddr, uint8_t *value, void *addr, int size)
+static void http_dataflow_on_memory_read(void *opaque, uint64_t paddr, uint64_t vaddr, uint8_t *value, void *addr, int size)
 {
     Http_Dataflow *h = HTTP_DATAFLOW(opaque);
     Http_DataflowClass *h_klass = HTTP_DATAFLOW_GET_CLASS(h);
@@ -170,7 +170,7 @@ static void http_dataflow_on_memory_read(void *opaque, uint64_t paddr, uint8_t *
 }
 
 
-static void http_dataflow_on_memory_write(void *opaque, uint64_t paddr, const uint8_t *value, void *addr, int size)
+static void http_dataflow_on_memory_write(void *opaque, uint64_t paddr, uint64_t vaddr, const uint8_t *value, void *addr, int size)
 {
     Http_Dataflow *h = HTTP_DATAFLOW(opaque);
     Http_DataflowClass *h_klass = HTTP_DATAFLOW_GET_CLASS(h);

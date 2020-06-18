@@ -109,6 +109,7 @@
 #define IPMI_GET_SEL_TIME		IPMI_CODE(IPMI_NETFN_STORAGE, 0x48)
 #define IPMI_SET_SEL_TIME		IPMI_CODE(IPMI_NETFN_STORAGE, 0x49)
 #define IPMI_CHASSIS_CONTROL		IPMI_CODE(IPMI_NETFN_CHASSIS, 0x02)
+#define IPMI_BMC_GET_DEVICE_ID		IPMI_CODE(IPMI_NETFN_APP, 0x01)
 #define IPMI_SET_POWER_STATE		IPMI_CODE(IPMI_NETFN_APP, 0x06)
 #define IPMI_GET_POWER_STATE		IPMI_CODE(IPMI_NETFN_APP, 0x07)
 #define IPMI_RESET_WDT			IPMI_CODE(IPMI_NETFN_APP, 0x22)
@@ -180,6 +181,7 @@ struct ipmi_backend {
 	int (*queue_msg)(struct ipmi_msg *);
 	int (*queue_msg_head)(struct ipmi_msg *);
 	int (*dequeue_msg)(struct ipmi_msg *);
+	void (*disable_retry)(struct ipmi_msg *);
 };
 
 extern struct ipmi_backend *ipmi_backend;
@@ -240,6 +242,11 @@ void ipmi_register_backend(struct ipmi_backend *backend);
 /* Allocate IPMI SEL panic message */
 void ipmi_sel_init(void);
 
+/* Register SEL handler with IPMI core */
+int ipmi_sel_register(uint8_t oem_cmd,
+		      void (*handler)(uint8_t data, void *context),
+		      void *context);
+
 /* Register rtc ipmi commands with as opal callbacks. */
 void ipmi_rtc_init(void);
 
@@ -277,5 +284,11 @@ int ipmi_set_boot_count(void);
 
 /* Terminate immediate */
 void __attribute__((noreturn)) ipmi_terminate(const char *msg);
+
+/* Get BMC firmware info */
+extern int ipmi_get_bmc_info_request(void);
+
+/* Add BMC firmware info to device tree */
+extern void ipmi_dt_add_bmc_info(void);
 
 #endif

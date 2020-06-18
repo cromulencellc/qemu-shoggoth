@@ -1,4 +1,3 @@
-
 /* Copyright 2013-2014 IBM Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,6 +18,7 @@
 #include <opal.h>
 #include <cpu.h>
 #include <chip.h>
+#include <debug_descriptor.h>
 
 unsigned long tb_hz = 512000000;
 
@@ -41,7 +41,6 @@ static void time_wait_poll(unsigned long duration)
 		if (remaining >= period) {
 			opal_run_pollers();
 			time_wait_nopoll(period);
-			remaining -= period;
 		} else
 			time_wait_nopoll(remaining);
 
@@ -53,12 +52,12 @@ void time_wait(unsigned long duration)
 {
 	struct cpu_thread *c = this_cpu();
 
-	if (this_cpu()->lock_depth) {
+	if (!list_empty(&this_cpu()->locks_held)) {
 		time_wait_nopoll(duration);
 		return;
 	}
 
-	if (c != boot_cpu)
+	if (c != boot_cpu && opal_booting())
 		time_wait_nopoll(duration);
 	else
 		time_wait_poll(duration);

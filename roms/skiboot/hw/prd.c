@@ -23,12 +23,15 @@
 #include <fsp.h>
 #include <mem_region.h>
 #include <prd-fw-msg.h>
+#include <hostservices.h>
 
 enum events {
 	EVENT_ATTN	= 1 << 0,
 	EVENT_OCC_ERROR	= 1 << 1,
 	EVENT_OCC_RESET	= 1 << 2,
 	EVENT_SBE_PASSTHROUGH = 1 << 3,
+	EVENT_FSP_OCC_RESET = 1 << 4,
+	EVENT_FSP_OCC_LOAD_START = 1 << 5,
 };
 
 static uint8_t events[MAX_CHIPS];
@@ -114,6 +117,14 @@ static void prd_msg_consumed(void *data)
 		proc = msg->sbe_passthrough.chip;
 		event = EVENT_SBE_PASSTHROUGH;
 		break;
+	case OPAL_PRD_MSG_TYPE_FSP_OCC_RESET:
+		proc = msg->occ_reset.chip;
+		event = EVENT_FSP_OCC_RESET;
+		break;
+	case OPAL_PRD_MSG_TYPE_FSP_OCC_LOAD_START:
+		proc = msg->occ_reset.chip;
+		event = EVENT_FSP_OCC_LOAD_START;
+		break;
 	default:
 		prlog(PR_ERR, "PRD: invalid msg consumed, type: 0x%x\n",
 				msg->hdr.type);
@@ -188,6 +199,12 @@ static void send_next_pending_event(void)
 	} else if (event & EVENT_SBE_PASSTHROUGH) {
 		prd_msg->hdr.type = OPAL_PRD_MSG_TYPE_SBE_PASSTHROUGH;
 		prd_msg->sbe_passthrough.chip = proc;
+	} else if (event & EVENT_FSP_OCC_RESET) {
+		prd_msg->hdr.type = OPAL_PRD_MSG_TYPE_FSP_OCC_RESET;
+		prd_msg->occ_reset.chip = proc;
+	} else if (event & EVENT_FSP_OCC_LOAD_START) {
+		prd_msg->hdr.type = OPAL_PRD_MSG_TYPE_FSP_OCC_LOAD_START;
+		prd_msg->occ_reset.chip = proc;
 	}
 
 	/*
@@ -274,9 +291,19 @@ void prd_occ_reset(uint32_t proc)
 	prd_event(proc, EVENT_OCC_RESET);
 }
 
+void prd_fsp_occ_reset(uint32_t proc)
+{
+	prd_event(proc, EVENT_FSP_OCC_RESET);
+}
+
 void prd_sbe_passthrough(uint32_t proc)
 {
 	prd_event(proc, EVENT_SBE_PASSTHROUGH);
+}
+
+void prd_fsp_occ_load_start(uint32_t proc)
+{
+	prd_event(proc, EVENT_FSP_OCC_LOAD_START);
 }
 
 /* incoming message handlers */
@@ -375,7 +402,21 @@ static int prd_msg_handle_firmware_req(struct opal_prd_msg *msg)
 		prd_msg->hdr.size = cpu_to_be16(sizeof(*prd_msg));
 		rc = 0;
 		break;
+	case PRD_FW_MSG_TYPE_ERROR_LOG:
+		rc = hservice_send_error_log(fw_req->errorlog.plid,
+					     fw_req->errorlog.size,
+					     fw_req->errorlog.data);
+		/* Return generic response to HBRT */
+		fw_resp->type = cpu_to_be64(PRD_FW_MSG_TYPE_RESP_GENERIC);
+		fw_resp->generic_resp.status = cpu_to_be64(rc);
+		prd_msg->fw_resp.len = cpu_to_be64(PRD_FW_MSG_BASE_SIZE +
+						 sizeof(fw_resp->generic_resp));
+		prd_msg->hdr.size = cpu_to_be16(sizeof(*prd_msg));
+		rc = 0;
+		break;
 	default:
+		prlog(PR_DEBUG, "PRD: Unsupported fw_request type : 0x%llx\n",
+		      be64_to_cpu(fw_req->type));
 		rc = -ENOSYS;
 	}
 
@@ -418,7 +459,21 @@ static int64_t opal_prd_msg(struct opal_prd_msg *msg)
 	case OPAL_PRD_MSG_TYPE_FIRMWARE_REQUEST:
 		rc = prd_msg_handle_firmware_req(msg);
 		break;
+	case OPAL_PRD_MSG_TYPE_FSP_OCC_RESET_STATUS:
+		rc = fsp_occ_reset_status(msg->fsp_occ_reset_status.chip,
+					  msg->fsp_occ_reset_status.status);
+		break;
+	case OPAL_PRD_MSG_TYPE_CORE_SPECIAL_WAKEUP:
+		rc = hservice_wakeup(msg->spl_wakeup.core,
+				     msg->spl_wakeup.mode);
+		break;
+	case OPAL_PRD_MSG_TYPE_FSP_OCC_LOAD_START_STATUS:
+		rc = fsp_occ_load_start_status(msg->fsp_occ_reset_status.chip,
+					msg->fsp_occ_reset_status.status);
+		break;
 	default:
+		prlog(PR_DEBUG, "PRD: Unsupported prd message type : 0x%x\n",
+		      msg->hdr.type);
 		rc = OPAL_UNSUPPORTED;
 	}
 

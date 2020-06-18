@@ -8,7 +8,7 @@
  * Approved for Public Release, Distribution Unlimited
  *
  * Authors:
- *  Joseph Walker
+ *  Change Me <changeme@email.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -66,7 +66,7 @@ static void ${name}_finalize(Object *obj)
 % if callback:
     % if 'memory_read' in callback:
 
-static void ${name}_on_memory_read(void *opaque, uint64_t paddr, uint8_t *value, void *addr, int size)
+static void ${name}_on_memory_read(void *opaque, uint64_t paddr, uint64_t vaddr, uint8_t *value, void *addr, int size)
 {
     ${Name} *h = ${NAME}(opaque);
     ${Name}Class *h_klass = ${NAME}_GET_CLASS(h);
@@ -76,7 +76,7 @@ static void ${name}_on_memory_read(void *opaque, uint64_t paddr, uint8_t *value,
     % endif
     % if 'memory_write' in callback:
 
-static void ${name}_on_memory_write(void *opaque, uint64_t paddr, const uint8_t *value, void *addr, int size)
+static void ${name}_on_memory_write(void *opaque, uint64_t paddr, uint64_t vaddr, const uint8_t *value, void *addr, int size)
 {
     ${Name} *h = ${NAME}(opaque);
     ${Name}Class *h_klass = ${NAME}_GET_CLASS(h);

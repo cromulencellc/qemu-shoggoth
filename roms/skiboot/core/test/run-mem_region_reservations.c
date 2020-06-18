@@ -17,12 +17,8 @@
 #include <config.h>
 
 #define BITS_PER_LONG (sizeof(long) * 8)
-/* Don't include this, it's PPC-specific */
-#define __CPU_H
-static unsigned int cpu_max_pir = 1;
-struct cpu_thread {
-	unsigned int			chip_id;
-};
+
+#include "dummy-cpu.h"
 
 #include <stdlib.h>
 
@@ -57,8 +53,11 @@ static void real_free(void *p)
 #include <assert.h>
 #include <stdio.h>
 
-void lock(struct lock *l)
+enum proc_chip_quirks proc_chip_quirks;
+
+void lock_caller(struct lock *l, const char *caller)
 {
+	(void)caller;
 	assert(!l->lock_val);
 	l->lock_val++;
 }
@@ -118,6 +117,7 @@ static void check_property_reservations(void)
 	unsigned int i, l;
 	const char *name;
 	uint64_t *rangep;
+	const char *at;
 
 	/* check dt properties */
 	names = dt_find_property(dt_root, "reserved-names");
@@ -136,7 +136,9 @@ static void check_property_reservations(void)
 		l = strlen(name) + 1;
 
 		for (i = 0; i < ARRAY_SIZE(test_regions); i++) {
-			if (strcmp(test_regions[i].name, name))
+			at = strchr(name, '@');
+			if (strncmp(test_regions[i].name, name,
+				    at ? at-name: strlen(name)))
 				continue;
 			assert(test_regions[i].addr == addr);
 			assert(!test_regions[i].found);

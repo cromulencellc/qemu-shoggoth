@@ -103,7 +103,7 @@ const char **props_to_fix(struct dt_node *node)
 
 int main(void)
 {
-	struct dt_node *root, *c1, *c2, *gc1, *gc2, *gc3, *ggc1, *ggc2;
+	struct dt_node *root, *other_root, *c1, *c2, *c2_c, *gc1, *gc2, *gc3, *ggc1, *ggc2;
 	struct dt_node *addrs, *addr1, *addr2;
 	struct dt_node *i, *subtree, *ev1, *ut1, *ut2;
 	const struct dt_property *p;
@@ -117,13 +117,16 @@ int main(void)
 	assert(!list_top(&root->properties, struct dt_property, list));
 	check_path(root, "/");
 
-	c1 = dt_new(root, "c1");
+	c1 = dt_new_check(root, "c1");
 	assert(!list_top(&c1->properties, struct dt_property, list));
 	check_path(c1, "/c1");
 	assert(dt_find_by_name(root, "c1") == c1);
 	assert(dt_find_by_path(root, "/c1") == c1);
+	assert(dt_new(root, "c1") == NULL);
 
 	c2 = dt_new(root, "c2");
+	c2_c = dt_new_check(root, "c2");
+	assert(c2 == c2_c);
 	assert(!list_top(&c2->properties, struct dt_property, list));
 	check_path(c2, "/c2");
 	assert(dt_find_by_name(root, "c2") == c2);
@@ -165,12 +168,14 @@ int main(void)
 	assert(dt_find_by_name(root, "addr@1337") == addr1);
 	assert(dt_find_by_name_addr(root, "addr", 0x1337) == addr1);
 	assert(dt_find_by_path(root, "/addrs/addr@1337") == addr1);
+	assert(dt_new_addr(addrs, "addr", 0x1337) == NULL);
 
 	addr2 = dt_new_2addr(addrs, "2addr", 0xdead, 0xbeef);
 	assert(!list_top(&addr2->properties, struct dt_property, list));
 	check_path(addr2, "/addrs/2addr@dead,beef");
 	assert(dt_find_by_name(root, "2addr@dead,beef") == addr2);
 	assert(dt_find_by_path(root, "/addrs/2addr@dead,beef") == addr2);
+	assert(dt_new_2addr(addrs, "2addr", 0xdead, 0xbeef) == NULL);
 
 	/* Test walking the tree, checking and setting values */
 	for (n = 0, i = dt_first(root); i; i = dt_next(root, i), n++) {
@@ -323,13 +328,26 @@ int main(void)
 	gc1 = dt_new(c1, "coprocessor1");
 	dt_add_property_strings(gc1, "compatible",
 				"specific-fake-coprocessor");
+	gc2 = dt_new(gc1, "coprocessor2");
+	dt_add_property_strings(gc2, "compatible",
+				"specific-fake-coprocessor");
+	gc3 = dt_new(c1, "coprocessor3");
+	dt_add_property_strings(gc3, "compatible",
+				"specific-fake-coprocessor");
 
-	gc2 = dt_new(c1, "node-without-compatible");
-	assert(__dt_find_property(gc2, "compatible") == NULL);
-	assert(!dt_node_is_compatible(gc2, "any-property"));
 
 	assert(dt_find_compatible_node(root, NULL, "generic-fake-bus") == c2);
 	assert(dt_find_compatible_node(root, c2, "generic-fake-bus") == NULL);
+
+	/* we can find all compatible nodes */
+	assert(dt_find_compatible_node(c1, NULL, "specific-fake-coprocessor") == gc1);
+	assert(dt_find_compatible_node(c1, gc1, "specific-fake-coprocessor") == gc2);
+	assert(dt_find_compatible_node(c1, gc2, "specific-fake-coprocessor") == gc3);
+	assert(dt_find_compatible_node(c1, gc3, "specific-fake-coprocessor") == NULL);
+	assert(dt_find_compatible_node(root, NULL, "specific-fake-coprocessor") == gc1);
+	assert(dt_find_compatible_node(root, gc1, "specific-fake-coprocessor") == gc2);
+	assert(dt_find_compatible_node(root, gc2, "specific-fake-coprocessor") == gc3);
+	assert(dt_find_compatible_node(root, gc3, "specific-fake-coprocessor") == NULL);
 
 	/* we can find the coprocessor once on the cpu */
 	assert(dt_find_compatible_node_on_chip(root,
@@ -338,6 +356,14 @@ int main(void)
 					       0xcafe) == gc1);
 	assert(dt_find_compatible_node_on_chip(root,
 					       gc1,
+					       "specific-fake-coprocessor",
+					       0xcafe) == gc2);
+	assert(dt_find_compatible_node_on_chip(root,
+					       gc2,
+					       "specific-fake-coprocessor",
+					       0xcafe) == gc3);
+	assert(dt_find_compatible_node_on_chip(root,
+					       gc3,
 					       "specific-fake-coprocessor",
 					       0xcafe) == NULL);
 
@@ -349,9 +375,9 @@ int main(void)
 
 	/* Test phandles. We override the automatically generated one. */
 	phandle = 0xf00;
-	dt_add_property(gc2, "phandle", (const void *)&phandle, 4);
+	dt_add_property(gc3, "phandle", (const void *)&phandle, 4);
 	assert(last_phandle == 0xf00);
-	assert(dt_find_by_phandle(root, 0xf00) == gc2);
+	assert(dt_find_by_phandle(root, 0xf00) == gc3);
 	assert(dt_find_by_phandle(root, 0xf0f) == NULL);
 
 	dt_free(root);
@@ -367,6 +393,13 @@ int main(void)
 
 	assert(is_sorted(root));
 
+	/* Now test dt_attach_root */
+	other_root = dt_new_root("other_root");
+	dt_new(other_root, "d@1");
+
+	assert(dt_attach_root(root, other_root));
+	other_root = dt_new_root("other_root");
+	assert(!dt_attach_root(root, other_root));
 	dt_free(root);
 
 	/* Test child node sorting */

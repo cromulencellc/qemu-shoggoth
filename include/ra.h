@@ -37,6 +37,7 @@ void rapid_analysis_end_work(CPUState *cpu, bool send_report);
 void rapid_analysis_increment_analysis(CPUState *cpu, TranslationBlock *tb);
 void rapid_analysis_set_configuration(CommsRequestConfigMsg *req, CommsQueue *q);
 void rapid_analysis_send_tree(CommsRequestRapidSaveTreeMsg *req, CommsQueue *q);
+void rapid_analysis_accel_init(QemuOpts *ra_opts, QemuOpts *accel_opts, Error **errp);
 void rapid_analysis_drive_init(QemuOpts *ra_opts, MachineState *machine);
 void rapid_analysis_init(QemuOpts *ra_opts, MachineState *machine);
 void rapid_analysis_cleanup(MachineState *machine);

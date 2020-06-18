@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -276,6 +276,7 @@ void cpu_exec_step_atomic(CPUState *cpu)
 #ifndef CONFIG_SOFTMMU
         tcg_debug_assert(!have_mmap_lock());
 #endif
+        qemu_mutex_unlockall_iothread();
         assert_no_pages_locked();
     }
 
@@ -342,6 +343,9 @@ TranslationBlock *tb_htable_lookup(CPUState *cpu, target_ulong pc,
     desc.trace_vcpu_dstate = *cpu->trace_dstate;
     desc.pc = pc;
     phys_pc = get_page_addr_code(desc.env, pc);
+    if (phys_pc == -1) {
+        return NULL;
+    }
     desc.phys_page1 = phys_pc & TARGET_PAGE_MASK;
     h = tb_hash_func(phys_pc, pc, flags, cf_mask, *cpu->trace_dstate);
     return qht_lookup_custom(&tb_ctx.htable, &desc, h, tb_lookup_cmp);
@@ -423,7 +427,7 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
     }
 #endif
     /* See if we can patch the calling TB. */
-    if (last_tb && !qemu_loglevel_mask(CPU_LOG_TB_NOCHAIN)) {
+    if (last_tb) {
         tb_add_jump(last_tb, tb_exit, tb);
     }
     return tb;
@@ -484,11 +488,9 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
     if (cpu->exception_index >= EXCP_INTERRUPT) {
         /* exit request from the cpu execution loop */
         *ret = cpu->exception_index;
- 
         if (*ret == EXCP_DEBUG) {
             cpu_handle_debug_exception(cpu);
         }
-        
         cpu->exception_index = -1;
         return true;
     } else {
@@ -517,7 +519,7 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
             qemu_mutex_lock_iothread();
             cc->do_interrupt(cpu);
             qemu_mutex_unlock_iothread();
-            cpu->exception_index = -1;        
+            cpu->exception_index = -1;
         } else if (!replay_has_interrupt()) {
             /* give a chance to iothread in replay mode */
             *ret = EXCP_INTERRUPT;
@@ -599,24 +601,23 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
             interrupt_request = cpu->interrupt_request;
         }
         /* The target hook has 3 exit conditions:
-        False when the interrupt isn't processed,
-        True when it is, and we should restart on a new TB,
-        and via longjmp via cpu_loop_exit.  */ 
+           False when the interrupt isn't processed,
+           True when it is, and we should restart on a new TB,
+           and via longjmp via cpu_loop_exit.  */
         else {
             if (cc->cpu_exec_interrupt(cpu, interrupt_request)) {
                 replay_interrupt();
                 cpu->exception_index = -1;
                 *last_tb = NULL;
             }
-
             /* The target hook may have updated the 'cpu->interrupt_request';
-            * reload the 'interrupt_request' value */
+             * reload the 'interrupt_request' value */
             interrupt_request = cpu->interrupt_request;
         }
         if (interrupt_request & CPU_INTERRUPT_EXITTB) {
             cpu->interrupt_request &= ~CPU_INTERRUPT_EXITTB;
             /* ensure that no TB jump will be modified as
-            the program flow was changed */
+               the program flow was changed */
             *last_tb = NULL;
         }
 
@@ -686,6 +687,7 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
 }
 
 /* main execution loop */
+
 int cpu_exec(CPUState *cpu)
 {
     CPUClass *cc = CPU_GET_CLASS(cpu);
@@ -713,7 +715,7 @@ int cpu_exec(CPUState *cpu)
     /* prepare setjmp context for exception handling */
     if (sigsetjmp(cpu->jmp_env, 0) != 0) {
 #if defined(__clang__) || !QEMU_GNUC_PREREQ(4, 6)
-        /* Some compilers wrongly smash all local variables aftersigsetjmp
+        /* Some compilers wrongly smash all local variables after
          * siglongjmp. There were bug reports for gcc 4.5.0 and clang.
          * Reload essential local variables here for those compilers.
          * Newer versions of gcc would complain about this code (-Wclobbered). */

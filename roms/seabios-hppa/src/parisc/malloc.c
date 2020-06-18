@@ -23,7 +23,7 @@ static unsigned long stackptr;
 
 // Allocate physical memory from the given zone and track it as a PMM allocation
 unsigned long
-malloc_palloc(void *zone, u32 size, u32 align)
+malloc_palloc(struct zone_s *zone, u32 size, u32 align)
 {
     unsigned long data;
 

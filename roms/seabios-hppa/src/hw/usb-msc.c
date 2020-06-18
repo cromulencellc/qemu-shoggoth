@@ -158,7 +158,7 @@ usb_msc_lun_setup(struct usb_pipe *inpipe, struct usb_pipe *outpipe,
     drive->lun = lun;
 
     int prio = bootprio_find_usb(usbdev, lun);
-    int ret = scsi_drive_setup(&drive->drive, "USB MSC", prio);
+    int ret = scsi_drive_setup(&drive->drive, "USB MSC", prio, 0, lun);
     if (ret) {
         dprintf(1, "Unable to configure USB MSC drive.\n");
         free(drive);

@@ -184,7 +184,7 @@ static int aw_emac_can_receive(NetClientState *nc)
     return (s->ctl & EMAC_CTL_RX_EN) && (fifo8_num_free(&s->rx_fifo) >= 1532);
 }
 
-static ssize_t aw_emac_receive(NetClientState *nc, uint8_t *buf,
+static ssize_t aw_emac_receive(NetClientState *nc, const uint8_t *buf,
                                size_t size)
 {
     AwEmacState *s = qemu_get_nic_opaque(nc);

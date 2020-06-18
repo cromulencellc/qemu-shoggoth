@@ -4,10 +4,13 @@
 tmp.*
 /add_subnode_with_nops
 /addr_size_cells
+/addr_size_cells2
 /appendprop[12]
 /asm_tree_dump
 /boot-cpuid
 /char_literal
+/check_full
+/check_header
 /check_path
 /del_node
 /del_property
@@ -58,6 +61,9 @@ tmp.*
 /subnode_offset
 /supernode_atdepth_offset
 /sw_tree1
+/sw_states
 /truncated_property
+/truncated_string
+/truncated_memrsv
 /utilfdt_test
 /value-labels

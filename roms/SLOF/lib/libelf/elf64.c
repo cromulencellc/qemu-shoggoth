@@ -362,6 +362,7 @@ elf_apply_rela64(void *file_addr, signed long offset, struct rela *relaentry,
 	 case R_PPC64_TOC16_DS: 	/* (S + A - .TOC) >> 2 */
 	 case R_PPC64_REL14:
 	 case R_PPC64_REL24:		/* (S + A - P) >> 2 */
+	 case R_PPC64_REL32:		/* S + A - P */
 	 case R_PPC64_REL64:		/* S + A - P */
 	 case R_PPC64_GOT16_DS:
 	 case R_PPC64_GOT16_LO_DS:

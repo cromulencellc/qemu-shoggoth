@@ -1,6 +1,7 @@
 #ifndef __MALLOC_H
 #define __MALLOC_H
 
+#include "autoconf.h" // CONFIG_*
 #include "types.h" // u32
 
 // malloc.c
@@ -15,10 +16,11 @@ void malloc_preinit(void);
 extern u32 LegacyRamSize;
 void malloc_init(void);
 void malloc_prepboot(void);
-// u32 malloc_palloc(struct zone_s *zone, u32 size, u32 align);
-unsigned long malloc_palloc(void *zone, u32 size, u32 align);
+unsigned long malloc_palloc(struct zone_s *zone, u32 size, u32 align);
 void *parisc_malloc(u32 size, u32 align);
-#define _malloc(ignore, size, align) parisc_malloc(size, align)
+void *x86_malloc(struct zone_s *zone, u32 size, u32 align);
+#define _malloc(zone, size, align) \
+    (CONFIG_X86 ? x86_malloc(zone, size, align) : parisc_malloc(size, align))
 int malloc_pfree(u32 data);
 void free(void *data);
 u32 malloc_getspace(struct zone_s *zone);

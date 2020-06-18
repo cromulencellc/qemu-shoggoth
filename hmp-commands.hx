@@ -350,18 +350,21 @@ ETEXI
     {
         .name       = "savevm",
         .args_type  = "name:s?",
-        .params     = "[tag|id]",
-        .help       = "save a VM snapshot. If no tag or id are provided, a new snapshot is created",
+        .params     = "tag",
+        .help       = "save a VM snapshot. If no tag is provided, a new snapshot is created",
         .cmd        = hmp_savevm,
     },
 
 STEXI
-@item savevm [@var{tag}|@var{id}]
+@item savevm @var{tag}
 @findex savevm
 Create a snapshot of the whole virtual machine. If @var{tag} is
 provided, it is used as human readable identifier. If there is already
-a snapshot with the same tag or ID, it is replaced. More info at
+a snapshot with the same tag, it is replaced. More info at
 @ref{vm_snapshots}.
+
+Since 4.0, savevm stopped allowing the snapshot id to be set, accepting
+only @var{tag} as parameter.
 ETEXI
 
     {
@@ -383,17 +386,19 @@ ETEXI
     {
         .name       = "loadvm",
         .args_type  = "name:s",
-        .params     = "tag|id",
-        .help       = "restore a VM snapshot from its tag or id",
+        .params     = "tag",
+        .help       = "restore a VM snapshot from its tag",
         .cmd        = hmp_loadvm,
         .command_completion = loadvm_completion,
     },
 
 STEXI
-@item loadvm @var{tag}|@var{id}
+@item loadvm @var{tag}
 @findex loadvm
 Set the whole virtual machine to the snapshot identified by the tag
-@var{tag} or the unique snapshot ID @var{id}.
+@var{tag}.
+
+Since 4.0, loadvm stopped accepting snapshot id as parameter.
 ETEXI
 
     {
@@ -414,17 +419,21 @@ ETEXI
     {
         .name       = "delvm",
         .args_type  = "name:s",
-        .params     = "tag|id",
-        .help       = "delete a VM snapshot from its tag or id",
+        .params     = "tag",
+        .help       = "delete a VM snapshot from its tag",
         .cmd        = hmp_delvm,
         .command_completion = delvm_completion,
     },
 
 STEXI
-@item os
-@findex os
-Toggle OS handler enabled/disabled  DEFAULT: Disabled
+@item delvm @var{tag}
+@findex delvm
+Delete the snapshot identified by @var{tag}.
+
+Since 4.0, delvm stopped deleting snapshots by snapshot id, accepting
+only @var{tag} as parameter.
 ETEXI
+
     {
         .name = "os",
         .args_type  = "type:s?",
@@ -434,10 +443,11 @@ ETEXI
     },
 
 STEXI
-@item bp
-@findex bp
-Set a breakpoint
+@item os
+@findex os
+Toggle OS handler enabled/disabled  DEFAULT: Disabled
 ETEXI
+
     {
         .name       = "bp",
         .args_type  = "address:s",
@@ -451,6 +461,7 @@ STEXI
 @findex bp
 Set a breakpoint
 ETEXI
+
     {
         .name       = "bphw",
         .args_type  = "address:s",
@@ -460,10 +471,11 @@ ETEXI
     },
 
 STEXI
-@item bplist
-@findex bplist
-List all breakpoints
+@item bphw
+@findex bphw
+Set a hardware breakpoint
 ETEXI
+
     {
         .name       = "bplist",
         .args_type  = "",
@@ -473,10 +485,11 @@ ETEXI
     },
 
 STEXI
-@item rmbp
-@findex rmbp
-Remove a breakpoint
+@item bplist
+@findex bplist
+List all breakpoints
 ETEXI
+
     {
         .name       = "rmbp",
         .args_type  = "bpid:s",
@@ -485,10 +498,11 @@ ETEXI
     },
 
 STEXI
-@item maps
-@findex maps
-Display maps for the process in focus
+@item rmbp
+@findex rmbp
+Remove a breakpoint
 ETEXI
+
     {
         .name       = "maps",
         .args_type  = "",
@@ -497,10 +511,11 @@ ETEXI
     },
 
 STEXI
-@item debug
-@findex debug
-Change prompt to the plugin driven command interface
+@item maps
+@findex maps
+Display maps for the process in focus
 ETEXI
+
     {
         .name       = "debug",
         .args_type  = "",
@@ -509,9 +524,9 @@ ETEXI
     },
 
 STEXI
-@item ps
-@findex ps
-Get a process list
+@item debug
+@findex debug
+Change prompt to the plugin driven command interface
 ETEXI
     {
         .name       = "ps",
@@ -522,10 +537,11 @@ ETEXI
     },
 
 STEXI
-@item pid
-@findex pid
-Set a PID as active
+@item ps
+@findex ps
+Get a process list
 ETEXI
+
     {
         .name       = "pid",
         .args_type  = "pid_num:i",
@@ -534,20 +550,35 @@ ETEXI
     },
 
 STEXI
-@item unpid
-@findex unpid
-Deactivates a PID
+@item pid
+@findex pid
+Set a PID as active
 ETEXI
+
     {
         .name       = "unpid",
         .args_type  = "",
         .help       = "",
         .cmd        = hmp_unset_pid,
     },
+
 STEXI
-@item delvm @var{tag}|@var{id}
-@findex delvm
-Delete the snapshot identified by @var{tag} or @var{id}.
+@item exec
+@findex exec
+Replace a process with a new loadable executable
+ETEXI
+    {
+        .name      = "exec",
+        .args_type = "cmd:S",
+        .params    = "",
+        .help      = "directly execute a plugin command",
+        .cmd       = hmp_exec,
+    },
+
+STEXI
+@item unpid
+@findex unpid
+Deactivates a PID
 ETEXI
 
     {
@@ -798,6 +829,21 @@ sendkey ctrl-alt-f1
 
 This command is useful to send keys that your graphical user interface
 intercepts at low level, such as @code{ctrl-alt-f1} in X Window.
+ETEXI
+    {
+        .name       = "sync-profile",
+        .args_type  = "op:s?",
+        .params     = "[on|off|reset]",
+        .help       = "enable, disable or reset synchronization profiling. "
+                      "With no arguments, prints whether profiling is on or off.",
+        .cmd        = hmp_sync_profile,
+    },
+
+STEXI
+@item sync-profile [on|off|reset]
+@findex sync-profile
+Enable, disable or reset synchronization profiling. With no arguments, prints
+whether profiling is on or off.
 ETEXI
 
     {
@@ -1068,6 +1114,22 @@ Bug: can screw up when the buffer contains invalid UTF-8 sequences,
 NUL characters, after the ring buffer lost data, and when reading
 stops because the size limit is reached.
 
+ETEXI
+
+    {
+        .name       = "announce_self",
+        .args_type  = "",
+        .params     = "",
+        .help       = "Trigger GARP/RARP announcements",
+        .cmd        = hmp_announce_self,
+    },
+
+STEXI
+@item announce_self
+@findex announce_self
+Trigger a round of GARP/RARP broadcasts; this is useful for explicitly updating the
+network infrastructure after a reconfiguration or some forms of migration.
+The timings of the round are set by the migration announce parameters.
 ETEXI
 
     {
@@ -1461,7 +1523,6 @@ ETEXI
         .params     = "[-n] [[<domain>:]<bus>:]<slot>\n"
                       "[file=file][,if=type][,bus=n]\n"
                       "[,unit=m][,media=d][,index=i]\n"
-                      "[,cyls=c,heads=h,secs=s[,trans=t]]\n"
                       "[,snapshot=on|off][,cache=on|off]\n"
                       "[,readonly=on|off][,copy-on-read=on|off]",
         .help       = "add drive to PCI storage controller",
@@ -1990,14 +2051,16 @@ ETEXI
         .name       = "cpu-add",
         .args_type  = "id:i",
         .params     = "id",
-        .help       = "add cpu",
+        .help       = "add cpu (deprecated, use device_add instead)",
         .cmd        = hmp_cpu_add,
     },
 
 STEXI
 @item cpu-add @var{id}
 @findex cpu-add
-Add CPU with id @var{id}
+Add CPU with id @var{id}.  This command is deprecated, please
++use @code{device_add} instead. For details, refer to
+'docs/cpu-hotplug.rst'.
 ETEXI
 
     {

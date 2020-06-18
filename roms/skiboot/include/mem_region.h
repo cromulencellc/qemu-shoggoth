@@ -63,13 +63,17 @@ bool mem_resize(struct mem_region *region, void *mem, size_t len,
 		const char *location);
 size_t mem_allocated_size(const void *ptr);
 bool mem_check(const struct mem_region *region);
+bool mem_check_all(void);
 void mem_region_release_unused(void);
+void start_mem_region_clear_unused(void);
+void wait_mem_region_clear_unused(void);
+int64_t mem_dump_free(void);
+void mem_dump_allocs(void);
 
 /* Specifically for working on the heap. */
 extern struct mem_region skiboot_heap;
 
 void mem_region_init(void);
-void adjust_cpu_stacks_alloc(void);
 void mem_region_add_dt_reserved(void);
 
 /* Mark memory as reserved */
@@ -79,5 +83,8 @@ void mem_reserve_hwbuf(const char *name, uint64_t start, uint64_t len);
 struct mem_region *find_mem_region(const char *name);
 
 bool mem_range_is_reserved(uint64_t start, uint64_t size);
+
+/* Read-only memory checksum */
+bool verify_romem(void);
 
 #endif /* __MEMORY_REGION */

@@ -11,7 +11,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -102,21 +102,22 @@ static inline DATA_TYPE glue(io_read, SUFFIX)(CPUArchState *env,
                                               size_t mmu_idx, size_t index,
                                               target_ulong addr,
                                               uintptr_t retaddr,
-                                              bool recheck)
+                                              bool recheck,
+                                              MMUAccessType access_type)
 {
     CPUIOTLBEntry *iotlbentry = &env->iotlb[mmu_idx][index];
     return io_readx(env, iotlbentry, mmu_idx, addr, retaddr, recheck,
-                    DATA_SIZE);
+                    access_type, DATA_SIZE);
 }
 #endif
 
 WORD_TYPE helper_le_ld_name(CPUArchState *env, target_ulong addr,
                             TCGMemOpIdx oi, uintptr_t retaddr)
 {
-    CPUState *cpu = ENV_GET_CPU(env);
-    unsigned mmu_idx = get_mmuidx(oi);
-    int index = (addr >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
-    target_ulong tlb_addr = env->tlb_table[mmu_idx][index].ADDR_READ;
+    uintptr_t mmu_idx = get_mmuidx(oi);
+    uintptr_t index = tlb_index(env, mmu_idx, addr);
+    CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
+    target_ulong tlb_addr = entry->ADDR_READ;
     unsigned a_bits = get_alignment_bits(get_memop(oi));
     uintptr_t haddr;
     DATA_TYPE res;
@@ -131,8 +132,10 @@ WORD_TYPE helper_le_ld_name(CPUArchState *env, target_ulong addr,
         if (!VICTIM_TLB_HIT(ADDR_READ, addr)) {
             tlb_fill(ENV_GET_CPU(env), addr, DATA_SIZE, READ_ACCESS_TYPE,
                      mmu_idx, retaddr);
+            index = tlb_index(env, mmu_idx, addr);
+            entry = tlb_entry(env, mmu_idx, addr);
         }
-        tlb_addr = env->tlb_table[mmu_idx][index].ADDR_READ;
+        tlb_addr = entry->ADDR_READ;
     }
 
     /* Handle an IO access.  */
@@ -144,9 +147,10 @@ WORD_TYPE helper_le_ld_name(CPUArchState *env, target_ulong addr,
         /* ??? Note that the io helpers always read data in the target
            byte ordering.  We should push the LE/BE request down into io.  */
         res = glue(io_read, SUFFIX)(env, mmu_idx, index, addr, retaddr,
-                                    tlb_addr & TLB_RECHECK);
+                                    tlb_addr & TLB_RECHECK,
+                                    READ_ACCESS_TYPE);
         res = TGT_LE(res);
-        goto end_read;
+        return res;
     }
 
     /* Handle slow unaligned access (it spans two pages or IO).  */
@@ -165,21 +169,18 @@ WORD_TYPE helper_le_ld_name(CPUArchState *env, target_ulong addr,
 
         /* Little-endian combine.  */
         res = (res1 >> shift) | (res2 << ((DATA_SIZE * 8) - shift));
-        goto end_read;
+        return res;
     }
 
-    haddr = addr + env->tlb_table[mmu_idx][index].addend;
+    haddr = addr + entry->addend;
 #if DATA_SIZE == 1
     res = glue(glue(ld, LSUFFIX), _p)((uint8_t *)haddr);
 #else
     res = glue(glue(ld, LSUFFIX), _le_p)((uint8_t *)haddr);
 #endif
-end_read:
     if(is_memread_instrumentation_enabled()){
-        // Perform the translation to memory region offset.
-        target_ulong mr_offset = (env->iotlb[mmu_idx][index].addr & TARGET_PAGE_MASK) + addr;
-
-        notify_read_memory(cpu, mr_offset, (uint8_t*)&res, DATA_SIZE);
+        uint64_t paddr = qemu_ram_addr_from_host((void*)haddr);
+        notify_read_memory(ENV_GET_CPU(env), paddr, addr, (uint8_t*)&res, DATA_SIZE);
     }
 
     return res;
@@ -189,10 +190,10 @@ end_read:
 WORD_TYPE helper_be_ld_name(CPUArchState *env, target_ulong addr,
                             TCGMemOpIdx oi, uintptr_t retaddr)
 {
-    CPUState *cpu = ENV_GET_CPU(env);
-    unsigned mmu_idx = get_mmuidx(oi);
-    int index = (addr >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
-    target_ulong tlb_addr = env->tlb_table[mmu_idx][index].ADDR_READ;
+    uintptr_t mmu_idx = get_mmuidx(oi);
+    uintptr_t index = tlb_index(env, mmu_idx, addr);
+    CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
+    target_ulong tlb_addr = entry->ADDR_READ;
     unsigned a_bits = get_alignment_bits(get_memop(oi));
     uintptr_t haddr;
     DATA_TYPE res;
@@ -207,8 +208,10 @@ WORD_TYPE helper_be_ld_name(CPUArchState *env, target_ulong addr,
         if (!VICTIM_TLB_HIT(ADDR_READ, addr)) {
             tlb_fill(ENV_GET_CPU(env), addr, DATA_SIZE, READ_ACCESS_TYPE,
                      mmu_idx, retaddr);
+            index = tlb_index(env, mmu_idx, addr);
+            entry = tlb_entry(env, mmu_idx, addr);
         }
-        tlb_addr = env->tlb_table[mmu_idx][index].ADDR_READ;
+        tlb_addr = entry->ADDR_READ;
     }
 
     /* Handle an IO access.  */
@@ -220,9 +223,10 @@ WORD_TYPE helper_be_ld_name(CPUArchState *env, target_ulong addr,
         /* ??? Note that the io helpers always read data in the target
            byte ordering.  We should push the LE/BE request down into io.  */
         res = glue(io_read, SUFFIX)(env, mmu_idx, index, addr, retaddr,
-                                    tlb_addr & TLB_RECHECK);
+                                    tlb_addr & TLB_RECHECK,
+                                    READ_ACCESS_TYPE);
         res = TGT_BE(res);
-        goto end_read;
+        return res;
     }
 
     /* Handle slow unaligned access (it spans two pages or IO).  */
@@ -241,18 +245,14 @@ WORD_TYPE helper_be_ld_name(CPUArchState *env, target_ulong addr,
 
         /* Big-endian combine.  */
         res = (res1 << shift) | (res2 >> ((DATA_SIZE * 8) - shift));
-        goto end_read;
+        return res;
     }
 
-    haddr = addr + env->tlb_table[mmu_idx][index].addend;
+    haddr = addr + entry->addend;
     res = glue(glue(ld, LSUFFIX), _be_p)((uint8_t *)haddr);
-
-end_read:
     if(is_memread_instrumentation_enabled()){
-        // Perform the translation to memory region offset.
-        target_ulong mr_offset = (env->iotlb[mmu_idx][index].addr & TARGET_PAGE_MASK) + addr;
-
-        notify_read_memory(cpu, mr_offset, (uint8_t*)&res, DATA_SIZE);
+        uint64_t paddr = qemu_ram_addr_from_host((void*)haddr);
+        notify_read_memory(ENV_GET_CPU(env), paddr, addr, (uint8_t*)&res, DATA_SIZE);
     }
 
     return res;
@@ -291,74 +291,56 @@ static inline void glue(io_write, SUFFIX)(CPUArchState *env,
                      recheck, DATA_SIZE);
 }
 
-void instrumentation_ld_name(CPUArchState *env, void *addr, DATA_TYPE val, TCGMemOpIdx oi)
+void instrumentation_ld_name(CPUArchState *env, void *haddr, target_ulong vaddr, DATA_TYPE val, TCGMemOpIdx oi)
 {
     CPUState *cpu = ENV_GET_CPU(env);
-    RAMBlock *block;
-    ram_addr_t offset;
 
-    // The address is always going to be in the TLB if this is hit.
-    block = qemu_ram_block_from_host(addr, false, &offset);
-    if (!block) {
-        printf("instrumentation_st_name: Invalid memory address!\n");
-        return;
-    }
-
-    // Perform the translation to memory region offset.
-    target_ulong mr_offset = block->offset + offset;
+    uint64_t paddr = qemu_ram_addr_from_host((void*)haddr);
 
     if(is_memread_instrumentation_enabled()){
-        notify_read_memory(cpu, mr_offset, (uint8_t*)&val, DATA_SIZE);
+        notify_read_memory(cpu, paddr, vaddr, (uint8_t*)&val, DATA_SIZE);
     }
 }
 
-void instrumentation_st_name(CPUArchState *env, void *addr, DATA_TYPE val, TCGMemOpIdx oi)
+void instrumentation_st_name(CPUArchState *env, void *haddr, target_ulong vaddr, DATA_TYPE val, TCGMemOpIdx oi)
 {
     CPUState *cpu = ENV_GET_CPU(env);
-    RAMBlock *block;
-    ram_addr_t offset;
 
-    // The address is always going to be in the TLB if this is hit.
-    block = qemu_ram_block_from_host(addr, false, &offset);
-    if (!block) {
-        printf("instrumentation_st_name: Invalid memory address!\n");
-        return;
-    }
-
-    // Perform the translation to memory region offset.
-    target_ulong mr_offset = block->offset + offset;
+    uint64_t paddr = qemu_ram_addr_from_host((void*)haddr);
 
     if(is_memwrite_instrumentation_enabled()){
-        notify_write_memory(cpu, mr_offset, (uint8_t*)&val, DATA_SIZE);
+        notify_write_memory(cpu, paddr, vaddr, (uint8_t*)&val, DATA_SIZE);
     }
 
     if(is_rapid_analysis_active()){
-        rapid_analysis_mark_ram_dirty(mr_offset, mr_offset + DATA_SIZE);
+        rapid_analysis_mark_ram_dirty(paddr, paddr + DATA_SIZE);
     }
 }
 
 void helper_le_st_name(CPUArchState *env, target_ulong addr, DATA_TYPE val,
                        TCGMemOpIdx oi, uintptr_t retaddr)
 {
-    CPUState *cpu = ENV_GET_CPU(env);
-    unsigned mmu_idx = get_mmuidx(oi);
-    int index = (addr >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
-    target_ulong tlb_addr = env->tlb_table[mmu_idx][index].addr_write;
+    uintptr_t mmu_idx = get_mmuidx(oi);
+    uintptr_t index = tlb_index(env, mmu_idx, addr);
+    CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
+    target_ulong tlb_addr = tlb_addr_write(entry);
     unsigned a_bits = get_alignment_bits(get_memop(oi));
     uintptr_t haddr;
-    
+
     if (addr & ((1 << a_bits) - 1)) {
-        cpu_unaligned_access(cpu, addr, MMU_DATA_STORE,
+        cpu_unaligned_access(ENV_GET_CPU(env), addr, MMU_DATA_STORE,
                              mmu_idx, retaddr);
     }
 
     /* If the TLB entry is for a different page, reload and try again.  */
     if (!tlb_hit(tlb_addr, addr)) {
         if (!VICTIM_TLB_HIT(addr_write, addr)) {
-            tlb_fill(cpu, addr, DATA_SIZE, MMU_DATA_STORE,
+            tlb_fill(ENV_GET_CPU(env), addr, DATA_SIZE, MMU_DATA_STORE,
                      mmu_idx, retaddr);
+            index = tlb_index(env, mmu_idx, addr);
+            entry = tlb_entry(env, mmu_idx, addr);
         }
-        tlb_addr = env->tlb_table[mmu_idx][index].addr_write & ~TLB_INVALID_MASK;
+        tlb_addr = tlb_addr_write(entry) & ~TLB_INVALID_MASK;
     }
 
     /* Handle an IO access.  */
@@ -375,38 +357,22 @@ void helper_le_st_name(CPUArchState *env, target_ulong addr, DATA_TYPE val,
         return;
     }
 
-    // Ok, we made it this far so the access is good. Go ahead and speculatively
-    // mark the page as dirty. This will catch any writes to already translated pages.
-    if( is_rapid_analysis_active() ){
-        // Perform the translation to memory region offset.
-        target_ulong mr_offset = (env->iotlb[mmu_idx][index].addr & TARGET_PAGE_MASK) + addr;
-
-        rapid_analysis_mark_ram_dirty(mr_offset, mr_offset + DATA_SIZE);
-    }
-
-    if(is_memwrite_instrumentation_enabled()){
-        // Perform the translation to memory region offset.
-        target_ulong mr_offset = (env->iotlb[mmu_idx][index].addr & TARGET_PAGE_MASK) + addr;
-
-        notify_write_memory(cpu, mr_offset, (uint8_t*)&val, DATA_SIZE);
-    }
-
     /* Handle slow unaligned access (it spans two pages or IO).  */
     if (DATA_SIZE > 1
         && unlikely((addr & ~TARGET_PAGE_MASK) + DATA_SIZE - 1
                      >= TARGET_PAGE_SIZE)) {
-        int i, index2;
-        target_ulong page2, tlb_addr2;
+        int i;
+        target_ulong page2;
+        CPUTLBEntry *entry2;
     do_unaligned_access:
         /* Ensure the second page is in the TLB.  Note that the first page
            is already guaranteed to be filled, and that the second page
            cannot evict the first.  */
         page2 = (addr + DATA_SIZE) & TARGET_PAGE_MASK;
-        index2 = (page2 >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
-        tlb_addr2 = env->tlb_table[mmu_idx][index2].addr_write;
-        if (!tlb_hit_page(tlb_addr2, page2)
+        entry2 = tlb_entry(env, mmu_idx, page2);
+        if (!tlb_hit_page(tlb_addr_write(entry2), page2)
             && !VICTIM_TLB_HIT(addr_write, page2)) {
-            tlb_fill(cpu, page2, DATA_SIZE, MMU_DATA_STORE,
+            tlb_fill(ENV_GET_CPU(env), page2, DATA_SIZE, MMU_DATA_STORE,
                      mmu_idx, retaddr);
         }
 
@@ -422,7 +388,21 @@ void helper_le_st_name(CPUArchState *env, target_ulong addr, DATA_TYPE val,
         return;
     }
 
-    haddr = addr + env->tlb_table[mmu_idx][index].addend;
+    haddr = addr + entry->addend;
+
+    // Ok, we made it this far so the access is good. Go ahead and speculatively
+    // mark the page as dirty. This will catch any writes to already translated pages.
+    if( is_rapid_analysis_active() ){
+        // Perform the translation to memory region offset.
+        target_ulong paddr = qemu_ram_addr_from_host((void*) haddr);
+        rapid_analysis_mark_ram_dirty(paddr, paddr + DATA_SIZE);
+    }
+
+    if(is_memwrite_instrumentation_enabled()){
+        target_ulong paddr = qemu_ram_addr_from_host((void*) haddr);
+        notify_write_memory(ENV_GET_CPU(env), paddr, addr, (uint8_t*)&val, DATA_SIZE);
+    }
+
 #if DATA_SIZE == 1
     glue(glue(st, SUFFIX), _p)((uint8_t *)haddr, val);
 #else
@@ -434,10 +414,10 @@ void helper_le_st_name(CPUArchState *env, target_ulong addr, DATA_TYPE val,
 void helper_be_st_name(CPUArchState *env, target_ulong addr, DATA_TYPE val,
                        TCGMemOpIdx oi, uintptr_t retaddr)
 {
-    CPUState *cpu = ENV_GET_CPU(env);
-    unsigned mmu_idx = get_mmuidx(oi);
-    int index = (addr >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
-    target_ulong tlb_addr = env->tlb_table[mmu_idx][index].addr_write;
+    uintptr_t mmu_idx = get_mmuidx(oi);
+    uintptr_t index = tlb_index(env, mmu_idx, addr);
+    CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
+    target_ulong tlb_addr = tlb_addr_write(entry);
     unsigned a_bits = get_alignment_bits(get_memop(oi));
     uintptr_t haddr;
 
@@ -451,8 +431,10 @@ void helper_be_st_name(CPUArchState *env, target_ulong addr, DATA_TYPE val,
         if (!VICTIM_TLB_HIT(addr_write, addr)) {
             tlb_fill(ENV_GET_CPU(env), addr, DATA_SIZE, MMU_DATA_STORE,
                      mmu_idx, retaddr);
+            index = tlb_index(env, mmu_idx, addr);
+            entry = tlb_entry(env, mmu_idx, addr);
         }
-        tlb_addr = env->tlb_table[mmu_idx][index].addr_write & ~TLB_INVALID_MASK;
+        tlb_addr = tlb_addr_write(entry) & ~TLB_INVALID_MASK;
     }
 
     /* Handle an IO access.  */
@@ -469,27 +451,20 @@ void helper_be_st_name(CPUArchState *env, target_ulong addr, DATA_TYPE val,
         return;
     }
 
-    if(is_memwrite_instrumentation_enabled()){
-        // Perform the translation to memory region offset.
-        target_ulong mr_offset = (env->iotlb[mmu_idx][index].addr & TARGET_PAGE_MASK) + addr;
-
-        notify_write_memory(cpu, mr_offset, (uint8_t*)&val, DATA_SIZE);
-    }
-
     /* Handle slow unaligned access (it spans two pages or IO).  */
     if (DATA_SIZE > 1
         && unlikely((addr & ~TARGET_PAGE_MASK) + DATA_SIZE - 1
                      >= TARGET_PAGE_SIZE)) {
-        int i, index2;
-        target_ulong page2, tlb_addr2;
+        int i;
+        target_ulong page2;
+        CPUTLBEntry *entry2;
     do_unaligned_access:
         /* Ensure the second page is in the TLB.  Note that the first page
            is already guaranteed to be filled, and that the second page
            cannot evict the first.  */
         page2 = (addr + DATA_SIZE) & TARGET_PAGE_MASK;
-        index2 = (page2 >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
-        tlb_addr2 = env->tlb_table[mmu_idx][index2].addr_write;
-        if (!tlb_hit_page(tlb_addr2, page2)
+        entry2 = tlb_entry(env, mmu_idx, page2);
+        if (!tlb_hit_page(tlb_addr_write(entry2), page2)
             && !VICTIM_TLB_HIT(addr_write, page2)) {
             tlb_fill(ENV_GET_CPU(env), page2, DATA_SIZE, MMU_DATA_STORE,
                      mmu_idx, retaddr);
@@ -507,7 +482,20 @@ void helper_be_st_name(CPUArchState *env, target_ulong addr, DATA_TYPE val,
         return;
     }
 
-    haddr = addr + env->tlb_table[mmu_idx][index].addend;
+    haddr = addr + entry->addend;
+
+    // Ok, we made it this far so the access is good. Go ahead and speculatively
+    // mark the page as dirty. This will catch any writes to already translated pages.
+    if( is_rapid_analysis_active() ){
+        target_ulong paddr = qemu_ram_addr_from_host((void*) haddr);
+        rapid_analysis_mark_ram_dirty(paddr, paddr + DATA_SIZE);
+    }
+
+    if(is_memwrite_instrumentation_enabled()){
+        target_ulong paddr = qemu_ram_addr_from_host((void*) haddr);
+        notify_write_memory(ENV_GET_CPU(env), paddr, addr, (uint8_t*)&val, DATA_SIZE);
+    }
+
     glue(glue(st, SUFFIX), _be_p)((uint8_t *)haddr, val);
 }
 #endif /* DATA_SIZE > 1 */

@@ -23,6 +23,7 @@ export DRIVER_NAME=$(shell cat ../VERSION | sed -e "s/-/./g" | awk -F . '{ print
 else
 ifneq (,$(wildcard ../.git))
 RELEASE=git-$(shell git rev-parse --short=16 HEAD)
+export DRIVER_NAME=git-$(shell git rev-parse --short=12 HEAD)
 else
 ifneq (,$(shell cat ../VERSION))
 RELEASE="$(USER)@$(HOSTNAME) release $(shell cat ../VERSION)"

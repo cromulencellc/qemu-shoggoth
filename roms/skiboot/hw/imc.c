@@ -1,4 +1,4 @@
-/* Copyright 2016 IBM Corp.
+/* Copyright 2016-2019 IBM Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,13 +20,14 @@
 #include <chip.h>
 #include <libxz/xz.h>
 #include <device.h>
+#include <p9_stop_api.H>
 
 /*
  * Nest IMC PMU names along with their bit values as represented in the
  * imc_chip_avl_vector(in struct imc_chip_cb, look at include/imc.h).
  * nest_pmus[] is an array containing all the possible nest IMC PMU node names.
  */
-char const *nest_pmus[] = {
+static char const *nest_pmus[] = {
 	"powerbus0",
 	"mcs0",
 	"mcs1",
@@ -88,7 +89,7 @@ char const *nest_pmus[] = {
  * in the debug mode (which will be supported by microcode in the future).
  * These will be advertised only when OPAL provides interface for the it.
  */
-char const *debug_mode_units[] = {
+static char const *debug_mode_units[] = {
 	"mcs0",
 	"mcs1",
 	"mcs2",
@@ -115,7 +116,7 @@ static struct combined_units_node cu_node[] = {
 static char *compress_buf;
 static size_t compress_buf_size;
 const char **prop_to_fix(struct dt_node *node);
-const char *props_to_fix[] = {"events", NULL};
+static const char *props_to_fix[] = {"events", NULL};
 
 static bool is_nest_mem_initialized(struct imc_chip_cb *ptr)
 {
@@ -135,13 +136,13 @@ static bool is_nest_mem_initialized(struct imc_chip_cb *ptr)
  * SCOM port addresses in the arrays below, each for Hardware Trace Macro (HTM)
  * mode and PDBAR.
  */
-unsigned int pdbar_scom_index[] = {
+static unsigned int pdbar_scom_index[] = {
 	0x1001220B,
 	0x1001230B,
 	0x1001260B,
 	0x1001270B
 };
-unsigned int htm_scom_index[] = {
+static unsigned int htm_scom_index[] = {
 	0x10012200,
 	0x10012300,
 	0x10012600,
@@ -153,6 +154,9 @@ static struct imc_chip_cb *get_imc_cb(uint32_t chip_id)
 	struct proc_chip *chip = get_chip(chip_id);
 	struct imc_chip_cb *cb;
 
+	if (!chip->homer_base)
+		return NULL; /* The No Homers Club */
+
 	cb = (struct imc_chip_cb *)(chip->homer_base + P9_CB_STRUCT_OFFSET);
 	if (!is_nest_mem_initialized(cb))
 		return NULL;
@@ -160,7 +164,7 @@ static struct imc_chip_cb *get_imc_cb(uint32_t chip_id)
 	return cb;
 }
 
-static void pause_microcode_at_boot(void)
+static int pause_microcode_at_boot(void)
 {
 	struct proc_chip *chip;
 	struct imc_chip_cb *cb;
@@ -169,59 +173,11 @@ static void pause_microcode_at_boot(void)
 		cb = get_imc_cb(chip->id);
 		if (cb)
 			cb->imc_chip_command =  cpu_to_be64(NEST_IMC_DISABLE);
-	}
-}
-
-/*
- * Decompresses the blob obtained from the IMC pnor sub-partition
- * in "src" of size "src_size", assigns the uncompressed device tree
- * binary to "dst" and returns.
- *
- * Returns 0 on success and -1 on error.
- *
- * TODO: Ideally this should be part of generic subpartition load
- * infrastructure. And decompression can be queued as another CPU job
- */
-static int decompress(void *dst, size_t dst_size, void *src, size_t src_size)
-{
-	struct xz_dec *s;
-	struct xz_buf b;
-	int ret = 0;
-
-	/* Initialize the xz library first */
-	xz_crc32_init();
-	s = xz_dec_init(XZ_SINGLE, 0);
-	if (s == NULL) {
-		prerror("initialization error for xz\n");
-		return -1;
-	}
-
-	/*
-	 * Source address : src
-	 * Source size : src_size
-	 * Destination address : dst
-	 * Destination size : dst_src
-	 */
-	b.in = src;
-	b.in_pos = 0;
-	b.in_size = src_size;
-	b.out = dst;
-	b.out_pos = 0;
-	b.out_size = dst_size;
-
-	/* Start decompressing */
-	ret = xz_dec_run(s, &b);
-	if (ret != XZ_STREAM_END) {
-		prerror("failed to decompress subpartition\n");
-		ret = -1;
-		goto err;
+		else
+			return -1; /* ucode is not init-ed */
 	}
 
 	return 0;
-err:
-	/* Clean up memory */
-	xz_dec_end(s);
-	return ret;
 }
 
 /*
@@ -307,6 +263,42 @@ static void check_imc_device_type(struct dt_node *dev)
 	return;
 }
 
+static void imc_dt_exports_prop_add(struct dt_node *dev)
+{
+	struct dt_node *node;
+	struct proc_chip *chip;
+	const struct dt_property *type;
+	uint32_t offset = 0, size = 0;
+	uint64_t baddr;
+	char namebuf[32];
+
+
+	dt_for_each_compatible(dev, node, "ibm,imc-counters") {
+		type = dt_find_property(node, "type");
+		if (type && is_nest_node(node)) {
+			offset = dt_prop_get_u32(node, "offset");
+			size = dt_prop_get_u32(node, "size");
+		}
+	}
+
+	/*
+	 * Enable only if we have valid values.
+	 */
+	if (!size && !offset)
+		return;
+
+	node = dt_find_by_name(opal_node, "exports");
+	if (!node)
+		return;
+
+	for_each_chip(chip) {
+		snprintf(namebuf, sizeof(namebuf), "imc_nest_chip_%x", chip->id);
+		baddr = chip->homer_base;
+		baddr += offset;
+		dt_add_property_u64s(node, namebuf, baddr, size);
+	}
+}
+
 /*
  * Remove the PMU device nodes from the incoming new subtree, if they are not
  * available in the hardware. The availability is described by the
@@ -320,10 +312,34 @@ static void disable_unavailable_units(struct dt_node *dev)
 	struct imc_chip_cb *cb;
 	struct dt_node *target;
 	int i;
+	bool disable_all_nests = false;
+	struct proc_chip *chip;
+
+	/*
+	 * Check the state of ucode in all the chip.
+	 * Disable the nest unit if ucode is not initialized
+	 * in any of the chip.
+	 */
+	for_each_chip(chip) {
+		cb = get_imc_cb(chip->id);
+		if (!cb) {
+			/*
+			 * At least currently, if one chip isn't functioning,
+			 * none of the IMC Nest units will be functional.
+			 * So while you may *think* this should be per chip,
+			 * it isn't.
+			 */
+			disable_all_nests = true;
+			break;
+		}
+	}
+
+	/* Add a property to "exports" node in opal_node */
+	imc_dt_exports_prop_add(dev);
 
 	/* Fetch the IMC control block structure */
 	cb = get_imc_cb(this_cpu()->chip_id);
-	if (cb)
+	if (cb && !disable_all_nests)
 		avl_vec = be64_to_cpu(cb->imc_chip_avl_vector);
 	else {
 		avl_vec = 0; /* Remove only nest imc device nodes */
@@ -417,9 +433,6 @@ static void imc_dt_update_nest_node(struct dt_node *dev)
 	int i=0, nr_chip = nr_chips();
 	struct dt_node *node;
 	const struct dt_property *type;
-	uint32_t offset = 0, size = 0;
-	uint64_t baddr;
-	char namebuf[32];
 
 	/* Add the base_addr and chip-id properties for the nest node */
 	base_addr = malloc(sizeof(uint64_t) * nr_chip);
@@ -435,27 +448,52 @@ static void imc_dt_update_nest_node(struct dt_node *dev)
 		if (type && is_nest_node(node)) {
 			dt_add_property(node, "base-addr", base_addr, (i * sizeof(u64)));
 			dt_add_property(node, "chip-id", chipids, (i * sizeof(u32)));
-			offset = dt_prop_get_u32(node, "offset");
-			size = dt_prop_get_u32(node, "size");
 		}
+	}
+}
+
+static struct xz_decompress *imc_xz;
+
+void imc_decompress_catalog(void)
+{
+	void *decompress_buf = NULL;
+	uint32_t pvr = (mfspr(SPR_PVR) & ~(0xf0ff));
+	int ret;
+
+	/* Check we succeeded in starting the preload */
+	if (compress_buf == NULL)
+		return;
+
+	ret = wait_for_resource_loaded(RESOURCE_ID_IMA_CATALOG, pvr);
+	if (ret != OPAL_SUCCESS) {
+		prerror("IMC Catalog load failed\n");
+		return;
 	}
 
 	/*
-	 * Enable only if we have active nest pmus.
+	 * Memory for decompression.
 	 */
-	if (!size)
+	decompress_buf = malloc(MAX_DECOMPRESSED_IMC_DTB_SIZE);
+	if (!decompress_buf) {
+		prerror("No memory for decompress_buf \n");
 		return;
-
-	node = dt_find_by_name(opal_node, "exports");
-	if (!node)
-		return;
-
-	for_each_chip(chip) {
-		snprintf(namebuf, sizeof(namebuf), "imc_nest_chip_%x", chip->id);
-		baddr = chip->homer_base;
-		baddr += offset;
-		dt_add_property_u64s(node, namebuf, baddr, size);
 	}
+
+	/*
+	 * Decompress the compressed buffer
+	 */
+	imc_xz = malloc(sizeof(struct xz_decompress));
+	if (!imc_xz) {
+		prerror("No memory to decompress IMC catalog\n");
+		free(decompress_buf);
+		return;
+	}
+
+	imc_xz->dst = decompress_buf;
+	imc_xz->src = compress_buf;
+	imc_xz->dst_size = MAX_DECOMPRESSED_IMC_DTB_SIZE;
+	imc_xz->src_size = compress_buf_size;
+	xz_start_decompress(imc_xz);
 }
 
 /*
@@ -466,10 +504,8 @@ static void imc_dt_update_nest_node(struct dt_node *dev)
  */
 void imc_init(void)
 {
-	void *decompress_buf = NULL;
-	uint32_t pvr = (mfspr(SPR_PVR) & ~(0xf0ff));
 	struct dt_node *dev;
-	int ret;
+	int err_flag = -1;
 
 	if (proc_chip_quirks & QUIRK_MAMBO_CALLOUTS) {
 		dev = dt_find_compatible_node(dt_root, NULL,
@@ -484,15 +520,12 @@ void imc_init(void)
 	if (proc_gen != proc_gen_p9)
 		return;
 
-	/* Check we succeeded in starting the preload */
-	if (compress_buf == NULL)
+	if (!imc_xz)
 		return;
 
-	ret = wait_for_resource_loaded(RESOURCE_ID_IMA_CATALOG, pvr);
-	if (ret != OPAL_SUCCESS) {
-		prerror("IMC Catalog load failed\n");
-		return;
-	}
+	wait_xz_decompress(imc_xz);
+	if (imc_xz->status != OPAL_SUCCESS)
+		goto err;
 
 	/*
 	 * Flow of the data from PNOR to main device tree:
@@ -503,22 +536,6 @@ void imc_init(void)
 	 * free compressed local buffer
 	 */
 
-	/*
-	 * Memory for decompression.
-	 */
-	decompress_buf = malloc(MAX_DECOMPRESSED_IMC_DTB_SIZE);
-	if (!decompress_buf) {
-		prerror("No memory for decompress_buf \n");
-		goto err;
-	}
-
-	/*
-	 * Decompress the compressed buffer
-	 */
-	ret = decompress(decompress_buf, MAX_DECOMPRESSED_IMC_DTB_SIZE,
-				compress_buf, compress_buf_size);
-	if (ret < 0)
-		goto err;
 
 	/* Create a device tree entry for imc counters */
 	dev = dt_new_root("imc-counters");
@@ -529,8 +546,7 @@ void imc_init(void)
 	 * Attach the new decompress_buf to the imc-counters node.
 	 * dt_expand_node() does sanity checks for fdt_header, piggyback
 	 */
-	ret = dt_expand_node(dev, decompress_buf, 0);
-	if (ret < 0) {
+	if (dt_expand_node(dev, imc_xz->dst, 0) < 0) {
 		dt_free(dev);
 		goto err;
 	}
@@ -564,7 +580,8 @@ imc_mambo:
 	 * then out to band tools will race with ucode and end up getting
 	 * undesirable values. Hence pause the ucode if it is already running.
 	 */
-	pause_microcode_at_boot();
+	if (pause_microcode_at_boot())
+		goto err;
 
 	/*
 	 * If the dt_attach_root() fails, "imc-counters" node will not be
@@ -576,12 +593,15 @@ imc_mambo:
 		goto err;
 	}
 
-	free(compress_buf);
-	return;
+	err_flag = OPAL_SUCCESS;
+
 err:
-	prerror("IMC Devices not added\n");
-	free(decompress_buf);
+	if (err_flag != OPAL_SUCCESS)
+		prerror("IMC Devices not added\n");
+
 	free(compress_buf);
+	free(imc_xz->dst);
+	free(imc_xz);
 }
 
 /*
@@ -595,6 +615,8 @@ static int64_t opal_imc_counters_init(uint32_t type, uint64_t addr, uint64_t cpu
 {
 	struct cpu_thread *c = find_cpu_by_pir(cpu_pir);
 	int port_id, phys_core_id;
+	int ret;
+	uint32_t scoms;
 
 	switch (type) {
 	case OPAL_IMC_COUNTERS_NEST:
@@ -627,12 +649,50 @@ static int64_t opal_imc_counters_init(uint32_t type, uint64_t addr, uint64_t cpu
 		 *
 		 * HTM Scom: scom to enable counter data movement to memory.
 		 */
+
+
 		 if (xscom_write(c->chip_id,
 				XSCOM_ADDR_P9_EP(phys_core_id,
 						pdbar_scom_index[port_id]),
 				(u64)(CORE_IMC_PDBAR_MASK & addr))) {
 			prerror("error in xscom_write for pdbar\n");
 			return OPAL_HARDWARE;
+		}
+
+		if (has_deep_states) {
+			if (wakeup_engine_state == WAKEUP_ENGINE_PRESENT) {
+				struct proc_chip *chip = get_chip(c->chip_id);
+
+				prlog(PR_INFO, "Configuring stopapi for IMC\n");
+				scoms = XSCOM_ADDR_P9_EP(phys_core_id,pdbar_scom_index[port_id]);
+				ret = p9_stop_save_scom(( void *)chip->homer_base,scoms,
+					(u64)(CORE_IMC_PDBAR_MASK & addr),
+					P9_STOP_SCOM_REPLACE,
+					P9_STOP_SECTION_EQ_SCOM);
+				if ( ret ) {
+					prerror("IMC pdbar stopapi ret = %d, scoms = %x (core id = %x)\n", ret, scoms, phys_core_id);
+					if ( ret != STOP_SAVE_SCOM_ENTRY_UPDATE_FAILED )
+						wakeup_engine_state = WAKEUP_ENGINE_FAILED;
+					else
+						prerror("SCOM entries are full\n");
+					return OPAL_HARDWARE;
+				}
+				scoms = XSCOM_ADDR_P9_EC(phys_core_id,CORE_IMC_EVENT_MASK_ADDR);
+				ret = p9_stop_save_scom(( void *)chip->homer_base,scoms,
+				(u64)CORE_IMC_EVENT_MASK, P9_STOP_SCOM_REPLACE,
+				P9_STOP_SECTION_CORE_SCOM);
+				if ( ret ) {
+					prerror("IMC event_mask stopapi ret = %d, scoms = %x (core id = %x)\n", ret, scoms, phys_core_id);
+					if ( ret != STOP_SAVE_SCOM_ENTRY_UPDATE_FAILED )
+						wakeup_engine_state = WAKEUP_ENGINE_FAILED;
+					else
+						prerror("SCOM entries are full\n");
+					return OPAL_HARDWARE;
+				}
+			} else {
+				prerror("IMC: Wakeup engine in error state!");
+				return OPAL_HARDWARE;
+			}
 		}
 
 		if (xscom_write(c->chip_id,

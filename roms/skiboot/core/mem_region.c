@@ -1,4 +1,4 @@
-/* Copyright 2013-2017 IBM Corp.
+/* Copyright 2013-2018 IBM Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,13 +21,11 @@
 #include <lock.h>
 #include <device.h>
 #include <cpu.h>
+#include <chip.h>
 #include <affinity.h>
 #include <types.h>
 #include <mem_region.h>
 #include <mem_region-malloc.h>
-
-int64_t mem_dump_free(void);
-void mem_dump_allocs(void);
 
 /* Memory poisoning on free (if POISON_MEM_REGION set to 1) */
 #ifdef DEBUG
@@ -96,10 +94,26 @@ static struct mem_region skiboot_cpu_stacks = {
 	.type		= REGION_SKIBOOT_FIRMWARE,
 };
 
+static struct mem_region skiboot_mambo_kernel = {
+	.name		= "ibm,firmware-mambo-kernel",
+	.start		= (unsigned long)KERNEL_LOAD_BASE,
+	.len		= KERNEL_LOAD_SIZE,
+	.type		= REGION_SKIBOOT_FIRMWARE,
+};
+
+static struct mem_region skiboot_mambo_initramfs = {
+	.name		= "ibm,firmware-mambo-initramfs",
+	.start		= (unsigned long)INITRAMFS_LOAD_BASE,
+	.len		= INITRAMFS_LOAD_SIZE,
+	.type		= REGION_SKIBOOT_FIRMWARE,
+};
+
+
 struct alloc_hdr {
 	bool free : 1;
 	bool prev_free : 1;
-	unsigned long num_longs : BITS_PER_LONG-2; /* Including header. */
+	bool printed : 1;
+	unsigned long num_longs : BITS_PER_LONG-3; /* Including header. */
 	const char *location;
 };
 
@@ -148,8 +162,6 @@ static void mem_poison(struct free_hdr *f)
 
 	memset(f+1, POISON_MEM_REGION_WITH, poison_size);
 }
-#else
-static inline void mem_poison(struct free_hdr *f __unused) { }
 #endif
 
 /* Creates free block covering entire region. */
@@ -164,7 +176,9 @@ static void init_allocatable_region(struct mem_region *region)
 	*tailer(f) = f->hdr.num_longs;
 	list_head_init(&region->free_list);
 	list_add(&region->free_list, &f->list);
+#if POISON_MEM_REGION == 1
 	mem_poison(f);
+#endif
 }
 
 static void make_free(struct mem_region *region, struct free_hdr *f,
@@ -172,8 +186,12 @@ static void make_free(struct mem_region *region, struct free_hdr *f,
 {
 	struct alloc_hdr *next;
 
+#if POISON_MEM_REGION == 1
 	if (!skip_poison)
 		mem_poison(f);
+#else
+	(void)skip_poison;
+#endif
 
 	if (f->hdr.prev_free) {
 		struct free_hdr *prev;
@@ -288,7 +306,7 @@ static bool region_is_reserved(struct mem_region *region)
 void mem_dump_allocs(void)
 {
 	struct mem_region *region;
-	struct alloc_hdr *hdr;
+	struct alloc_hdr *h, *i;
 
 	/* Second pass: populate property data */
 	prlog(PR_INFO, "Memory regions:\n");
@@ -304,11 +322,40 @@ void mem_dump_allocs(void)
 			prlog(PR_INFO, "    no allocs\n");
 			continue;
 		}
-		for (hdr = region_start(region); hdr; hdr = next_hdr(region, hdr)) {
-			if (hdr->free)
+
+		/*
+		 * XXX: When dumping the allocation list we coalase allocations
+		 * with the same location and size into a single line. This is
+		 * quadratic, but it makes the dump human-readable and the raw
+		 * dump sometimes causes the log buffer to wrap.
+		 */
+		for (h = region_start(region); h; h = next_hdr(region, h))
+			h->printed = false;
+
+		for (h = region_start(region); h; h = next_hdr(region, h)) {
+			unsigned long bytes;
+			int count = 0;
+
+			if (h->free)
 				continue;
-			prlog(PR_INFO, "    0x%.8lx %s\n", hdr->num_longs * sizeof(long),
-			       hdr_location(hdr));
+			if (h->printed)
+				continue;
+
+			for (i = h; i; i = next_hdr(region, i)) {
+				if (i->free)
+					continue;
+				if (i->num_longs != h->num_longs)
+					continue;
+				if (strcmp(i->location, h->location))
+					continue;
+
+				i->printed = true;
+				count++;
+			}
+
+			bytes = h->num_longs * sizeof(long);
+			prlog(PR_NOTICE, " % 8d allocs of 0x%.8lx bytes at %s (total 0x%lx)\n",
+				count, bytes, hdr_location(h), bytes * count);
 		}
 	}
 }
@@ -442,6 +489,7 @@ found:
 void *mem_alloc(struct mem_region *region, size_t size, size_t align,
 		const char *location)
 {
+	static bool dumped = false;
 	void *r;
 
 	assert(lock_held_by_me(&region->free_list_lock));
@@ -450,9 +498,13 @@ void *mem_alloc(struct mem_region *region, size_t size, size_t align,
 	if (r)
 		return r;
 
-	prerror("mem_alloc(0x%lx, 0x%lx, \"%s\") failed !\n",
-		size, align, location);
-	mem_dump_allocs();
+	prerror("mem_alloc(0x%lx, 0x%lx, \"%s\", %s) failed !\n",
+		size, align, location, region->name);
+	if (!dumped) {
+		mem_dump_allocs();
+		dumped = true;
+	}
+
 	return NULL;
 }
 
@@ -551,12 +603,12 @@ bool mem_check(const struct mem_region *region)
 	struct free_hdr *f;
 
 	/* Check it's sanely aligned. */
-	if (region->start % sizeof(struct alloc_hdr)) {
+	if (region->start % sizeof(long)) {
 		prerror("Region '%s' not sanely aligned (%llx)\n",
 			region->name, (unsigned long long)region->start);
 		return false;
 	}
-	if ((long)region->len % sizeof(struct alloc_hdr)) {
+	if ((long)region->len % sizeof(long)) {
 		prerror("Region '%s' not sane length (%llu)\n",
 			region->name, (unsigned long long)region->len);
 		return false;
@@ -619,6 +671,18 @@ bool mem_check(const struct mem_region *region)
 			region->name);
 		return false;
 	}
+	return true;
+}
+
+bool mem_check_all(void)
+{
+	struct mem_region *r;
+
+	list_for_each(&regions, r, list) {
+		if (!mem_check(r))
+			return false;
+	}
+
 	return true;
 }
 
@@ -912,15 +976,6 @@ bool mem_range_is_reserved(uint64_t start, uint64_t size)
 	return false;
 }
 
-void adjust_cpu_stacks_alloc(void)
-{
-	/* CPU stacks start at 0, then when we know max possible PIR,
-	 * we adjust, then when we bring all CPUs online we know the
-	 * runtime max PIR, so we adjust this a few times during boot.
-	 */
-	skiboot_cpu_stacks.len = (cpu_max_pir + 1) * STACK_SIZE;
-}
-
 static void mem_region_parse_reserved_properties(void)
 {
 	const struct dt_property *names, *ranges;
@@ -1054,7 +1109,11 @@ void mem_region_init(void)
 		unlock(&mem_region_lock);
 	}
 
-	adjust_cpu_stacks_alloc();
+	/*
+	 * This is called after we know the maximum PIR of all CPUs,
+	 * so we can dynamically set the stack length.
+	 */
+	skiboot_cpu_stacks.len = (cpu_max_pir + 1) * STACK_SIZE;
 
 	lock(&mem_region_lock);
 
@@ -1066,6 +1125,14 @@ void mem_region_init(void)
 	    !add_region(&skiboot_cpu_stacks)) {
 		prerror("Out of memory adding skiboot reserved areas\n");
 		abort();
+	}
+
+	if (chip_quirk(QUIRK_MAMBO_CALLOUTS)) {
+		if (!add_region(&skiboot_mambo_kernel) ||
+		    !add_region(&skiboot_mambo_initramfs)) {
+			prerror("Out of memory adding mambo payload\n");
+			abort();
+		}
 	}
 
 	/* Add reserved reanges from HDAT */
@@ -1162,6 +1229,184 @@ void mem_region_release_unused(void)
 	unlock(&mem_region_lock);
 }
 
+static void mem_clear_range(uint64_t s, uint64_t e)
+{
+	uint64_t res_start, res_end;
+
+	/* Skip exception vectors */
+	if (s < EXCEPTION_VECTORS_END)
+		s = EXCEPTION_VECTORS_END;
+
+	/* Skip kernel preload area */
+	res_start = (uint64_t)KERNEL_LOAD_BASE;
+	res_end = res_start + KERNEL_LOAD_SIZE;
+
+	if (s >= res_start && s < res_end)
+	       s = res_end;
+	if (e > res_start && e <= res_end)
+	       e = res_start;
+	if (e <= s)
+		return;
+	if (s < res_start && e > res_end) {
+		mem_clear_range(s, res_start);
+		mem_clear_range(res_end, e);
+		return;
+	}
+
+	/* Skip initramfs preload area */
+	res_start = (uint64_t)INITRAMFS_LOAD_BASE;
+	res_end = res_start + INITRAMFS_LOAD_SIZE;
+
+	if (s >= res_start && s < res_end)
+	       s = res_end;
+	if (e > res_start && e <= res_end)
+	       e = res_start;
+	if (e <= s)
+		return;
+	if (s < res_start && e > res_end) {
+		mem_clear_range(s, res_start);
+		mem_clear_range(res_end, e);
+		return;
+	}
+
+	prlog(PR_DEBUG, "Clearing region %llx-%llx\n",
+	      (long long)s, (long long)e);
+	memset((void *)s, 0, e - s);
+}
+
+struct mem_region_clear_job_args {
+	char *job_name;
+	uint64_t s,e;
+};
+
+static void mem_region_clear_job(void *data)
+{
+	struct mem_region_clear_job_args *arg = (struct mem_region_clear_job_args*)data;
+	mem_clear_range(arg->s, arg->e);
+}
+
+#define MEM_REGION_CLEAR_JOB_SIZE (16ULL*(1<<30))
+
+static struct cpu_job **mem_clear_jobs;
+static struct mem_region_clear_job_args *mem_clear_job_args;
+static int mem_clear_njobs = 0;
+
+void start_mem_region_clear_unused(void)
+{
+	struct mem_region *r;
+	uint64_t s,l;
+	uint64_t total = 0;
+	uint32_t chip_id;
+	char *path;
+	int i;
+	struct cpu_job **jobs;
+	struct mem_region_clear_job_args *job_args;
+
+	lock(&mem_region_lock);
+	assert(mem_regions_finalised);
+
+	mem_clear_njobs = 0;
+
+	list_for_each(&regions, r, list) {
+		if (!(r->type == REGION_OS))
+			continue;
+		mem_clear_njobs++;
+		/* One job per 16GB */
+		mem_clear_njobs += r->len / MEM_REGION_CLEAR_JOB_SIZE;
+	}
+
+	jobs = malloc(mem_clear_njobs * sizeof(struct cpu_job*));
+	job_args = malloc(mem_clear_njobs * sizeof(struct mem_region_clear_job_args));
+	mem_clear_jobs = jobs;
+	mem_clear_job_args = job_args;
+
+	prlog(PR_NOTICE, "Clearing unused memory:\n");
+	i = 0;
+	list_for_each(&regions, r, list) {
+		/* If it's not unused, ignore it. */
+		if (!(r->type == REGION_OS))
+			continue;
+
+		assert(r != &skiboot_heap);
+
+		s = r->start;
+		l = r->len;
+		while(l > MEM_REGION_CLEAR_JOB_SIZE) {
+			job_args[i].s = s+l - MEM_REGION_CLEAR_JOB_SIZE;
+			job_args[i].e = s+l;
+			l-=MEM_REGION_CLEAR_JOB_SIZE;
+			job_args[i].job_name = malloc(sizeof(char)*100);
+			total+=MEM_REGION_CLEAR_JOB_SIZE;
+			chip_id = __dt_get_chip_id(r->node);
+			if (chip_id == -1)
+				chip_id = 0;
+			path = dt_get_path(r->node);
+			snprintf(job_args[i].job_name, 100,
+				 "clear %s, %s 0x%"PRIx64" len: %"PRIx64" on %d",
+				 r->name, path,
+				 job_args[i].s,
+				 (job_args[i].e - job_args[i].s),
+				 chip_id);
+			free(path);
+			jobs[i] = cpu_queue_job_on_node(chip_id,
+							job_args[i].job_name,
+							mem_region_clear_job,
+							&job_args[i]);
+			if (!jobs[i])
+				jobs[i] = cpu_queue_job(NULL,
+							job_args[i].job_name,
+							mem_region_clear_job,
+							&job_args[i]);
+			assert(jobs[i]);
+			i++;
+		}
+		job_args[i].s = s;
+		job_args[i].e = s+l;
+		job_args[i].job_name = malloc(sizeof(char)*100);
+		total+=l;
+		chip_id = __dt_get_chip_id(r->node);
+		if (chip_id == -1)
+			chip_id = 0;
+		path = dt_get_path(r->node);
+		snprintf(job_args[i].job_name,100,
+			 "clear %s, %s 0x%"PRIx64" len: 0x%"PRIx64" on %d",
+			 r->name, path,
+			 job_args[i].s,
+			 (job_args[i].e - job_args[i].s),
+			 chip_id);
+		free(path);
+		jobs[i] = cpu_queue_job_on_node(chip_id,
+						job_args[i].job_name,
+					mem_region_clear_job,
+					&job_args[i]);
+		i++;
+	}
+	unlock(&mem_region_lock);
+	cpu_process_local_jobs();
+}
+
+void wait_mem_region_clear_unused(void)
+{
+	uint64_t l;
+	uint64_t total = 0;
+	int i;
+
+	for(i=0; i < mem_clear_njobs; i++) {
+		total += (mem_clear_job_args[i].e - mem_clear_job_args[i].s);
+	}
+
+	l = 0;
+	for(i=0; i < mem_clear_njobs; i++) {
+		cpu_wait_job(mem_clear_jobs[i], true);
+		l += (mem_clear_job_args[i].e - mem_clear_job_args[i].s);
+		printf("Clearing memory... %"PRIu64"/%"PRIu64"GB done\n",
+		       l>>30, total>>30);
+		free(mem_clear_job_args[i].job_name);
+	}
+	free(mem_clear_jobs);
+	free(mem_clear_job_args);
+}
+
 static void mem_region_add_dt_reserved_node(struct dt_node *parent,
 		struct mem_region *region)
 {
@@ -1232,25 +1477,14 @@ void mem_region_add_dt_reserved(void)
 		dt_add_property(node, "ranges", NULL, 0);
 	}
 
-	/* First pass: calculate length of property data */
-	list_for_each(&regions, region, list) {
-		if (!region_is_reservable(region))
-			continue;
-		names_len += strlen(region->name) + 1;
-		ranges_len += 2 * sizeof(uint64_t);
-	}
-
-	name = names = malloc(names_len);
-	range = ranges = malloc(ranges_len);
-
 	prlog(PR_INFO, "Reserved regions:\n");
-	/* Second pass: populate property data */
+
+	/* First pass, create /reserved-memory/ nodes for each reservation,
+	 * and calculate the length for the /reserved-names and
+	 * /reserved-ranges properties */
 	list_for_each(&regions, region, list) {
 		if (!region_is_reservable(region))
 			continue;
-		len = strlen(region->name) + 1;
-		memcpy(name, region->name, len);
-		name += len;
 
 		prlog(PR_INFO, "  0x%012llx..%012llx : %s\n",
 		       (long long)region->start,
@@ -1259,12 +1493,29 @@ void mem_region_add_dt_reserved(void)
 
 		mem_region_add_dt_reserved_node(node, region);
 
+		/* calculate the size of the properties populated later */
+		names_len += strlen(region->node->name) + 1;
+		ranges_len += 2 * sizeof(uint64_t);
+	}
+
+	name = names = malloc(names_len);
+	range = ranges = malloc(ranges_len);
+
+	/* Second pass: populate the old-style reserved-names and
+	 * reserved-regions arrays based on the node data */
+	list_for_each(&regions, region, list) {
+		if (!region_is_reservable(region))
+			continue;
+
+		len = strlen(region->node->name) + 1;
+		memcpy(name, region->node->name, len);
+		name += len;
+
 		range[0] = cpu_to_fdt64(region->start);
 		range[1] = cpu_to_fdt64(region->len);
 		range += 2;
 	}
 	unlock(&mem_region_lock);
-
 
 	prop = dt_find_property(dt_root, "reserved-names");
 	if (prop)

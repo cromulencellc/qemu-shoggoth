@@ -22,6 +22,7 @@ struct phb;
 struct pci_device;
 struct pci_slot;
 struct errorlog;
+struct npu2;
 
 enum resource_id {
 	RESOURCE_ID_KERNEL,
@@ -33,15 +34,46 @@ enum resource_id {
 #define RESOURCE_SUBID_NONE 0
 #define RESOURCE_SUBID_SUPPORTED 1
 
-struct bmc_platform {
-	const char *name;
 
+struct bmc_hw_config {
+	uint32_t scu_revision_id;
+	uint32_t mcr_configuration;
+	uint32_t mcr_scu_mpll;
+	uint32_t mcr_scu_strap;
+};
+
+struct bmc_sw_config {
 	/*
 	 * Map IPMI_OEM_X to vendor commands for this BMC
 	 * 0 = unimplimented
 	 */
 	uint32_t ipmi_oem_partial_add_esel;
 	uint32_t ipmi_oem_pnor_access_status;
+	uint32_t ipmi_oem_hiomap_cmd;
+};
+
+struct bmc_platform {
+	const char *name;
+	const struct bmc_hw_config *hw;
+	const struct bmc_sw_config *sw;
+};
+
+/* OpenCAPI platform-specific I2C information */
+struct platform_ocapi {
+	uint8_t i2c_engine;		/* I2C engine number */
+	uint8_t i2c_port;		/* I2C port number */
+	uint8_t i2c_reset_addr;		/* I2C address for reset */
+	uint8_t i2c_reset_brick2;	/* I2C pin to write to reset brick 2 */
+	uint8_t i2c_reset_brick3;	/* I2C pin to write to reset brick 3 */
+	uint8_t i2c_reset_brick4;	/* I2C pin to write to reset brick 4 */
+	uint8_t i2c_reset_brick5;	/* I2C pin to write to reset brick 5 */
+	uint8_t i2c_presence_addr;	/* I2C address for presence detection */
+	uint8_t i2c_presence_brick2;	/* I2C pin to read for presence on brick 2 */
+	uint8_t i2c_presence_brick3;	/* I2C pin to read for presence on brick 3 */
+	uint8_t i2c_presence_brick4;	/* I2C pin to read for presence on brick 4 */
+	uint8_t i2c_presence_brick5;	/* I2C pin to read for presence on brick 5 */
+	bool odl_phy_swap;		/* Swap ODL1 to use brick 2 rather than
+					 * brick 1 lanes */
 };
 
 /*
@@ -57,6 +89,12 @@ struct platform {
 	 * not a constant.
 	 */
 	const struct bmc_platform *bmc;
+
+	/* OpenCAPI platform-specific I2C information */
+	const struct platform_ocapi *ocapi;
+
+	/* NPU2 device detection */
+	void		(*npu2_device_detect)(struct npu2 *npu);
 
 	/*
 	 * Probe platform, return true on a match, called before
@@ -183,7 +221,7 @@ struct platform {
 	 * Read a sensor value
 	 */
 	int64_t		(*sensor_read)(uint32_t sensor_hndl, int token,
-				       uint32_t *sensor_data);
+				       uint64_t *sensor_data);
 	/*
 	 * Return the heartbeat time
 	 */

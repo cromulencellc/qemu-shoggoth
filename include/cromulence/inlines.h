@@ -19,6 +19,8 @@
 #ifndef __INLINES_H__
 #define __INLINES_H__
 
+#include "qemu/error-report.h"
+
 #define fread_checked(dest, s, infile) \
 { \
     size_t b = fread(dest, 1, s, infile); \

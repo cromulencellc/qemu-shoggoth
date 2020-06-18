@@ -1,4 +1,4 @@
-/* Copyright 2016 IBM Corp.
+/* Copyright 2016-2019 IBM Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@
 #include <bitmap.h>
 #include <buddy.h>
 #include <phys-map.h>
+#include <p9_stop_api.H>
 
 /* Use Block group mode to move chip_id into block .... */
 #define USE_BLOCK_GROUP_MODE
@@ -239,7 +240,8 @@
 static enum {
 	XIVE_MODE_EMU	= OPAL_XIVE_MODE_EMU,
 	XIVE_MODE_EXPL	= OPAL_XIVE_MODE_EXPL,
-} xive_mode;
+	XIVE_MODE_NONE,
+} xive_mode = XIVE_MODE_NONE;
 
 
 /* Each source controller has one of these. There's one embedded
@@ -365,7 +367,7 @@ struct xive {
 	struct dt_node	*x_node;
 	int		rev;
 #define XIVE_REV_UNKNOWN	0	/* Unknown version */
-#define XIVE_REV_1		1	/* P9 (Nimbus) DD1.x */
+#define XIVE_REV_1		1	/* P9 (Nimbus) DD1.x (not supported) */
 #define XIVE_REV_2		2	/* P9 (Nimbus) DD2.x or Cumulus */
 
 	uint64_t	xscom_base;
@@ -485,6 +487,8 @@ struct xive {
 	void		*q_ovf;
 };
 
+#define XIVE_CAN_STORE_EOI(x) XIVE_STORE_EOI_ENABLED
+
 /* Global DT node */
 static struct dt_node *xive_dt_node;
 
@@ -591,8 +595,8 @@ static uint32_t xive_chip_to_block(uint32_t chip_id)
 
 /* VP allocation */
 static uint32_t xive_chips_alloc_bits = 0;
-struct buddy *xive_vp_buddy;
-struct lock xive_buddy_lock = LOCK_UNLOCKED;
+static struct buddy *xive_vp_buddy;
+static struct lock xive_buddy_lock = LOCK_UNLOCKED;
 
 /* VP# decoding/encoding */
 static bool xive_decode_vp(uint32_t vp, uint32_t *blk, uint32_t *idx,
@@ -849,6 +853,14 @@ static struct xive_ive *xive_get_ive(struct xive *x, unsigned int isn)
 			xive_err(x, "xive_get_ive, ESC ISN 0x%x EQ not found\n", isn);
 			return NULL;
 		}
+
+		/* If using single-escalation, don't let anybody get to the individual
+		 * esclation interrupts
+		 */
+		if (eq->w0 & EQ_W0_UNCOND_ESCALATE)
+			return NULL;
+
+		/* Grab the buried IVE */
 		return (struct xive_ive *)(char *)&eq->w4;
 	} else {
 		/* Check the block matches */
@@ -982,7 +994,7 @@ static uint32_t xive_alloc_eq_set(struct xive *x, bool alloc_indirect __unused)
 		 */
 		if (alloc_indirect) {
 			/* Allocate/provision indirect page during boot only */
-			xive_dbg(x, "Indirect empty, provisioning from local pool\n");
+			xive_vdbg(x, "Indirect empty, provisioning from local pool\n");
 			page = local_alloc(x->chip_id, 0x10000, 0x10000);
 			if (!page) {
 				xive_dbg(x, "provisioning failed !\n");
@@ -990,10 +1002,10 @@ static uint32_t xive_alloc_eq_set(struct xive *x, bool alloc_indirect __unused)
 			}
 			vsd_flags |= VSD_FIRMWARE;
 		} else {
-			xive_dbg(x, "Indirect empty, provisioning from donated pages\n");
+			xive_vdbg(x, "Indirect empty, provisioning from donated pages\n");
 			page = xive_get_donated_page(x);
 			if (!page) {
-				xive_dbg(x, "none available !\n");
+				xive_vdbg(x, "no idirect pages available !\n");
 				return XIVE_ALLOC_NO_IND;
 			}
 		}
@@ -1081,8 +1093,6 @@ static void xive_init_vp_allocator(void)
 	 *
 	 * These are 0x80..0xff, so order 7 starting at 0x80. This will
 	 * reserve that range on each chip.
-	 *
-	 * XXX This can go away if we just call xive_reset ..
 	 */
 	assert(buddy_reserve(xive_vp_buddy, 0x80, 7));
 }
@@ -1244,6 +1254,52 @@ static int64_t __xive_cache_watch(struct xive *x, enum xive_cache_type ctype,
 				  void *new_data, bool light_watch,
 				  bool synchronous);
 
+static void xive_scrub_workaround_vp(struct xive *x, uint32_t block, uint32_t idx __unused)
+{
+	/* VP variant of the workaround described in __xive_cache_scrub(),
+	 * we need to be careful to use for that workaround an NVT that
+	 * sits on the same xive but isn NOT part of a donated indirect
+	 * entry.
+	 *
+	 * The reason is that the dummy cache watch will re-create a
+	 * dirty entry in the cache, even if the entry is marked
+	 * invalid.
+	 *
+	 * Thus if we are about to dispose of the indirect entry backing
+	 * it, we'll cause a checkstop later on when trying to write it
+	 * out.
+	 *
+	 * Note: This means the workaround only works for block group
+	 * mode.
+	 */
+#ifdef USE_BLOCK_GROUP_MODE
+	__xive_cache_watch(x, xive_cache_vpc, block, INITIAL_VP_BASE, 0,
+			   0, NULL, true, false);
+#else
+	/* WARNING: Some workarounds related to cache scrubs require us to
+	 * have at least one firmware owned (permanent) indirect entry for
+	 * each XIVE instance. This currently only happens in block group
+	 * mode
+	 */
+#warning Block group mode should not be disabled
+#endif
+}
+
+static void xive_scrub_workaround_eq(struct xive *x, uint32_t block __unused, uint32_t idx)
+{
+	void *mmio;
+
+	/* EQ variant of the workaround described in __xive_cache_scrub(),
+	 * a simple non-side effect load from ESn will do
+	 */
+	mmio = x->eq_mmio + idx * 0x20000;
+
+	/* Ensure the above has returned before we do anything else
+	 * the XIVE store queue is completely empty
+	 */
+	load_wait(in_be64(mmio + 0x800));
+}
+
 static int64_t __xive_cache_scrub(struct xive *x, enum xive_cache_type ctype,
 				  uint64_t block, uint64_t idx,
 				  bool want_inval, bool want_disable)
@@ -1263,6 +1319,9 @@ static int64_t __xive_cache_scrub(struct xive *x, enum xive_cache_type ctype,
 	 * invalidate, then after the scrub, we do a dummy cache
 	 * watch which will make the HW read the data back, which
 	 * should be ordered behind all the preceding stores.
+	 *
+	 * Update: For EQs we can do a non-side effect ESB load instead
+	 * which is faster.
 	 */
 	want_inval = true;
 
@@ -1324,9 +1383,11 @@ static int64_t __xive_cache_scrub(struct xive *x, enum xive_cache_type ctype,
 	/* Workaround for HW bug described above (only applies to
 	 * EQC and VPC
 	 */
-	if (ctype == xive_cache_eqc || ctype == xive_cache_vpc)
-		__xive_cache_watch(x, ctype, block, idx, 0, 0, NULL,
-				   true, false);
+	if (ctype == xive_cache_eqc)
+		xive_scrub_workaround_eq(x, block, idx);
+	else if (ctype == xive_cache_vpc)
+		xive_scrub_workaround_vp(x, block, idx);
+
 	return 0;
 }
 
@@ -1459,11 +1520,7 @@ static bool xive_set_vsd(struct xive *x, uint32_t tbl, uint32_t idx, uint64_t v)
 		  SETFIELD(VST_TABLE_OFFSET, 0ull, idx));
 	if (x->last_reg_error)
 		return false;
-	/* Hack to workaround DD1 issue with NVT in VC in DD1 */
-	if (tbl == VST_TSEL_VPDT)
-		xive_regw(x, VC_VSD_TABLE_DATA, v | VSD_TSIZE);
-	else
-		xive_regw(x, VC_VSD_TABLE_DATA, v);
+	xive_regw(x, VC_VSD_TABLE_DATA, v);
 	if (x->last_reg_error)
 		return false;
 
@@ -1671,21 +1728,57 @@ static bool xive_config_init(struct xive *x)
 #endif
 	val |= PC_TCTXT_CHIPID_OVERRIDE;
 	val |= PC_TCTXT_CFG_TARGET_EN;
+	val = SETFIELD(PC_TCTXT_CHIPID, val, x->block_id);
+	val = SETFIELD(PC_TCTXT_INIT_AGE, val, 0x2);
+	val |= PC_TCTXT_CFG_LGS_EN;
 	/* Disable pressure relief as we hijack the field in the VPs */
 	val &= ~PC_TCTXT_CFG_STORE_ACK;
-	val = SETFIELD(PC_TCTXT_CHIPID, val, x->block_id);
 	xive_regw(x, PC_TCTXT_CFG, val);
 	xive_dbg(x, "PC_TCTXT_CFG=%016llx\n", val);
 
-	/* Subsequent inits are DD2 only */
-	if (x->rev < XIVE_REV_2)
-		return true;
+	val = xive_regr(x, CQ_CFG_PB_GEN);
+	/* 1-block-per-chip mode */
+	val = SETFIELD(CQ_INT_ADDR_OPT, val, 2);
+	xive_regw(x, CQ_CFG_PB_GEN, val);
 
 	/* Enable StoreEOI */
 	val = xive_regr(x, VC_SBC_CONFIG);
-	val |= VC_SBC_CONF_CPLX_CIST | VC_SBC_CONF_CIST_BOTH;
+	if (XIVE_CAN_STORE_EOI(x))
+		val |= VC_SBC_CONF_CPLX_CIST | VC_SBC_CONF_CIST_BOTH;
+	else
+		xive_dbg(x, "store EOI is disabled\n");
+
 	val |= VC_SBC_CONF_NO_UPD_PRF;
 	xive_regw(x, VC_SBC_CONFIG, val);
+
+	/* Disable block tracking on Nimbus (we may want to enable
+	 * it on Cumulus later). HW Erratas.
+	 */
+	val = xive_regr(x, PC_TCTXT_TRACK);
+	val &= ~PC_TCTXT_TRACK_EN;
+	xive_regw(x, PC_TCTXT_TRACK, val);
+
+	/* Enable relaxed ordering of trigger forwarding */
+	val = xive_regr(x, VC_AIB_TX_ORDER_TAG2);
+	val |= VC_AIB_TX_ORDER_TAG2_REL_TF;
+	xive_regw(x, VC_AIB_TX_ORDER_TAG2, val);
+
+	/* Enable new END s and u bits for silent escalate */
+	val = xive_regr(x, VC_EQC_CONFIG);
+	val |= VC_EQC_CONF_ENABLE_END_s_BIT;
+	val |= VC_EQC_CONF_ENABLE_END_u_BIT;
+	xive_regw(x, VC_EQC_CONFIG, val);
+
+	/* Disable error reporting in the FIR for info errors
+	 * from the VC.
+	 */
+	xive_regw(x, CQ_FIRMASK_OR, CQ_FIR_VC_INFO_ERROR_0_1);
+
+	/* Mask CI Load and Store to bad location, as IPI trigger
+	 * pages may be mapped to user space, and a read on the
+	 * trigger page causes a checkstop
+	 */
+	xive_regw(x, CQ_FIRMASK_OR, CQ_FIR_PB_RCMDX_CI_ERR1);
 
 	return true;
 }
@@ -1904,6 +1997,7 @@ static void xive_create_mmio_dt_node(struct xive *x)
 			      12, 16, 21, 24);
 
 	dt_add_property_cells(xive_dt_node, "ibm,xive-#priorities", 8);
+	dt_add_property(xive_dt_node, "single-escalation-support", NULL, 0);
 
 	xive_add_provisioning_properties();
 }
@@ -2067,8 +2161,8 @@ void *xive_get_trigger_port(uint32_t girq)
 		return NULL;
 
 	if (GIRQ_IS_ESCALATION(girq)) {
-		/* Page 2 of the EQ MMIO space is the escalate irq */
-		return x->eq_mmio + idx * 0x20000 + 0x10000;
+		/* There is no trigger page for escalation interrupts */
+		return NULL;
 	} else {
 		/* Make sure it's an IPI on that chip */
 		if (girq < x->int_base ||
@@ -2453,7 +2547,7 @@ static int64_t xive_sync(struct xive *x)
 
 static int64_t __xive_set_irq_config(struct irq_source *is, uint32_t girq,
 				     uint64_t vp, uint8_t prio, uint32_t lirq,
-				     bool update_esb, bool no_sync)
+				     bool update_esb, bool sync)
 {
 	struct xive_src *s = container_of(is, struct xive_src, is);
 	uint32_t old_target, vp_blk;
@@ -2497,7 +2591,7 @@ static int64_t __xive_set_irq_config(struct irq_source *is, uint32_t girq,
 	 * WARNING: This assumes the VP and it's queues are on the same
 	 *          XIVE instance !
 	 */
-	if (no_sync)
+	if (!sync)
 		return OPAL_SUCCESS;
 	xive_sync(s->xive);
 	if (xive_decode_vp(old_target, &vp_blk, NULL, NULL, NULL)) {
@@ -2515,7 +2609,7 @@ static int64_t xive_set_irq_config(uint32_t girq, uint64_t vp, uint8_t prio,
 	struct irq_source *is = irq_find_source(girq);
 
 	return __xive_set_irq_config(is, girq, vp, prio, lirq, update_esb,
-				     false);
+				     true);
 }
 
 static int64_t xive_source_set_xive(struct irq_source *is,
@@ -2540,7 +2634,7 @@ static int64_t xive_source_set_xive(struct irq_source *is,
 	server >>= 2;
 
 	/* Set logical irq to match isn */
-	return __xive_set_irq_config(is, isn, server, prio, isn, true, false);
+	return __xive_set_irq_config(is, isn, server, prio, isn, true, true);
 }
 
 void __xive_source_eoi(struct irq_source *is, uint32_t isn)
@@ -2700,7 +2794,7 @@ void xive_register_ipi_source(uint32_t base, uint32_t count, void *data,
 	assert(s);
 
 	/* Store EOI supported on DD2.0 */
-	if (x->rev >= XIVE_REV_2)
+	if (XIVE_CAN_STORE_EOI(x))
 		flags |= XIVE_SRC_STORE_EOI;
 
 	/* Callbacks assume the MMIO base corresponds to the first
@@ -2734,10 +2828,8 @@ static struct xive *init_one_xive(struct dt_node *np)
 
 	x->rev = XIVE_REV_UNKNOWN;
 	if (chip->type == PROC_CHIP_P9_NIMBUS) {
-		if ((chip->ec_level & 0xf0) == 0x10)
-			x->rev = XIVE_REV_1;
-		else if ((chip->ec_level & 0xf0) == 0x20)
-			x->rev = XIVE_REV_2;
+		assert((chip->ec_level & 0xf0) != 0x10);
+		x->rev = XIVE_REV_2;
 	} else if (chip->type == PROC_CHIP_P9_CUMULUS)
 		x->rev = XIVE_REV_2;
 
@@ -2808,7 +2900,7 @@ static struct xive *init_one_xive(struct dt_node *np)
 
 	/* Register built-in source controllers (aka IPIs) */
 	flags = XIVE_SRC_EOI_PAGE1 | XIVE_SRC_TRIGGER_PAGE;
-	if (x->rev >= XIVE_REV_2)
+	if (XIVE_CAN_STORE_EOI(x))
 		flags |= XIVE_SRC_STORE_EOI;
 	__xive_register_source(x, &x->ipis, x->int_base,
 			       x->int_hw_bot - x->int_base, IPI_ESB_SHIFT,
@@ -2842,7 +2934,7 @@ static void xive_ipi_init(struct xive *x, struct cpu_thread *cpu)
 
 	__xive_set_irq_config(&x->ipis.is, xs->ipi_irq, cpu->pir,
 			      XIVE_EMULATION_PRIO, xs->ipi_irq,
-			      true, false);
+			      true, true);
 }
 
 static void xive_ipi_eoi(struct xive *x, uint32_t idx)
@@ -2897,7 +2989,7 @@ static void xive_reset_enable_thread(struct cpu_thread *c)
 void xive_cpu_callin(struct cpu_thread *cpu)
 {
 	struct xive_cpu_state *xs = cpu->xstate;
-	uint8_t old_w2, w2;
+	uint8_t old_w2 __unused, w2 __unused;
 
 	if (!xs)
 		return;
@@ -2910,10 +3002,10 @@ void xive_cpu_callin(struct cpu_thread *cpu)
 	out_8(xs->tm_ring1 + TM_QW3_HV_PHYS + TM_WORD2, 0x80);
 	w2 = in_8(xs->tm_ring1 + TM_QW3_HV_PHYS + TM_WORD2);
 
-	xive_cpu_dbg(cpu, "Initialized TIMA VP=%x/%x W01=%016llx W2=%02x->%02x\n",
-		     xs->vp_blk, xs->vp_idx,
-		     in_be64(xs->tm_ring1 + TM_QW3_HV_PHYS),
-		     old_w2, w2);
+	xive_cpu_vdbg(cpu, "Initialized TIMA VP=%x/%x W01=%016llx W2=%02x->%02x\n",
+		      xs->vp_blk, xs->vp_idx,
+		      in_be64(xs->tm_ring1 + TM_QW3_HV_PHYS),
+		      old_w2, w2);
 }
 
 #ifdef XIVE_DEBUG_INIT_CACHE_UPDATES
@@ -2979,7 +3071,7 @@ static inline bool xive_check_vpc_update(struct xive *x __unused,
 #ifdef XIVE_EXTRA_CHECK_INIT_CACHE
 static void xive_special_cache_check(struct xive *x, uint32_t blk, uint32_t idx)
 {
-	struct xive_vp vp = {};
+	struct xive_vp vp = {0};
 	uint32_t i;
 
 	for (i = 0; i < 1000; i++) {
@@ -3112,12 +3204,12 @@ static void xive_configure_ex_special_bar(struct xive *x, struct cpu_thread *c)
 	uint64_t xa, val;
 	int64_t rc;
 
-	xive_cpu_dbg(c, "Setting up special BAR\n");
+	xive_cpu_vdbg(c, "Setting up special BAR\n");
 	xa = XSCOM_ADDR_P9_EX(pir_to_core_id(c->pir), P9X_EX_NCU_SPEC_BAR);
 	val = (uint64_t)x->tm_base | P9X_EX_NCU_SPEC_BAR_ENABLE;
 	if (x->tm_shift == 16)
 		val |= P9X_EX_NCU_SPEC_BAR_256K;
-	xive_cpu_dbg(c, "NCU_SPEC_BAR_XA[%08llx]=%016llx\n", xa, val);
+	xive_cpu_vdbg(c, "NCU_SPEC_BAR_XA[%08llx]=%016llx\n", xa, val);
 	rc = xscom_write(c->chip_id, xa, val);
 	if (rc) {
 		xive_cpu_err(c, "Failed to setup NCU_SPEC_BAR\n");
@@ -3125,6 +3217,35 @@ static void xive_configure_ex_special_bar(struct xive *x, struct cpu_thread *c)
 	}
 }
 
+void xive_late_init(void)
+{
+	struct cpu_thread *c;
+
+	prlog(PR_INFO, "SLW: Configuring self-restore for NCU_SPEC_BAR\n");
+	for_each_present_cpu(c) {
+		if(cpu_is_thread0(c)) {
+			struct proc_chip *chip = get_chip(c->chip_id);
+			struct xive *x = chip->xive;
+			uint64_t xa, val, rc;
+			xa = XSCOM_ADDR_P9_EX(pir_to_core_id(c->pir),
+				P9X_EX_NCU_SPEC_BAR);
+			val = (uint64_t)x->tm_base | P9X_EX_NCU_SPEC_BAR_ENABLE;
+			/* Bail out if wakeup engine has already failed */
+			if ( wakeup_engine_state != WAKEUP_ENGINE_PRESENT) {
+				prlog(PR_ERR, "XIVE p9_stop_api fail detected\n");
+				break;
+			}
+			rc = p9_stop_save_scom((void *)chip->homer_base, xa, val,
+				P9_STOP_SCOM_REPLACE, P9_STOP_SECTION_EQ_SCOM);
+			if (rc) {
+				xive_cpu_err(c, "p9_stop_api failed for NCU_SPEC_BAR rc=%lld\n",
+				rc);
+				wakeup_engine_state = WAKEUP_ENGINE_FAILED;
+			}
+		}
+	}
+
+}
 static void xive_provision_cpu(struct xive_cpu_state *xs, struct cpu_thread *c)
 {
 	struct xive *x;
@@ -3195,7 +3316,7 @@ static void xive_init_cpu(struct cpu_thread *c)
 	/* Allocate an IPI */
 	xs->ipi_irq = xive_alloc_ipi_irqs(c->chip_id, 1, 1);
 
-	xive_cpu_dbg(c, "CPU IPI is irq %08x\n", xs->ipi_irq);
+	xive_cpu_vdbg(c, "CPU IPI is irq %08x\n", xs->ipi_irq);
 
 	/* Provision a VP and some EQDs for a physical CPU */
 	xive_provision_cpu(xs, c);
@@ -3887,9 +4008,32 @@ static int64_t opal_xive_get_queue_info(uint64_t vp, uint32_t prio,
 		return OPAL_PARAMETER;
 
 	if (out_escalate_irq) {
+		uint32_t esc_idx = idx;
+
+		/* If escalations are routed to a single queue, fix up
+		 * the escalation interrupt number here.
+		 */
+		if (eq->w0 & EQ_W0_UNCOND_ESCALATE)
+			esc_idx |= 7;
 		*out_escalate_irq =
-			MAKE_ESCALATION_GIRQ(blk, idx);
+			MAKE_ESCALATION_GIRQ(blk, esc_idx);
 	}
+
+	/* If this is a single-escalation gather queue, that's all
+	 * there is to return
+	 */
+	if (eq->w0 & EQ_W0_SILENT_ESCALATE) {
+		if (out_qflags)
+			*out_qflags = 0;
+		if (out_qpage)
+			*out_qpage = 0;
+		if (out_qsize)
+			*out_qsize = 0;
+		if (out_qeoi_page)
+			*out_qeoi_page = 0;
+		return OPAL_SUCCESS;
+	}
+
 	if (out_qpage) {
 		if (eq->w0 & EQ_W0_ENQUEUE)
 			*out_qpage =
@@ -3920,6 +4064,13 @@ static int64_t opal_xive_get_queue_info(uint64_t vp, uint32_t prio,
 	return OPAL_SUCCESS;
 }
 
+static void xive_cleanup_eq(struct xive_eq *eq)
+{
+	eq->w0 = eq->w0 & EQ_W0_FIRMWARE;
+	eq->w1 = EQ_W1_ESe_Q | EQ_W1_ESn_Q;
+	eq->w2 = eq->w3 = eq->w4 = eq->w5 = eq->w6 = eq->w7 = 0;
+}
+
 static int64_t opal_xive_set_queue_info(uint64_t vp, uint32_t prio,
 					uint64_t qpage,
 					uint64_t qsize,
@@ -3946,6 +4097,12 @@ static int64_t opal_xive_set_queue_info(uint64_t vp, uint32_t prio,
 	if (!old_eq)
 		return OPAL_PARAMETER;
 
+	/* If this is a silent escalation queue, it cannot be
+	 * configured directly
+	 */
+	if (old_eq->w0 & EQ_W0_SILENT_ESCALATE)
+		return OPAL_PARAMETER;
+
 	/* This shouldn't fail or xive_eq_for_target would have
 	 * failed already
 	 */
@@ -3958,58 +4115,59 @@ static int64_t opal_xive_set_queue_info(uint64_t vp, uint32_t prio,
 	 */
 	eq = *old_eq;
 
-	switch(qsize) {
-		/* Supported sizes */
-	case 12:
-	case 16:
-	case 21:
-	case 24:
-		eq.w3 = ((uint64_t)qpage) & 0xffffffff;
-		eq.w2 = (((uint64_t)qpage)) >> 32 & 0x0fffffff;
-		eq.w0 |= EQ_W0_ENQUEUE;
-		eq.w0 = SETFIELD(EQ_W0_QSIZE, eq.w0, qsize - 12);
-		break;
-	case 0:
-		eq.w2 = eq.w3 = 0;
-		eq.w0 &= ~EQ_W0_ENQUEUE;
-		break;
-	default:
-		return OPAL_PARAMETER;
-	}
+	if (qflags & OPAL_XIVE_EQ_ENABLED) {
+		switch(qsize) {
+			/* Supported sizes */
+		case 12:
+		case 16:
+		case 21:
+		case 24:
+			eq.w3 = ((uint64_t)qpage) & 0xffffffff;
+			eq.w2 = (((uint64_t)qpage)) >> 32 & 0x0fffffff;
+			eq.w0 |= EQ_W0_ENQUEUE;
+			eq.w0 = SETFIELD(EQ_W0_QSIZE, eq.w0, qsize - 12);
+			break;
+		case 0:
+			eq.w2 = eq.w3 = 0;
+			eq.w0 &= ~EQ_W0_ENQUEUE;
+			break;
+		default:
+			return OPAL_PARAMETER;
+		}
 
-	/* Ensure the priority and target are correctly set (they will
-	 * not be right after allocation
-	 */
-	eq.w6 = SETFIELD(EQ_W6_NVT_BLOCK, 0ul, vp_blk) |
-		SETFIELD(EQ_W6_NVT_INDEX, 0ul, vp_idx);
-	eq.w7 = SETFIELD(EQ_W7_F0_PRIORITY, 0ul, prio);
-	/* XXX Handle group i bit when needed */
+		/* Ensure the priority and target are correctly set (they will
+		 * not be right after allocation
+		 */
+		eq.w6 = SETFIELD(EQ_W6_NVT_BLOCK, 0ul, vp_blk) |
+			SETFIELD(EQ_W6_NVT_INDEX, 0ul, vp_idx);
+		eq.w7 = SETFIELD(EQ_W7_F0_PRIORITY, 0ul, prio);
+		/* XXX Handle group i bit when needed */
 
-	/* Always notify flag */
-	if (qflags & OPAL_XIVE_EQ_ALWAYS_NOTIFY)
-		eq.w0 |= EQ_W0_UCOND_NOTIFY;
+		/* Always notify flag */
+		if (qflags & OPAL_XIVE_EQ_ALWAYS_NOTIFY)
+			eq.w0 |= EQ_W0_UCOND_NOTIFY;
+		else
+			eq.w0 &= ~EQ_W0_UCOND_NOTIFY;
 
-	/* Escalation flag */
-	if (qflags & OPAL_XIVE_EQ_ESCALATE)
-		eq.w0 |= EQ_W0_ESCALATE_CTL;
+		/* Escalation flag */
+		if (qflags & OPAL_XIVE_EQ_ESCALATE)
+			eq.w0 |= EQ_W0_ESCALATE_CTL;
+		else
+			eq.w0 &= ~EQ_W0_ESCALATE_CTL;
 
-	/* Unconditionally clear the current queue pointer, set
-	 * generation to 1 and disable escalation interrupts.
-	 */
-	eq.w1 = EQ_W1_GENERATION |
-		(old_eq->w1 & (EQ_W1_ESe_P | EQ_W1_ESe_Q |
-			       EQ_W1_ESn_P | EQ_W1_ESn_Q));
+		/* Unconditionally clear the current queue pointer, set
+		 * generation to 1 and disable escalation interrupts.
+		 */
+		eq.w1 = EQ_W1_GENERATION |
+			(old_eq->w1 & (EQ_W1_ESe_P | EQ_W1_ESe_Q |
+				       EQ_W1_ESn_P | EQ_W1_ESn_Q));
 
-	/* Enable or disable. We always enable backlog for an
-	 * enabled queue otherwise escalations won't work.
-	 */
-	if (qflags & OPAL_XIVE_EQ_ENABLED)
+		/* Enable. We always enable backlog for an enabled queue
+		 * otherwise escalations won't work.
+		 */
 		eq.w0 |= EQ_W0_VALID | EQ_W0_BACKLOG;
-	else {
-		eq.w0 &= ~EQ_W0_VALID;
-		eq.w1 &= ~(EQ_W1_ESe_P | EQ_W1_ESn_P);
-		eq.w1 |= EQ_W1_ESe_Q | EQ_W1_ESn_Q;
-	}
+	} else
+		xive_cleanup_eq(&eq);
 
 	/* Update EQ, non-synchronous */
 	lock(&x->lock);
@@ -4065,9 +4223,32 @@ static int64_t opal_xive_get_vp_info(uint64_t vp_id,
 		return OPAL_PARAMETER;
 
 	if (out_flags) {
+		uint32_t eq_blk, eq_idx;
+		struct xive_eq *eq;
+		struct xive *eq_x;
 		*out_flags = 0;
+
+		/* We would like to a way to stash a SW bit in the VP to
+		 * know whether silent escalation is enabled or not, but
+		 * unlike what happens with EQs, the PC cache watch doesn't
+		 * implement the reserved bit in the VPs... so we have to go
+		 * look at EQ 7 instead.
+		 */
+		/* Grab EQ for prio 7 to check for silent escalation */
+		if (!xive_eq_for_target(vp_id, 7, &eq_blk, &eq_idx))
+			return OPAL_PARAMETER;
+
+		eq_x = xive_from_vc_blk(eq_blk);
+		if (!eq_x)
+			return OPAL_PARAMETER;
+
+		eq = xive_get_eq(x, eq_idx);
+		if (!eq)
+			return OPAL_PARAMETER;
 		if (vp->w0 & VP_W0_VALID)
 			*out_flags |= OPAL_XIVE_VP_ENABLED;
+		if (eq->w0 & EQ_W0_SILENT_ESCALATE)
+			*out_flags |= OPAL_XIVE_VP_SINGLE_ESCALATION;
 	}
 
 	if (out_cam_value)
@@ -4082,6 +4263,94 @@ static int64_t opal_xive_get_vp_info(uint64_t vp_id,
 		*out_chip_id = xive_block_to_chip[blk];
 
 	return OPAL_SUCCESS;
+}
+
+static int64_t xive_setup_silent_gather(uint64_t vp_id, bool enable)
+{
+	uint32_t blk, idx, i;
+	struct xive_eq *eq_orig;
+	struct xive_eq eq;
+	struct xive *x;
+	int64_t rc;
+
+	/* Get base EQ block */
+	if (!xive_eq_for_target(vp_id, 0, &blk, &idx))
+		return OPAL_PARAMETER;
+	x = xive_from_vc_blk(blk);
+	if (!x)
+		return OPAL_PARAMETER;
+
+	/* Grab prio 7 */
+	eq_orig = xive_get_eq(x, idx + 7);
+	if (!eq_orig)
+		return OPAL_PARAMETER;
+
+	/* If trying to enable silent gather, make sure prio 7 is not
+	 * already enabled as a normal queue
+	 */
+	if (enable && (eq_orig->w0 & EQ_W0_VALID) &&
+	    !(eq_orig->w0 & EQ_W0_SILENT_ESCALATE)) {
+		xive_dbg(x, "Attempt at enabling silent gather but"
+			 " prio 7 queue already in use\n");
+		return OPAL_PARAMETER;
+	}
+
+	eq = *eq_orig;
+
+	if (enable) {
+		/* W0: Enabled and "s" set, no other bit */
+		eq.w0 &= EQ_W0_FIRMWARE;
+		eq.w0 |= EQ_W0_VALID | EQ_W0_SILENT_ESCALATE |
+			EQ_W0_ESCALATE_CTL | EQ_W0_BACKLOG;
+
+		/* W1: Mark ESn as 01, ESe as 00 */
+		eq.w1 &= ~EQ_W1_ESn_P;
+		eq.w1 |= EQ_W1_ESn_Q;
+		eq.w1 &= ~(EQ_W1_ESe);
+	} else if (eq.w0 & EQ_W0_SILENT_ESCALATE)
+		xive_cleanup_eq(&eq);
+
+	if (!memcmp(eq_orig, &eq, sizeof(eq)))
+		rc = 0;
+	else
+		rc = xive_eqc_cache_update(x, blk, idx + 7, 0, 4, &eq,
+					   false, false);
+	if (rc)
+		return rc;
+
+	/* Mark/unmark all other prios with the new "u" bit and update
+	 * escalation
+	 */
+	for (i = 0; i < 6; i++) {
+		eq_orig = xive_get_eq(x, idx + i);
+		if (!eq_orig)
+			continue;
+		eq = *eq_orig;
+		if (enable) {
+			/* Set new "u" bit */
+			eq.w0 |= EQ_W0_UNCOND_ESCALATE;
+
+			/* Re-route escalation interrupt (previous
+			 * route is lost !) to the gather queue
+			 */
+			eq.w4 = SETFIELD(EQ_W4_ESC_EQ_BLOCK,
+					 eq.w4, blk);
+			eq.w4 = SETFIELD(EQ_W4_ESC_EQ_INDEX,
+					 eq.w4, idx + 7);
+		} else if (eq.w0 & EQ_W0_UNCOND_ESCALATE) {
+			/* Clear the "u" bit, disable escalations if it was set */
+			eq.w0 &= ~EQ_W0_UNCOND_ESCALATE;
+			eq.w0 &= ~EQ_W0_ESCALATE_CTL;
+		}
+		if (!memcmp(eq_orig, &eq, sizeof(eq)))
+			continue;
+		rc = xive_eqc_cache_update(x, blk, idx + i, 0, 4, &eq,
+					   false, false);
+		if (rc)
+			break;
+	}
+
+	return rc;
 }
 
 static int64_t opal_xive_set_vp_info(uint64_t vp_id,
@@ -4108,21 +4377,32 @@ static int64_t opal_xive_set_vp_info(uint64_t vp_id,
 	if (!vp)
 		return OPAL_PARAMETER;
 
-	vp_new = *vp;
-	if (flags & OPAL_XIVE_VP_ENABLED)
-		vp_new.w0 |= VP_W0_VALID;
-	else
-		vp_new.w0 &= ~VP_W0_VALID;
-
-	vp_new.w7 = report_cl_pair & 0xffffffff;
-	vp_new.w6 = report_cl_pair >> 32;
-
 	lock(&x->lock);
-	rc = xive_vpc_cache_update(x, blk, idx, 0, 8, &vp_new, false, false);
-	if (rc) {
-		unlock(&x->lock);
-		return rc;
+
+	vp_new = *vp;
+	if (flags & OPAL_XIVE_VP_ENABLED) {
+		vp_new.w0 |= VP_W0_VALID;
+		vp_new.w6 = report_cl_pair >> 32;
+		vp_new.w7 = report_cl_pair & 0xffffffff;
+
+		if (flags & OPAL_XIVE_VP_SINGLE_ESCALATION)
+			rc = xive_setup_silent_gather(vp_id, true);
+		else
+			rc = xive_setup_silent_gather(vp_id, false);
+	} else {
+		vp_new.w0 = vp_new.w6 = vp_new.w7 = 0;
+		rc = xive_setup_silent_gather(vp_id, false);
 	}
+
+	if (rc) {
+		if (rc != OPAL_BUSY)
+			xive_dbg(x, "Silent gather setup failed with err %lld\n", rc);
+		goto bail;
+	}
+
+	rc = xive_vpc_cache_update(x, blk, idx, 0, 8, &vp_new, false, false);
+	if (rc)
+		goto bail;
 
 	/* When disabling, we scrub clean (invalidate the entry) so
 	 * we can avoid cache ops in alloc/free
@@ -4130,9 +4410,9 @@ static int64_t opal_xive_set_vp_info(uint64_t vp_id,
 	if (!(flags & OPAL_XIVE_VP_ENABLED))
 		xive_vpc_scrub_clean(x, blk, idx);
 
+bail:
 	unlock(&x->lock);
-
-	return OPAL_SUCCESS;
+	return rc;
 }
 
 static void xive_cleanup_cpu_tima(struct cpu_thread *c)
@@ -4140,7 +4420,7 @@ static void xive_cleanup_cpu_tima(struct cpu_thread *c)
 	struct xive_cpu_state *xs = c->xstate;
 	struct xive *x = xs->xive;
 	void *ind_tm_base = x->ic_base + (4 << x->ic_shift);
-	uint8_t old_w2, w2;
+	uint8_t old_w2 __unused, w2 __unused;
 
 	/* Reset the HW context */
 	xive_reset_enable_thread(c);
@@ -4161,10 +4441,10 @@ static void xive_cleanup_cpu_tima(struct cpu_thread *c)
 	w2 = in_8(ind_tm_base + TM_QW3_HV_PHYS + TM_WORD2);
 
 	/* Dump HV state */
-	xive_cpu_dbg(c, "[reset] VP TIMA VP=%x/%x W01=%016llx W2=%02x->%02x\n",
-		     xs->vp_blk, xs->vp_idx,
-		     in_be64(ind_tm_base + TM_QW3_HV_PHYS),
-		     old_w2, w2);
+	xive_cpu_vdbg(c, "[reset] VP TIMA VP=%x/%x W01=%016llx W2=%02x->%02x\n",
+		      xs->vp_blk, xs->vp_idx,
+		      in_be64(ind_tm_base + TM_QW3_HV_PHYS),
+		      old_w2, w2);
 
 	/* Reset indirect access */
 	xive_regw(x, PC_TCTXT_INDIR0, 0);
@@ -4283,7 +4563,6 @@ static void xive_reset_one(struct xive *x)
 		if (i == 0)
 			continue;
 		eq_firmware = false;
-		memset(&eq0, 0, sizeof(eq0));
 		for (j = 0; j < 8; j++) {
 			uint32_t idx = (i << 3) | j;
 
@@ -4295,9 +4574,15 @@ static void xive_reset_one(struct xive *x)
 			 * we will incorrectly free the EQs that are reserved
 			 * for the physical CPUs
 			 */
-			eq0.w0 = eq->w0 & EQ_W0_FIRMWARE;
-			xive_eqc_cache_update(x, x->block_id,
-					      idx, 0, 4, &eq0, false, true);
+			if (eq->w0 & EQ_W0_VALID) {
+				if (!(eq->w0 & EQ_W0_FIRMWARE))
+					xive_dbg(x, "EQ 0x%x:0x%x is valid at reset: %08x %08x\n",
+						 x->block_id, idx, eq->w0, eq->w1);
+				eq0 = *eq;
+				xive_cleanup_eq(&eq0);
+				xive_eqc_cache_update(x, x->block_id,
+						      idx, 0, 4, &eq0, false, true);
+			}
 			if (eq->w0 & EQ_W0_FIRMWARE)
 				eq_firmware = true;
 		}
@@ -4339,6 +4624,7 @@ static void xive_reset_one(struct xive *x)
 			continue;
 
 		/* Clear it */
+		xive_dbg(x, "VP 0x%x:0x%x is valid at reset\n", x->block_id, i);
 		xive_vpc_cache_update(x, x->block_id,
 				      i, 0, 8, &vp0, false, true);
 	}
@@ -4346,6 +4632,8 @@ static void xive_reset_one(struct xive *x)
 #ifndef USE_BLOCK_GROUP_MODE
 	/* If block group mode isn't enabled, reset VP alloc buddy */
 	buddy_reset(x->vp_buddy);
+	if (x->block_id == 0)
+		assert(buddy_reserve(x->vp_buddy, 0x800, 11));
 #endif
 
 #ifdef USE_INDIRECT
@@ -4396,20 +4684,26 @@ static void xive_reset_mask_source_cb(struct irq_source *is,
 		if (!bitmap_tst_bit(*x->int_enabled_map, GIRQ_TO_IDX(isn)))
 			continue;
 		/* Mask it and clear the enabled map bit */
-		xive_dbg(x, "[reset] disabling source 0x%x\n", isn);
-		__xive_set_irq_config(is, isn, 0, 0xff, isn, true, true);
+		xive_vdbg(x, "[reset] disabling source 0x%x\n", isn);
+		__xive_set_irq_config(is, isn, 0, 0xff, isn, true, false);
 		bitmap_clr_bit(*x->int_enabled_map, GIRQ_TO_IDX(isn));
 	}
 }
 
-static int64_t opal_xive_reset(uint64_t version)
+void reset_cpu_xive(void)
+{
+	struct cpu_thread *c = this_cpu();
+	struct xive_cpu_state *xs = c->xstate;
+
+	xs->cppr = 0;
+	out_8(xs->tm_ring1 + TM_QW3_HV_PHYS + TM_CPPR, 0);
+
+	in_be64(xs->tm_ring1 + TM_SPC_PULL_POOL_CTX);
+}
+
+static int64_t __xive_reset(uint64_t version)
 {
 	struct proc_chip *chip;
-
-	prlog(PR_DEBUG, "XIVE reset, version: %d...\n", (int)version);
-
-	if (version > 1)
-		return OPAL_PARAMETER;
 
 	xive_mode = version;
 
@@ -4445,9 +4739,27 @@ static int64_t opal_xive_reset(uint64_t version)
 	return OPAL_SUCCESS;
 }
 
+/* Called by fast reboot */
+int64_t xive_reset(void)
+{
+	if (xive_mode == XIVE_MODE_NONE)
+		return OPAL_SUCCESS;
+	return __xive_reset(XIVE_MODE_EMU);
+}
+
+static int64_t opal_xive_reset(uint64_t version)
+{
+	prlog(PR_DEBUG, "XIVE reset, version: %d...\n", (int)version);
+
+	if (version > 1)
+		return OPAL_PARAMETER;
+
+	return __xive_reset(version);
+}
+
 static int64_t opal_xive_free_vp_block(uint64_t vp_base)
 {
-	uint32_t blk, idx, i, count;
+	uint32_t blk, idx, i, j, count;
 	uint8_t order;
 	bool group;
 
@@ -4497,8 +4809,8 @@ static int64_t opal_xive_free_vp_block(uint64_t vp_base)
 
 		/* VP must be disabled */
 		if (vp->w0 & VP_W0_VALID) {
-			prerror("XIVE: Freeing enabled VP !\n");
-			// XXX Disable it synchronously
+			prlog(PR_ERR, "XIVE: freeing active VP %d\n", vp_id);
+			return OPAL_XIVE_FREE_ACTIVE;
 		}
 
 		/* Not populated */
@@ -4506,15 +4818,35 @@ static int64_t opal_xive_free_vp_block(uint64_t vp_base)
 			continue;
 		eq_blk = vp->w1 >> 28;
 		eq_idx = vp->w1 & 0x0fffffff;
+
+		lock(&x->lock);
+
+		/* Ensure EQs are disabled and cleaned up. Ideally the caller
+		 * should have done it but we double check it here
+		 */
+		for (j = 0; j < 7; j++) {
+			struct xive *eq_x = xive_from_vc_blk(eq_blk);
+			struct xive_eq eq, *orig_eq = xive_get_eq(eq_x, eq_idx + j);
+
+			if (!(orig_eq->w0 & EQ_W0_VALID))
+				continue;
+
+			prlog(PR_WARNING, "XIVE: freeing VP %d with queue %d active\n",
+			      vp_id, j);
+			eq = *orig_eq;
+			xive_cleanup_eq(&eq);
+			xive_eqc_cache_update(x, eq_blk, eq_idx + j, 0, 4, &eq, false, true);
+		}
+
+		/* Mark it not populated so we don't try to free it again */
 		vp->w1 = 0;
 
 		if (eq_blk != blk) {
 			prerror("XIVE: Block mismatch trying to free EQs\n");
+			unlock(&x->lock);
 			return OPAL_INTERNAL_ERROR;
 		}
 
-		/* XX Ensure the EQs are disabled */
-		lock(&x->lock);
 		xive_free_eq_set(x, eq_idx);
 		unlock(&x->lock);
 	}
@@ -4532,7 +4864,7 @@ static int64_t opal_xive_alloc_vp_block(uint32_t alloc_order)
 	if (xive_mode != XIVE_MODE_EXPL)
 		return OPAL_WRONG_STATE;
 
-	prlog(PR_DEBUG, "opal_xive_alloc_vp_block(%d)\n", alloc_order);
+	prlog(PR_TRACE, "opal_xive_alloc_vp_block(%d)\n", alloc_order);
 
 	vp_base = xive_alloc_vps(alloc_order);
 	if (XIVE_ALLOC_IS_ERR(vp_base)) {
@@ -4691,7 +5023,7 @@ static int64_t opal_xive_free_irq(uint32_t girq)
 	xive_update_irq_mask(s, girq - s->esb_base, true);
 
 	/* Mark the IVE masked and invalid */
-	ive->w = IVE_MASKED;
+	ive->w = IVE_MASKED | IVE_VALID;
 	xive_ivc_scrub(x, x->block_id, idx);
 
 	/* Free it */
@@ -4952,6 +5284,8 @@ void init_xive(void)
 	}
 	if (first)
 		return;
+
+	xive_mode = XIVE_MODE_EMU;
 
 	/* Init VP allocator */
 	xive_init_vp_allocator();

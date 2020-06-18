@@ -9,9 +9,10 @@ LIB_TESTS_L = get_mem_rsv \
 	sized_cells \
 	notfound \
 	addr_size_cells \
+	addr_size_cells2 \
 	stringlist \
 	setprop_inplace nop_property nop_node \
-	sw_tree1 \
+	sw_tree1 sw_states \
 	move_and_save mangle-layout nopulate \
 	open_pack rw_tree1 set_name setprop del_property del_node \
 	appendprop1 appendprop2 propname_escapes \
@@ -26,10 +27,10 @@ LIB_TESTS_L = get_mem_rsv \
 	property_iterate \
 	subnode_iterate \
 	overlay overlay_bad_fixup \
-	check_path
+	check_path check_header check_full
 LIB_TESTS = $(LIB_TESTS_L:%=$(TESTS_PREFIX)%)
 
-LIBTREE_TESTS_L = truncated_property
+LIBTREE_TESTS_L = truncated_property truncated_string truncated_memrsv
 LIBTREE_TESTS = $(LIBTREE_TESTS_L:%=$(TESTS_PREFIX)%)
 
 DL_LIB_TESTS_L = asm_tree_dump value-labels
@@ -54,9 +55,12 @@ tests:	$(TESTS) $(TESTS_TREES)
 
 $(LIB_TESTS): %: $(TESTS_PREFIX)testutils.o util.o $(LIBFDT_archive)
 
+# Not necessary on all platforms; allow -ldl to be excluded instead of forcing
+# other platforms to patch it out.
+LIBDL = -ldl
 $(DL_LIB_TESTS): %: %.o $(TESTS_PREFIX)testutils.o util.o $(LIBFDT_archive)
 	@$(VECHO) LD [libdl] $@
-	$(LINK.c) -o $@ $^ -ldl
+	$(LINK.c) -o $@ $^ $(LIBDL)
 
 $(LIBTREE_TESTS): %: $(TESTS_PREFIX)testutils.o $(TESTS_PREFIX)trees.o \
 		util.o $(LIBFDT_archive)

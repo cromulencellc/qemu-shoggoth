@@ -167,7 +167,7 @@ pvscsi_init_rings(void *iobase, struct pvscsi_ring_dsc_s **ring_dsc)
 {
     struct PVSCSICmdDescSetupRings cmd = {0,};
 
-    struct pvscsi_ring_dsc_s *dsc = memalign_high(PAGE_SIZE, sizeof(*dsc));
+    struct pvscsi_ring_dsc_s *dsc = malloc_high(sizeof(*dsc));
     if (!dsc) {
         warn_noalloc();
         return;
@@ -275,7 +275,7 @@ pvscsi_add_lun(struct pci_device *pci, void *iobase,
 
     char *name = znprintf(MAXDESCSIZE, "pvscsi %pP %d:%d", pci, target, lun);
     int prio = bootprio_find_scsi_device(pci, target, lun);
-    int ret = scsi_drive_setup(&plun->drive, name, prio);
+    int ret = scsi_drive_setup(&plun->drive, name, prio, target, lun);
     free(name);
     if (ret)
         goto fail;
@@ -310,7 +310,7 @@ init_pvscsi(void *data)
     struct pvscsi_ring_dsc_s *ring_dsc = NULL;
     pvscsi_init_rings(iobase, &ring_dsc);
     int i;
-    for (i = 0; i < 7; i++)
+    for (i = 0; i < 64; i++)
         pvscsi_scan_target(pci, iobase, ring_dsc, i);
 }
 

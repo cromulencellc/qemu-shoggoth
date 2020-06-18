@@ -481,14 +481,19 @@ TRUE VALUE first-time-init?
 \ SCSI scan at boot and child device support
 \ -----------------------------------------------------------
 
-\ We use SRP luns of the form 8000 | (bus << 8) | (id << 5) | lun
-\ in the top 16 bits of the 64-bit LUN
 : (set-target)
     to current-target
 ;
 
-: dev-generate-srplun ( target lun -- )
-    swap 8 << 8000 or or 30 <<
+\ We use SRP luns of the form 8000 | (target << 8) | (bus << 5) | lun
+\ in the top 16 bits of the 64-bit LUN (i.e. the "Logical unit addressing
+\ method" in SAM5). Since the generic scsi-probe code of SLOF does not
+\ really care about buses, we assume that the upper 3 bits of the "target"
+\ value are the "bus" field.
+: dev-generate-srplun ( bus+target lun -- srplun )
+    swap dup 1 >> e0 and      ( lun bus+target bus )
+    swap 3f and 8 <<          ( lun bus target )
+    8000 or or or 30 <<
 ;
 
 \ We obtain here a unit address on the stack, since our #address-cells
@@ -507,9 +512,10 @@ TRUE VALUE first-time-init?
     10000 \ Larger value seem to have problems with some CDROMs
 ;
 
-8 CONSTANT #dev
+\ Report the amount of supported SCSI IDs - QEMU uses "max_target = 63"
+\ and "max_channel = 7", we combine both to 64 * 8 = 512 devices
 : dev-max-target ( -- #max-target )
-    #dev
+    200
 ;
 
 " scsi-probe-helpers.fs" included

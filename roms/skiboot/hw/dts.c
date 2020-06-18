@@ -20,11 +20,22 @@
 #include <dts.h>
 #include <skiboot.h>
 #include <opal-api.h>
+#include <opal-msg.h>
+#include <timer.h>
+#include <timebase.h>
 
 struct dts {
 	uint8_t		valid;
 	uint8_t		trip;
 	int16_t		temp;
+};
+
+/*
+ * Attributes for the core temperature sensor
+ */
+enum {
+	SENSOR_DTS_ATTR_TEMP_MAX,
+	SENSOR_DTS_ATTR_TEMP_TRIP
 };
 
 /* Different sensor locations */
@@ -225,8 +236,38 @@ static int dts_read_core_temp_p9(uint32_t pir, struct dts *dts)
 	return 0;
 }
 
-static int dts_read_core_temp(uint32_t pir, struct dts *dts)
+static void dts_async_read_temp(struct timer *t __unused, void *data,
+				u64 now __unused)
 {
+	struct dts dts = {0};
+	int rc, swkup_rc;
+	struct cpu_thread *cpu = data;
+
+	swkup_rc = dctl_set_special_wakeup(cpu);
+
+	rc = dts_read_core_temp_p9(cpu->pir, &dts);
+	if (!rc) {
+		if (cpu->sensor_attr == SENSOR_DTS_ATTR_TEMP_MAX)
+			*cpu->sensor_data = dts.temp;
+		else if (cpu->sensor_attr == SENSOR_DTS_ATTR_TEMP_TRIP)
+			*cpu->sensor_data = dts.trip;
+	}
+
+	if (!swkup_rc)
+		dctl_clear_special_wakeup(cpu);
+
+	check_sensor_read(cpu->token);
+	rc = opal_queue_msg(OPAL_MSG_ASYNC_COMP, NULL, NULL, cpu->token, rc);
+	if (rc)
+		prerror("Failed to queue async message\n");
+
+	cpu->dts_read_in_progress = false;
+}
+
+static int dts_read_core_temp(u32 pir, struct dts *dts, u8 attr,
+			      int token, u64 *sensor_data)
+{
+	struct cpu_thread *cpu;
 	int rc;
 
 	switch (proc_gen) {
@@ -236,8 +277,22 @@ static int dts_read_core_temp(uint32_t pir, struct dts *dts)
 	case proc_gen_p8:
 		rc = dts_read_core_temp_p8(pir, dts);
 		break;
-	case proc_gen_p9:
-		rc = dts_read_core_temp_p9(pir, dts);
+	case proc_gen_p9: /* Asynchronus read */
+		cpu = find_cpu_by_pir(pir);
+		if (!cpu)
+			return OPAL_PARAMETER;
+		lock(&cpu->dts_lock);
+		if (cpu->dts_read_in_progress) {
+			unlock(&cpu->dts_lock);
+			return OPAL_BUSY;
+		}
+		cpu->dts_read_in_progress = true;
+		cpu->sensor_attr = attr;
+		cpu->sensor_data = sensor_data;
+		cpu->token = token;
+		schedule_timer(&cpu->dts_timer, 0);
+		rc = OPAL_ASYNC_COMPLETION;
+		unlock(&cpu->dts_lock);
 		break;
 	default:
 		rc = OPAL_UNSUPPORTED;
@@ -303,24 +358,16 @@ enum sensor_dts_class {
 };
 
 /*
- * Attributes for the core temperature sensor
- */
-enum {
-	SENSOR_DTS_ATTR_TEMP_MAX,
-	SENSOR_DTS_ATTR_TEMP_TRIP
-};
-
-/*
  * Extract the centaur chip id which was truncated to fit in the
  * resource identifier field of the sensor handler
  */
 #define centaur_get_id(rid) (0x80000000 | ((rid) & 0x3ff))
 
-int64_t dts_sensor_read(uint32_t sensor_hndl, uint32_t *sensor_data)
+int64_t dts_sensor_read(u32 sensor_hndl, int token, u64 *sensor_data)
 {
 	uint8_t	attr = sensor_get_attr(sensor_hndl);
 	uint32_t rid = sensor_get_rid(sensor_hndl);
-	struct dts dts;
+	struct dts dts = {0};
 	int64_t rc;
 
 	if (attr > SENSOR_DTS_ATTR_TEMP_TRIP)
@@ -330,7 +377,7 @@ int64_t dts_sensor_read(uint32_t sensor_hndl, uint32_t *sensor_data)
 
 	switch (sensor_get_frc(sensor_hndl)) {
 	case SENSOR_DTS_CORE_TEMP:
-		rc = dts_read_core_temp(rid, &dts);
+		rc = dts_read_core_temp(rid, &dts, attr, token, sensor_data);
 		break;
 	case SENSOR_DTS_MEM_TEMP:
 		rc = dts_read_mem_temp(centaur_get_id(rid), &dts);
@@ -402,7 +449,10 @@ bool dts_sensor_create_nodes(struct dt_node *sensors)
 			dt_add_property_cells(node, "sensor-status", handler);
 			dt_add_property_string(node, "sensor-type", "temp");
 			dt_add_property_cells(node, "ibm,pir", c->pir);
+			dt_add_property_cells(node, "reg", handler);
 			dt_add_property_string(node, "label", "Core");
+			init_timer(&c->dts_timer, dts_async_read_temp, c);
+			c->dts_read_in_progress = false;
 		}
 	}
 
@@ -428,6 +478,7 @@ bool dts_sensor_create_nodes(struct dt_node *sensors)
 		dt_add_property_cells(node, "sensor-status", handler);
 		dt_add_property_string(node, "sensor-type", "temp");
 		dt_add_property_cells(node, "ibm,chip-id", chip_id);
+		dt_add_property_cells(node, "reg", handler);
 		dt_add_property_string(node, "label", "Centaur");
 	}
 

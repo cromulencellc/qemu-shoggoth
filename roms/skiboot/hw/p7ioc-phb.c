@@ -76,7 +76,7 @@ static int64_t p7ioc_pcicfg_check(struct p7ioc_phb *p, uint32_t bdfn,
 		return OPAL_HARDWARE;
 
 	/* Check PHB state */
-	if (p->state == P7IOC_PHB_STATE_BROKEN)
+	if (p->broken)
 		return OPAL_HARDWARE;
 
 	return OPAL_SUCCESS;
@@ -284,8 +284,7 @@ static void p7ioc_eeh_read_phb_status(struct p7ioc_phb *p,
 static int64_t p7ioc_eeh_freeze_status(struct phb *phb, uint64_t pe_number,
 				       uint8_t *freeze_state,
 				       uint16_t *pci_error_type,
-				       uint16_t *severity,
-				       uint64_t *phb_status)
+				       uint16_t *severity)
 {
 	struct p7ioc_phb *p = phb_to_p7ioc_phb(phb);
 	uint64_t peev_bit = PPC_BIT(pe_number & 0x3f);
@@ -296,12 +295,12 @@ static int64_t p7ioc_eeh_freeze_status(struct phb *phb, uint64_t pe_number,
 	*pci_error_type = OPAL_EEH_NO_ERROR;
 
 	/* Check dead */
-	if (p->state == P7IOC_PHB_STATE_BROKEN) {
+	if (p->broken) {
 		*freeze_state = OPAL_EEH_STOPPED_MMIO_DMA_FREEZE;
 		*pci_error_type = OPAL_EEH_PHB_ERROR;
 		if (severity)
 			*severity = OPAL_EEH_SEV_PHB_DEAD;
-		goto bail;
+		return OPAL_SUCCESS;
 	}
 
 	/* Check fence */
@@ -311,8 +310,7 @@ static int64_t p7ioc_eeh_freeze_status(struct phb *phb, uint64_t pe_number,
 		*pci_error_type = OPAL_EEH_PHB_ERROR;
 		if (severity)
 			*severity = OPAL_EEH_SEV_PHB_FENCED;
-		p->state = P7IOC_PHB_STATE_FENCED;
-		goto bail;
+		return OPAL_SUCCESS;
 	}
 
 	/* Check the PEEV */
@@ -346,10 +344,6 @@ static int64_t p7ioc_eeh_freeze_status(struct phb *phb, uint64_t pe_number,
 	else
 		*pci_error_type = OPAL_EEH_PE_DMA_ERROR;
 
- bail:
-	if (phb_status)
-		p7ioc_eeh_read_phb_status(p, (struct OpalIoP7IOCPhbErrorData *)
-					  phb_status);
 	return OPAL_SUCCESS;
 }
 
@@ -372,7 +366,7 @@ static int64_t p7ioc_eeh_next_error(struct phb *phb, uint64_t *first_frozen_pe,
 	*first_frozen_pe = (uint64_t)-1;
 
 	/* Check dead */
-	if (p->state == P7IOC_PHB_STATE_BROKEN) {
+	if (p->broken) {
 		*pci_error_type = OPAL_EEH_PHB_ERROR;
 		*severity = OPAL_EEH_SEV_PHB_DEAD;
 		return OPAL_SUCCESS;
@@ -383,7 +377,6 @@ static int64_t p7ioc_eeh_next_error(struct phb *phb, uint64_t *first_frozen_pe,
 		/* Should be OPAL_EEH_STOPPED_TEMP_UNAVAIL ? */
 		*pci_error_type = OPAL_EEH_PHB_ERROR;
 		*severity = OPAL_EEH_SEV_PHB_FENCED;
-		p->state = P7IOC_PHB_STATE_FENCED;
 		p7ioc_phb_set_err_pending(p, false);
 		return OPAL_SUCCESS;
 	}
@@ -1975,7 +1968,7 @@ static void p7ioc_prepare_link_change(struct pci_slot *slot, bool up)
 
 	if (!up) {
 		/* Mask PCIE port interrupts and AER receiver error */
-		out_be64(p->regs + UTL_PCIE_PORT_IRQ_EN, 0x7E00000000000000);
+		out_be64(p->regs + UTL_PCIE_PORT_IRQ_EN, 0x7E00000000000000UL);
 		p7ioc_pcicfg_read32(&p->phb, 0,
 				    p->aercap + PCIECAP_AER_CE_MASK, &cfg32);
 		cfg32 |= PCIECAP_AER_CE_RECVR_ERR;
@@ -1994,8 +1987,8 @@ static void p7ioc_prepare_link_change(struct pci_slot *slot, bool up)
 		p->flags |= P7IOC_PHB_CFG_BLOCKED;
 	} else {
 		/* Clear spurious errors and enable PCIE port interrupts */
-		out_be64(p->regs + UTL_PCIE_PORT_STATUS, 0x00E0000000000000);
-		out_be64(p->regs + UTL_PCIE_PORT_IRQ_EN, 0xFE65000000000000);
+		out_be64(p->regs + UTL_PCIE_PORT_STATUS, 0x00E0000000000000UL);
+		out_be64(p->regs + UTL_PCIE_PORT_IRQ_EN, 0xFE65000000000000UL);
 
 		/* Clear AER receiver error status */
 		p7ioc_pcicfg_write32(&p->phb, 0,
@@ -2474,7 +2467,7 @@ static void p7ioc_phb_err_interrupt(struct irq_source *is, uint32_t isn)
 	opal_pci_eeh_set_evt(p->phb.opal_id);
 
 	/* If the PHB is broken, go away */
-	if (p->state == P7IOC_PHB_STATE_BROKEN)
+	if (p->broken)
 		return;
 
 	/*
@@ -2483,7 +2476,6 @@ static void p7ioc_phb_err_interrupt(struct irq_source *is, uint32_t isn)
 	 */
 	phb_lock(&p->phb);
 	if (p7ioc_phb_fenced(p)) {
-		p->state = P7IOC_PHB_STATE_FENCED;
 		PHBERR(p, "ER error ignored, PHB fenced\n");
 		phb_unlock(&p->phb);
 		return;
@@ -2521,7 +2513,7 @@ static uint64_t p7ioc_lsi_attributes(struct irq_source *is __unused,
 	uint32_t irq = (isn & 0x7);
 
 	if (irq == PHB_LSI_PCIE_ERROR)
-		return IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TARGET_RARE;
+		return IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TARGET_RARE | IRQ_ATTR_TYPE_LSI;
 	return IRQ_ATTR_TARGET_LINUX;
 }
 
@@ -2596,6 +2588,11 @@ static void p7ioc_pcie_add_node(struct p7ioc_phb *p)
 	tkill = reg[0] + PHB_TCE_KILL;
 	dt_add_property_cells(np, "ibm,opal-tce-kill",
 			      hi32(tkill), lo32(tkill));
+	dt_add_property_cells(np, "ibm,supported-tce-sizes",
+			      12, // 4K
+			      16, // 64K
+			      24, // 16M
+			      34); // 16G
 
 	/*
 	 * Linux may use this property to allocate the diag data buffer, which
@@ -2652,7 +2649,6 @@ void p7ioc_phb_setup(struct p7ioc *ioc, uint8_t index)
 	p->io_base = ioc->mmio1_win_start + PHBn_IO_BASE(index);
 	p->m32_base = ioc->mmio2_win_start + PHBn_M32_BASE(index);
 	p->m64_base = ioc->mmio2_win_start + PHBn_M64_BASE(index);
-	p->state = P7IOC_PHB_STATE_UNINITIALIZED;
 	p->phb.scan_map = 0x1; /* Only device 0 to scan */
 
 	/* Find P7IOC base location code in IOC */
@@ -2954,7 +2950,11 @@ int64_t p7ioc_phb_init(struct p7ioc_phb *p)
 
 	PHBDBG(p, "Initializing PHB %x...\n", p->index);
 
-	p->state = P7IOC_PHB_STATE_INITIALIZING;
+	/*
+	 * We re-init the PHB on a creset (and a few other cases)
+	 * so clear the broken flag
+	 */
+	p->broken = false;
 
 	/* For some reason, the doc wants us to read the version
 	 * register, so let's do it. We shoud probably check that
@@ -3168,14 +3168,11 @@ int64_t p7ioc_phb_init(struct p7ioc_phb *p)
 	out_be64(p->regs + PHB_TIMEOUT_CTRL1,		   0x1611112010200000UL);
 	out_be64(p->regs + PHB_TIMEOUT_CTRL2,		   0x0000561300000000UL);
 
-	/* Mark the PHB as functional which enables all the various sequences */
-	p->state = P7IOC_PHB_STATE_FUNCTIONAL;
-
 	return OPAL_SUCCESS;
 
  failed:
 	PHBERR(p, "Initialization failed\n");
-	p->state = P7IOC_PHB_STATE_BROKEN;
+	p->broken = true;
 
 	return OPAL_HARDWARE;
 }
@@ -3201,7 +3198,7 @@ void p7ioc_phb_reset(struct phb *phb)
 	 * notable that the IODA table cache won't be emptied so that we
 	 * can restore them during error recovery.
 	 */
-	if (p->state == P7IOC_PHB_STATE_FUNCTIONAL && !fenced) {
+	if (!p->broken && !fenced) {
 		PHBDBG(p, "  ioda reset ...\n");
 		p7ioc_ioda_reset(&p->phb, false);
 		time_wait_ms(100);
@@ -3242,7 +3239,7 @@ void p7ioc_phb_reset(struct phb *phb)
 	/* Reset failed, not much to do, maybe add an error return */
 	if (fenced) {
 		PHBERR(p, "Reset failed, fence still set !\n");
-		p->state = P7IOC_PHB_STATE_BROKEN;
+		p->broken = true;
 		return;
 	}
 

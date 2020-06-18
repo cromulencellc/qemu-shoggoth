@@ -1,5 +1,19 @@
 # need to get images path defined early
 source $env(LIB_DIR)/ppc/util.tcl
+if { [file exists qtrace_utils.tcl] } then {
+	source qtrace_utils.tcl
+}
+
+#
+# Call tclreadline's Loop to move to friendlier
+# commandline if one exists
+#
+proc readline { } {
+    set readline [catch { package require tclreadline }]
+    if { $readline == 0 } {
+        ::tclreadline::Loop
+    }
+}
 
 proc mconfig { name env_name def } {
     global mconf
@@ -12,6 +26,10 @@ proc mconfig { name env_name def } {
 mconfig cpus CPUS 1
 mconfig threads THREADS 1
 mconfig memory MEM_SIZE 4G
+
+# Create multiple memory nodes? This will create a MEM_SIZE region
+# on each chip (CPUS above).
+mconfig numa MAMBO_NUMA 0
 
 # Should we stop on an illeagal instruction
 mconfig stop_on_ill MAMBO_STOP_ON_ILL false
@@ -57,6 +75,9 @@ mconfig net MAMBO_NET none
 # Net: What is the base interface for the tun/tap device
 mconfig tap_base MAMBO_NET_TAP_BASE 0
 
+# Enable (default) or disable the "speculation-policy-favor-security" setting,
+# set to 0 to disable. When enabled it causes Linux's RFI flush to be enabled.
+mconfig speculation_policy_favor_security MAMBO_SPECULATION_POLICY_FAVOR_SECURITY 1
 
 #
 # Create machine config
@@ -80,12 +101,26 @@ myconf config machine_option/NO_ROM TRUE
 if { $default_config == "PEGASUS" } {
     # We need to be DD2 or greater on p8 for the HILE HID bit.
     myconf config processor/initial/PVR 0x4b0201
+
+    if { $mconf(numa) } {
+        myconf config memory_region_id_shift 35
+    }
 }
+
 if { $default_config == "P9" } {
     # PVR configured for POWER9 DD2.0 Scale out 24 Core (ie SMT4)
     myconf config processor/initial/PVR 0x4e1200
-    myconf config processor/initial/SIM_CTRL1 0xc228000400000000
+    myconf config processor/initial/SIM_CTRL1 0xc228100400000000
+
+    if { $mconf(numa) } {
+        myconf config memory_region_id_shift 45
+    }
 }
+
+if { $mconf(numa) } {
+    myconf config memory_regions $mconf(cpus)
+}
+
 if { [info exists env(SKIBOOT_SIMCONF)] } {
     source $env(SKIBOOT_SIMCONF)
 }
@@ -206,6 +241,46 @@ if { [info exists env(SKIBOOT_INITRD)] } {
     mysim of addprop $chosen_node int "linux,initrd-end"   $cpio_end
 }
 
+
+# Map persistent memory disks
+proc pmem_node_add { root start size } {
+    set start_hex [format %x $start]
+    set node [mysim of addchild $root "pmem@$start_hex" ""]
+    set reg [list [expr $start >> 32] [expr $start & 0xffffffff] [expr $size >> 32] [expr $size & 0xffffffff] ]
+    mysim of addprop $node array "reg" reg
+    mysim of addprop $node string "compatible" "pmem-region"
+    mysim of addprop $node empty "volatile" "1"
+    return [expr $start + $size]
+}
+
+set pmem_files ""
+if { [info exists env(PMEM_DISK)] } {
+    set pmem_files [split $env(PMEM_DISK) ","]
+}
+set pmem_sizes ""
+if { [info exists env(PMEM_VOLATILE)] } {
+    set pmem_sizes [split $env(PMEM_VOLATILE) ","]
+}
+set pmem_root [mysim of addchild $root_node "pmem" ""]
+mysim of addprop $pmem_root int "#address-cells" 2
+mysim of addprop $pmem_root int "#size-cells" 2
+mysim of addprop $pmem_root empty "ranges" ""
+# Start above where XICS normally is at 0x1A0000000000
+set pmem_start [expr 0x20000000000]
+foreach pmem_file $pmem_files { # PMEM_DISK
+    set pmem_file [string trim $pmem_file]
+    set pmem_size [file size $pmem_file]
+    if {[catch {mysim memory mmap $pmem_start $pmem_size $pmem_file rw}]} {
+	puts "ERROR: pmem: 'mysim mmap' command needs newer mambo"
+	exit
+    }
+    set pmem_start [pmem_node_add $pmem_root $pmem_start $pmem_size]
+}
+foreach pmem_size $pmem_sizes { # PMEM_VOLATILE
+    set pmem_start [pmem_node_add $pmem_root $pmem_start $pmem_size]
+}
+
+
 # Default NVRAM is blank and will be formatted by Skiboot if no file is provided
 set fake_nvram_start $cpio_end
 set fake_nvram_size 0x40000
@@ -233,12 +308,30 @@ set reg [list $fake_nvram_start $fake_nvram_size ]
 mysim of addprop $fake_nvram_node array64 "reg" reg
 mysim of addprop $fake_nvram_node empty "name" "ibm,fake-nvram"
 
+set opal_node [mysim of addchild $root_node "ibm,opal" ""]
+
 # Allow P9 to use all idle states
 if { $default_config == "P9" } {
-    set opal_node [mysim of addchild $root_node "ibm,opal" ""]
     set power_mgt_node [mysim of addchild $opal_node "power-mgt" ""]
     mysim of addprop $power_mgt_node int "ibm,enabled-stop-levels" 0xffffffff
 }
+
+proc add_feature_node { parent name { value 1 } } {
+    if { $value != 1 } {
+	set value "disabled"
+    } else {
+	set value "enabled"
+    }
+    set np [mysim of addchild $parent $name ""]
+    mysim of addprop $np empty $value ""
+}
+
+set np [mysim of addchild $opal_node "fw-features" ""]
+add_feature_node $np "speculation-policy-favor-security" $mconf(speculation_policy_favor_security)
+add_feature_node $np "needs-l1d-flush-msr-hv-1-to-0"
+add_feature_node $np "needs-l1d-flush-msr-pr-0-to-1"
+add_feature_node $np "needs-spec-barrier-for-bound-checks"
+
 
 # Init CPUs
 set pir 0
@@ -257,6 +350,13 @@ for { set c 0 } { $c < $mconf(cpus) } { incr c } {
         set node [mysim of addchild $root_node "mambo-chip" [format %x $c]]
         mysim of addprop $node int "ibm,chip-id" $c
         mysim of addprop $node string "compatible" "ibm,mambo-chip"
+
+        if { $mconf(numa) } {
+            set shift [myconf query memory_region_id_shift]
+            set addr [format %lx [expr (1 << $shift) * $c]]
+            set node [mysim of find_device "/memory@$addr"]
+            mysim of addprop $node int "ibm,chip-id" $c
+        }
     }
 
     set reg {}
@@ -412,7 +512,7 @@ mconfig enable_stb SKIBOOT_ENABLE_MAMBO_STB 0
 if { [info exists env(SKIBOOT_ENABLE_MAMBO_STB)] } {
     set stb_node [ mysim of addchild $root_node "ibm,secureboot" "" ]
     mysim of addprop $stb_node string "compatible" "ibm,secureboot-v1-softrom"
-    mysim of addprop $stb_node string "secure-enabled" ""
+#    mysim of addprop $stb_node string "secure-enabled" ""
     mysim of addprop $stb_node string "trusted-enabled" ""
     mysim of addprop $stb_node string "hash-algo" "sha512"
     set hw_key_hash {}
@@ -456,5 +556,7 @@ epapr::of2dtb mysim $mconf(epapr_dt_addr)
 mysim mode fastest
 
 if { [info exists env(SKIBOOT_AUTORUN)] } {
-    mysim go
+    if [catch { mysim go }] {
+	readline
+    }
 }

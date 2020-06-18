@@ -18,6 +18,8 @@
 #ifndef __ASTBMC_H
 #define __ASTBMC_H
 
+#include <platform.h>
+
 #define ST_LOC_PHB(chip_id, phb_idx)    ((chip_id) << 16 | (phb_idx))
 #define ST_LOC_DEVFN(dev, fn)	        ((dev) << 3 | (fn))
 /*
@@ -39,6 +41,7 @@ struct slot_table_entry {
 	uint32_t location;
 	const char *name;
 	const struct slot_table_entry *children;
+	uint8_t power_limit;
 };
 
 /*
@@ -51,8 +54,46 @@ struct slot_table_entry {
 	.children = child_table \
 }
 
-extern const struct bmc_platform astbmc_ami;
-extern const struct bmc_platform astbmc_openbmc;
+/*
+ * For the most part the "table" isn't really a table and only contains
+ * a single real entry and the etype = st_end terminator. In these cases
+ * we can use these helpers. If you need something special in the slot
+ * table for each slot (e.g. power limit, devfn != 0) then you need to
+ * define the actual structure.
+ */
+#define ST_BUILTIN_DEV(st_name, slot_name) \
+static struct slot_table_entry st_name[] = \
+{ \
+	{ \
+		.etype = st_pluggable_slot, \
+		.name = slot_name, \
+	}, \
+	{ .etype = st_end }, \
+}
+
+#define ST_PLUGGABLE(st_name, slot_name) \
+static struct slot_table_entry st_name[] = \
+{ \
+	{ \
+		.etype = st_pluggable_slot, \
+		.name = slot_name, \
+	}, \
+	{ .etype = st_end }, \
+}
+
+#define SW_PLUGGABLE(slot_name, port, ...) \
+{ \
+	.etype = st_pluggable_slot, \
+	.name = slot_name, \
+	.location = ST_LOC_DEVFN(port, 0), \
+	##__VA_ARGS__ \
+}
+
+extern const struct bmc_hw_config bmc_hw_ast2400;
+extern const struct bmc_hw_config bmc_hw_ast2500;
+extern const struct bmc_platform bmc_plat_ast2400_ami;
+extern const struct bmc_platform bmc_plat_ast2500_ami;
+extern const struct bmc_platform bmc_plat_ast2500_openbmc;
 
 extern void astbmc_early_init(void);
 extern int64_t astbmc_ipmi_reboot(void);
@@ -61,9 +102,13 @@ extern void astbmc_init(void);
 extern void astbmc_ext_irq_serirq_cpld(unsigned int chip_id);
 extern int pnor_init(void);
 extern void check_all_slot_table(void);
+extern void astbmc_exit(void);
 
 extern void slot_table_init(const struct slot_table_entry *top_table);
 extern void slot_table_get_slot_info(struct phb *phb, struct pci_device * pd);
+void slot_table_add_slot_info(struct pci_device *pd,
+		const struct slot_table_entry *ent);
+
 void dt_slot_get_slot_info(struct phb *phb, struct pci_device *pd);
 
 #endif /* __ASTBMC_H */

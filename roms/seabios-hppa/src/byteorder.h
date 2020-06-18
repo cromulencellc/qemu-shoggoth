@@ -1,12 +1,12 @@
 #ifndef __BYTEORDER_H
 #define __BYTEORDER_H
 
-#include "config.h" // IMPORTANT for CONFIG_PARISC
+#include "autoconf.h"
 #include "types.h" // u32
 
-#if defined(__i386__) || defined(__x86_64__)
+#if CONFIG_X86
 #define TARGET_LITTLE_ENDIAN
-#elif defined(__hppa__)
+#elif CONFIG_PARISC
 #define TARGET_BIG_ENDIAN
 #else
 #error "unknown endianess"
@@ -22,9 +22,9 @@ static inline u64 __swab64_constant(u64 val) {
     return ((u64)__swab32_constant(val) << 32) | __swab32_constant(val>>32);
 }
 static inline u32 __swab32(u32 val) {
-#if defined(__x86__)
+#if CONFIG_X86
     asm("bswapl %0" : "+r"(val));
-#elif defined(__hppa__)
+#elif CONFIG_PARISC
     unsigned int temp;
     asm("shd %0, %0, 16, %1\n\t"	/* shift abcdabcd -> cdab */
         "dep %1, 15, 8, %1\n\t"		/* deposit cdab -> cbab */

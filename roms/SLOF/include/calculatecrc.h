@@ -17,7 +17,6 @@
 #define FLASHFS_HEADER_SIZE_ADDR 0x08	// uint64_t position of total flash header size value
 
 #define FLASHFS_ROMADDR 0x00		// uint64_t position of pointer to next file
-#define FLASHFS_HEADER_DATA_SIZE 0x68	// 104 bytes of total header data size
 #define CRC_METHODE Ethernet_32		// define the CRC genarator (CRC 16 bit to 64 is supported)
 
 //--- header format ---------------------------------

@@ -36,6 +36,7 @@
 #include "qapi/qmp/qpointer.h"
 #include "oshandler/oshandler.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/cpus.h"
 #include "ra.h"
 
 #define RAPID_ANALYSIS_CHANNEL_POOL_INIT   ((uint64_t)400ul * MiB)
@@ -354,6 +355,19 @@ void rapid_analysis_send_tree(CommsRequestRapidSaveTreeMsg *req, CommsQueue *q)
     rcc->unlock_tree(global_rst);
 }
 
+void rapid_analysis_accel_init(QemuOpts *ra_opts, QemuOpts *accel_opts, Error **errp)
+{
+    QemuOpts *accelopts = qemu_opts_create(qemu_find_opts("accel"), NULL, 0, errp);
+    if( !accelopts ){
+        error_report("Error building accel options for Rapid Analysis");
+        exit(1);
+    }
+
+    qemu_opt_set(accelopts, "accel", "tcg", errp);
+    qemu_opt_set(accelopts, "thread", "single", errp);
+    qemu_tcg_configure(accelopts, errp);
+}
+
 void rapid_analysis_drive_init(QemuOpts *ra_opts, MachineState *machine)
 {
     const char *filename;
@@ -375,7 +389,7 @@ void rapid_analysis_drive_init(QemuOpts *ra_opts, MachineState *machine)
     qemu_opt_set(devopts, "format", "qcow2", &err);
     qemu_opt_set(devopts, "snapshot", "on", &err);
     qemu_opt_set(devopts, "file", filename, &err);
-    drive_new(devopts, mc->block_default_type);
+    drive_new(devopts, mc->block_default_type, &err);
     qemu_opts_del(devopts);
 }
 
@@ -424,7 +438,7 @@ void rapid_analysis_init(QemuOpts *ra_opts, MachineState *machine)
         exit(1);
     }
 
-    if(QTAILQ_FIRST(&cpus) != QTAILQ_LAST(&cpus, CPUTailQ)){
+    if(QTAILQ_FIRST(&cpus) != QTAILQ_LAST(&cpus)){
         error_report("Error rapid analysis doesn't support multiple processors... yet...");
         exit(1);
     }
@@ -601,11 +615,9 @@ void rapid_analysis_init(QemuOpts *ra_opts, MachineState *machine)
     }
 
     // Start the system paused so we can wait for work.
-    vm_prepare_start(RUN_STATE_PAUSED);
-
-    CPU_FOREACH(cpu)
-    {
-        cpu_resume(cpu);
+    // vm_start();
+    if(!vm_prepare_start(RUN_STATE_PAUSED)){
+        resume_all_vcpus();
     }
 }
 

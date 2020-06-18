@@ -18,6 +18,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <malloc.h>
+#include <stdint.h>
 
 #include <compiler.h>
 
@@ -84,6 +85,52 @@ void *__zalloc(size_t bytes, const char *location)
 	return p;
 }
 
+struct cpu_thread;
+
+struct cpu_job *__cpu_queue_job(struct cpu_thread *cpu,
+				const char *name,
+				void (*func)(void *data), void *data,
+				bool no_return);
+
+struct cpu_job *cpu_queue_job_on_node(uint32_t chip_id,
+				      const char *name,
+				      void (*func)(void *data), void *data);
+
+struct cpu_job *cpu_queue_job_on_node(uint32_t chip_id,
+				       const char *name,
+				       void (*func)(void *data), void *data)
+{
+	(void)chip_id;
+	return __cpu_queue_job(NULL, name, func, data, false);
+}
+
+struct cpu_job *__cpu_queue_job(struct cpu_thread *cpu,
+				const char *name,
+				void (*func)(void *data), void *data,
+				bool no_return)
+{
+	(void)cpu;
+	(void)name;
+	(func)(data);
+	(void)no_return;
+	return NULL;
+}
+
+void cpu_wait_job(struct cpu_job *job, bool free_it);
+
+void __attrconst cpu_wait_job(struct cpu_job *job, bool free_it)
+{
+	(void)job;
+	(void)free_it;
+	return;
+}
+
+void cpu_process_local_jobs(void);
+
+void __attrconst cpu_process_local_jobs(void)
+{
+}
+
 /* Add any stub functions required for linking here. */
 static void stub_function(void)
 {
@@ -103,13 +150,13 @@ static bool true_stub(void) { return true; }
 static bool false_stub(void) { return false; }
 
 #define TRUE_STUB(fnname) \
-	void fnname(void) __attribute__((weak, alias ("true_stub")))
+	bool fnname(void) __attribute__((weak, alias ("true_stub")))
 #define FALSE_STUB(fnname) \
-	void fnname(void) __attribute__((weak, alias ("false_stub")))
+	bool fnname(void) __attribute__((weak, alias ("false_stub")))
 #define NOOP_STUB FALSE_STUB
 
 TRUE_STUB(lock_held_by_me);
-NOOP_STUB(lock);
+NOOP_STUB(lock_caller);
 NOOP_STUB(unlock);
 NOOP_STUB(early_uart_init);
 NOOP_STUB(mem_reserve_fw);

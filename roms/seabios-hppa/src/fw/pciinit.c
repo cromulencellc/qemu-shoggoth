@@ -217,7 +217,7 @@ static void mch_isa_bridge_setup(struct pci_device *dev, void *arg)
 
 static void storage_ide_setup(struct pci_device *pci, void *arg)
 {
-    /* On parisc, keep PCI IDE IO ports in PCI space */
+    /* On parisc, keep PCI IDE IO ports in PCI mem space */
     if (CONFIG_PARISC)
 	return;
 
@@ -511,7 +511,7 @@ static void mch_mem_addr_setup(struct pci_device *dev, void *arg)
         pci_io_low_end = acpi_pm_base;
 }
 
-
+#if CONFIG_PARISC
 static int dino_pci_slot_get_irq(struct pci_device *pci, int pin)
 {
     int slot = pci_bdf_to_dev(pci->bdf);
@@ -550,6 +550,7 @@ m10 ghost_em write1 0xff000810 0x0000006f      /* Set PCICMD reset PCI     */
     /* setup io address space */
     pci_io_low_end = 0xa000;
 }
+#endif /* CONFIG_PARISC */
 
 
 static const struct pci_device_id pci_platform_tbl[] = {
@@ -564,40 +565,51 @@ static void pci_bios_init_platform(void)
 {
     struct pci_device *pci;
 
-    if (CONFIG_PARISC)
-        dino_mem_addr_setup(NULL, NULL);
-    else {
+    if (CONFIG_X86) {
         foreachpci(pci) {
              pci_init_device(pci_platform_tbl, pci, NULL);
         }
     }
+
+#if CONFIG_PARISC
+    dino_mem_addr_setup(NULL, NULL);
+#endif
 }
 
 static u8 pci_find_resource_reserve_capability(u16 bdf)
 {
-    if (pci_config_readw(bdf, PCI_VENDOR_ID) == PCI_VENDOR_ID_REDHAT &&
-        pci_config_readw(bdf, PCI_DEVICE_ID) ==
-                PCI_DEVICE_ID_REDHAT_ROOT_PORT) {
-        u8 cap = 0;
-        do {
-            cap = pci_find_capability(bdf, PCI_CAP_ID_VNDR, cap);
-        } while (cap &&
-                 pci_config_readb(bdf, cap + PCI_CAP_REDHAT_TYPE_OFFSET) !=
-                        REDHAT_CAP_RESOURCE_RESERVE);
-        if (cap) {
-            u8 cap_len = pci_config_readb(bdf, cap + PCI_CAP_FLAGS);
-            if (cap_len < RES_RESERVE_CAP_SIZE) {
-                dprintf(1, "PCI: QEMU resource reserve cap length %d is invalid\n",
-                        cap_len);
-            }
-        } else {
-            dprintf(1, "PCI: invalid QEMU resource reserve cap offset\n");
-        }
-        return cap;
-    } else {
-        dprintf(1, "PCI: QEMU resource reserve cap not found\n");
+    u16 device_id;
+
+    if (pci_config_readw(bdf, PCI_VENDOR_ID) != PCI_VENDOR_ID_REDHAT) {
+        dprintf(3, "PCI: This is non-QEMU bridge.\n");
         return 0;
     }
+
+    device_id = pci_config_readw(bdf, PCI_DEVICE_ID);
+
+    if (device_id != PCI_DEVICE_ID_REDHAT_ROOT_PORT &&
+        device_id != PCI_DEVICE_ID_REDHAT_BRIDGE) {
+        dprintf(1, "PCI: QEMU resource reserve cap device ID doesn't match.\n");
+        return 0;
+    }
+    u8 cap = 0;
+
+    do {
+        cap = pci_find_capability(bdf, PCI_CAP_ID_VNDR, cap);
+    } while (cap &&
+             pci_config_readb(bdf, cap + PCI_CAP_REDHAT_TYPE_OFFSET) !=
+                              REDHAT_CAP_RESOURCE_RESERVE);
+    if (cap) {
+        u8 cap_len = pci_config_readb(bdf, cap + PCI_CAP_FLAGS);
+        if (cap_len < RES_RESERVE_CAP_SIZE) {
+            dprintf(1, "PCI: QEMU resource reserve cap length %d is invalid\n",
+                    cap_len);
+            return 0;
+        }
+    } else {
+        dprintf(1, "PCI: QEMU resource reserve cap not found\n");
+    }
+    return cap;
 }
 
 /****************************************************************
@@ -669,13 +681,11 @@ pci_bios_init_bus_rec(int bus, u8 *pci_bus)
                                 res_bus);
                         res_bus = 0;
                     }
-                }
-                if (secbus + res_bus > *pci_bus) {
-                    dprintf(1, "PCI: QEMU resource reserve cap: bus = %u\n",
-                            res_bus);
-                    res_bus = secbus + res_bus;
-                } else {
-                    res_bus = *pci_bus;
+                    if (secbus + res_bus > *pci_bus) {
+                        dprintf(1, "PCI: QEMU resource reserve cap: bus = %u\n",
+                                res_bus);
+                        res_bus = secbus + res_bus;
+                    }
                 }
             }
             dprintf(1, "PCI: subordinate bus = 0x%x -> 0x%x\n",

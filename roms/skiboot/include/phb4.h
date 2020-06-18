@@ -106,66 +106,6 @@
 #define PELTV_TABLE_SIZE_MAX	0x20000
 
 #define PHB4_RESERVED_PE_NUM(p)	((p)->num_pes - 1)
-/*
- * State structure for a PHB
- */
-
-/*
- * (Comment copied from p7ioc.h, please update both when relevant)
- *
- * The PHB State structure is essentially used during PHB reset
- * or recovery operations to indicate that the PHB cannot currently
- * be used for normal operations.
- *
- * Some states involve waiting for the timebase to reach a certain
- * value. In which case the field "delay_tgt_tb" is set and the
- * state machine will be run from the "state_poll" callback.
- *
- * At IPL time, we call this repeatedly during the various sequences
- * however under OS control, this will require a change in API.
- *
- * Fortunately, the OPAL API for slot power & reset are not currently
- * used by Linux, so changing them isn't going to be an issue. The idea
- * here is that some of these APIs will return a positive integer when
- * neededing such a delay to proceed. The OS will then be required to
- * call a new function opal_poll_phb() after that delay. That function
- * will potentially return a new delay, or OPAL_SUCCESS when the original
- * operation has completed successfully. If the operation has completed
- * with an error, then opal_poll_phb() will return that error.
- *
- * Note: Should we consider also returning optionally some indication
- * of what operation is in progress for OS debug/diag purposes ?
- *
- * Any attempt at starting a new "asynchronous" operation while one is
- * already in progress will result in an error.
- *
- * Internally, this is represented by the state being P7IOC_PHB_STATE_FUNCTIONAL
- * when no operation is in progress, which it reaches at the end of the
- * boot time initializations. Any attempt at performing a slot operation
- * on a PHB in that state will change the state to the corresponding
- * operation state machine. Any attempt while not in that state will
- * return an error.
- *
- * Some operations allow for a certain amount of retries, this is
- * provided for by the "retries" structure member for use by the state
- * machine as it sees fit.
- */
-enum phb4_state {
-	/* First init state */
-	PHB4_STATE_UNINITIALIZED,
-
-	/* During PHB HW inits */
-	PHB4_STATE_INITIALIZING,
-
-	/* Set if the PHB is for some reason unusable */
-	PHB4_STATE_BROKEN,
-
-	/* PHB fenced */
-	PHB4_STATE_FENCED,
-
-	/* Normal PHB functional state */
-	PHB4_STATE_FUNCTIONAL,
-};
 
 /*
  * PHB4 PCI slot state. When you're going to apply any
@@ -214,22 +154,26 @@ struct phb4_err {
 	uint32_t err_bit;
 };
 
-#define PHB4_LINK_LINK_RETRIES		3
+#define PHB4_LINK_LINK_RETRIES		4
 /* Link timeouts, increments of 10ms */
 #define PHB4_LINK_ELECTRICAL_RETRIES	100
 #define PHB4_LINK_WAIT_RETRIES		200
+
+#define PHB4_RX_ERR_MAX			8
 
 /* PHB4 flags */
 #define PHB4_AIB_FENCED		0x00000001
 #define PHB4_CFG_USE_ASB	0x00000002
 #define PHB4_CFG_BLOCKED	0x00000004
 #define PHB4_CAPP_RECOVERY	0x00000008
+#define PHB4_CAPP_DISABLE	0x00000010
 
 struct phb4 {
 	unsigned int		index;	    /* 0..5 index inside p9 */
 	unsigned int		flags;
 	unsigned int		chip_id;    /* Chip ID (== GCID on p9) */
-	enum phb4_state		state;
+	unsigned int		pec;
+	bool			broken;
 	unsigned int		rev;        /* 00MMmmmm */
 #define PHB4_REV_NIMBUS_DD10	0xa40001
 #define PHB4_REV_NIMBUS_DD20	0xa40002
@@ -253,8 +197,8 @@ struct phb4 {
 	uint32_t		num_irqs;
 
 	/* SkiBoot owned in-memory tables */
-	uint64_t		tbl_rtt;
-	uint64_t		tbl_peltv;
+	uint16_t		*tbl_rtt;
+	uint8_t			*tbl_peltv;
 	uint64_t		tbl_peltv_size;
 	uint64_t		tbl_pest;
 	uint64_t		tbl_pest_size;
@@ -264,16 +208,16 @@ struct phb4 {
 	int64_t			ecap;	    /* cached PCI-E cap offset */
 	int64_t			aercap;	    /* cached AER ecap offset */
 	const __be64		*lane_eq;
+	bool			lane_eq_en;
 	unsigned int		max_link_speed;
+	unsigned int		dt_max_link_speed;
 
 	uint64_t		mrt_size;
 	uint64_t		mbt_size;
 	uint64_t		tvt_size;
 
-	uint16_t		rte_cache[RTT_TABLE_ENTRIES];
 	/* FIXME: dynamically allocate only what's needed below */
 	uint64_t		tve_cache[1024];
-	uint8_t			peltv_cache[PELTV_TABLE_SIZE_MAX];
 	uint64_t		mbt_cache[32][2];
 	uint64_t		mdt_cache[512]; /* max num of PEs */
 	uint64_t		mist_cache[4096/4];/* max num of MSIs */
@@ -284,6 +228,12 @@ struct phb4 {
 
 	/* Cache some RC registers that need to be emulated */
 	uint32_t		rc_cache[4];
+
+	/* Current NPU2 relaxed ordering state */
+	bool			ro_state;
+
+	/* Any capp instance attached to the PHB4 */
+	struct capp		*capp;
 
 	struct phb		phb;
 };

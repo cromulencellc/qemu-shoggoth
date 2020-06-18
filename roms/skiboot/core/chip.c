@@ -76,6 +76,7 @@ static void init_chip(struct dt_node *dn)
 {
 	struct proc_chip *chip;
 	uint32_t id;
+	const char *lc = NULL;
 
 	id = dt_get_chip_id(dn);
 	assert(id < MAX_CHIPS);
@@ -97,6 +98,15 @@ static void init_chip(struct dt_node *dn)
 
 	list_head_init(&chip->i2cms);
 
+	/* Update the location code for this chip. */
+	if (dt_has_node_property(dn, "ibm,loc-code", NULL))
+		lc = dt_prop_get(dn, "ibm,loc-code");
+	else if (dt_has_node_property(dn, "ibm,slot-location-code", NULL))
+		lc = dt_prop_get(dn, "ibm,slot-location-code");
+
+	if (lc)
+		chip->loc_code = strdup(lc);
+
 	prlog(PR_INFO, "CHIP: Initialised chip %d from %s\n", id, dn->name);
 	chips[id] = chip;
 }
@@ -109,7 +119,7 @@ void init_chips(void)
 	if (dt_find_by_path(dt_root, "/mambo")) {
 		proc_chip_quirks |= QUIRK_NO_CHIPTOD | QUIRK_MAMBO_CALLOUTS
 			| QUIRK_NO_F000F | QUIRK_NO_PBA | QUIRK_NO_OCC_IRQ
-			| QUIRK_NO_DIRECT_CTL | QUIRK_NO_RNG;
+			| QUIRK_NO_RNG;
 
 		enable_mambo_console();
 

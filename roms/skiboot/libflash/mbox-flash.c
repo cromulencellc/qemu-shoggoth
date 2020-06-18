@@ -34,10 +34,20 @@
 #include <ccan/container_of/container_of.h>
 
 #ifndef __SKIBOOT__
+#ifndef __TEST__
 #error "This libflash backend must be compiled with skiboot"
 #endif
+#endif
 
-#define MBOX_DEFAULT_TIMEOUT 30
+/* Same technique as BUILD_BUG_ON from linux */
+#define CHECK_HANDLER_SIZE(handlers) ((void)sizeof(char[1 - 2*!!(ARRAY_SIZE(handlers) != (MBOX_COMMAND_COUNT + 1))]))
+
+#define MBOX_DEFAULT_TIMEOUT 3 /* seconds */
+
+#define MSG_CREATE(init_command) { .command = init_command }
+
+struct mbox_flash_data;
+typedef void (mbox_handler)(struct mbox_flash_data *, struct bmc_mbox_msg *);
 
 struct lpc_window {
 	uint32_t lpc_addr; /* Offset into LPC space */
@@ -48,6 +58,7 @@ struct lpc_window {
 
 struct mbox_flash_data {
 	int version;
+	uint16_t timeout;
 	uint32_t shift;
 	struct lpc_window read;
 	struct lpc_window write;
@@ -59,16 +70,91 @@ struct mbox_flash_data {
 	bool pause;
 	bool busy;
 	bool ack;
-	uint8_t seq;
-	/* Plus one, commands start at 1 */
-	void (*handlers[MBOX_COMMAND_COUNT + 1])(struct mbox_flash_data *, struct bmc_mbox_msg*);
-	struct bmc_mbox_msg msg_mem;
+	mbox_handler **handlers;
 };
+
+static mbox_handler mbox_flash_do_nop;
+static mbox_handler mbox_flash_do_illegal;
+
+/* Version 1, 2, 3 compatible */
+static mbox_handler mbox_flash_do_get_mbox_info;
+
+/* Version 2 and 3 compatible */
+static mbox_handler mbox_flash_do_get_flash_info;
+static mbox_handler mbox_flash_do_get_flash_info_v1;
+
+/* Version 2 and 3 compatible */
+static mbox_handler mbox_flash_do_create_read_window;
+static mbox_handler mbox_flash_do_create_read_window_v1;
+
+/* Version 2 and 3 compatible */
+static mbox_handler mbox_flash_do_create_write_window;
+static mbox_handler mbox_flash_do_create_write_window_v1;
+
+/* Version 1, 2, 3 compatible */
+static mbox_handler mbox_flash_do_close_window;
+
+/* Plus one, commands start at 1 */
+static mbox_handler *handlers_v3[] = {
+	NULL,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_get_mbox_info,
+	&mbox_flash_do_get_flash_info,
+	&mbox_flash_do_create_read_window,
+	&mbox_flash_do_close_window,
+	&mbox_flash_do_create_write_window,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_nop
+};
+
+/* Plus one, commands start at 1 */
+static mbox_handler *handlers_v2[] = {
+	NULL,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_get_mbox_info,
+	&mbox_flash_do_get_flash_info,
+	&mbox_flash_do_create_read_window,
+	&mbox_flash_do_close_window,
+	&mbox_flash_do_create_write_window,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_illegal,
+	&mbox_flash_do_illegal
+};
+
+/*
+ * Plus one, commands start at 1.
+ * V2 adds a command so there should never be a response for the last
+ * command.
+ * Ensure we print an error message with mbox_flash_do_illegal().
+ */
+static mbox_handler *handlers_v1[] = {
+	NULL,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_get_mbox_info,
+	&mbox_flash_do_get_flash_info_v1,
+	&mbox_flash_do_create_read_window_v1,
+	&mbox_flash_do_close_window,
+	&mbox_flash_do_create_write_window_v1,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_nop,
+	&mbox_flash_do_illegal,
+	&mbox_flash_do_illegal,
+	&mbox_flash_do_illegal
+};
+
 
 static void mbox_flash_callback(struct bmc_mbox_msg *msg, void *priv);
 static void mbox_flash_attn(uint8_t attn, void *priv);
 
-static int protocol_init(struct mbox_flash_data *mbox_flash);
+static int protocol_init(struct mbox_flash_data *mbox_flash, uint8_t shift);
 
 static int lpc_window_read(struct mbox_flash_data *mbox_flash, uint32_t pos,
 			   void *buf, uint32_t len)
@@ -189,26 +275,6 @@ static uint16_t bytes_to_blocks(struct mbox_flash_data *mbox_flash,
 	return bytes >> mbox_flash->shift;
 }
 
-static struct bmc_mbox_msg *msg_alloc(struct mbox_flash_data *mbox_flash,
-		uint8_t command)
-{
-	/*
-	 * Yes this causes *slow*.
-	 * This file and lpc-mbox have far greater slow points, zeroed
-	 * data regs are VERY useful for debugging. Think twice if this is
-	 * really the performance optimisation you want to make.
-	 */
-	memset(&mbox_flash->msg_mem, 0, sizeof(mbox_flash->msg_mem));
-	mbox_flash->msg_mem.seq = ++mbox_flash->seq;
-	mbox_flash->msg_mem.command = command;
-	return &mbox_flash->msg_mem;
-}
-
-static void msg_free_memory(struct bmc_mbox_msg *mem __unused)
-{
-	/* Allocation is so simple this isn't required */
-}
-
 /*
  * The BMC may send is an out of band message to say that it doesn't
  * own the flash anymore.
@@ -254,35 +320,36 @@ static bool is_reboot(struct mbox_flash_data *mbox_flash)
 	return mbox_flash->reboot;
 }
 
-static int msg_send(struct mbox_flash_data *mbox_flash, struct bmc_mbox_msg *msg)
+static int msg_send(struct mbox_flash_data *mbox_flash, struct bmc_mbox_msg *msg,
+		unsigned int timeout_sec)
 {
 	if (is_reboot(mbox_flash))
 		return FLASH_ERR_AGAIN;
 	mbox_flash->busy = true;
 	mbox_flash->rc = 0;
-	return bmc_mbox_enqueue(msg);
+	return bmc_mbox_enqueue(msg, timeout_sec);
 }
 
 static int wait_for_bmc(struct mbox_flash_data *mbox_flash, unsigned int timeout_sec)
 {
 	unsigned long last = 1, start = tb_to_secs(mftb());
 	prlog(PR_TRACE, "Waiting for BMC\n");
-	while (mbox_flash->busy && timeout_sec) {
+	while (mbox_flash->busy && timeout_sec > last) {
 		long now = tb_to_secs(mftb());
 		if (now - start > last) {
-			timeout_sec--;
-			last = now - start;
 			if (last < timeout_sec / 2)
 				prlog(PR_TRACE, "Been waiting for the BMC for %lu secs\n", last);
 			else
 				prlog(PR_ERR, "BMC NOT RESPONDING %lu second wait\n", last);
+			last++;
 		}
 		/*
 		 * Both functions are important.
 		 * Well time_wait_ms() relaxes the spin... so... its nice
 		 */
-		time_wait_ms(MBOX_DEFAULT_POLL_MS);
 		check_timers(false);
+		if (mbox_flash->busy)
+			time_wait_ms(MBOX_DEFAULT_POLL_MS);
 		asm volatile ("" ::: "memory");
 	}
 
@@ -297,26 +364,27 @@ static int wait_for_bmc(struct mbox_flash_data *mbox_flash, unsigned int timeout
 
 static int mbox_flash_ack(struct mbox_flash_data *mbox_flash, uint8_t reg)
 {
-	struct bmc_mbox_msg *msg;
+	struct bmc_mbox_msg msg = MSG_CREATE(MBOX_C_BMC_EVENT_ACK);
 	int rc;
 
-	msg = msg_alloc(mbox_flash, MBOX_C_BMC_EVENT_ACK);
-	if (!msg)
-		return FLASH_ERR_MALLOC_FAILED;
-
-	msg_put_u8(msg, 0, reg);
+	msg_put_u8(&msg, 0, reg);
 
 	/* Clear this first so msg_send() doesn't freak out */
 	mbox_flash->reboot = false;
 
-	rc = msg_send(mbox_flash, msg);
+	/*
+	 * Use a lower timeout - there is strong evidence to suggest the
+	 * BMC won't respond, don't waste time spinning here just have the
+	 * high levels retry when the BMC might be back
+	 */
+	rc = msg_send(mbox_flash, &msg, 3);
 
 	/* Still need to deal with it, we've only acked it now. */
 	mbox_flash->reboot = true;
 
 	if (rc) {
 		prlog(PR_ERR, "Failed to enqueue/send BMC MBOX message\n");
-		goto out;
+		return rc;
 	}
 
 	/*
@@ -328,8 +396,6 @@ static int mbox_flash_ack(struct mbox_flash_data *mbox_flash, uint8_t reg)
 	if (rc)
 		prlog(PR_ERR, "Error waiting for BMC\n");
 
-out:
-	msg_free_memory(msg);
 	return rc;
 }
 
@@ -352,19 +418,32 @@ static void mbox_flash_do_nop(struct mbox_flash_data *mbox_flash __unused,
 {
 }
 
-/* Version 1 and Version 2 compatible */
+static void mbox_flash_do_illegal(struct mbox_flash_data *mbox_flash __unused,
+		struct bmc_mbox_msg *msg __unused)
+{
+	prlog(PR_CRIT, "Got response to unknown message type\n");
+}
+
+/* Version 1, 2 and 3 compatible */
 static void mbox_flash_do_get_mbox_info(struct mbox_flash_data *mbox_flash,
 		struct bmc_mbox_msg *msg)
 {
 
 	mbox_flash->version = msg_get_u8(msg, 0);
-	if (mbox_flash->version == 1) {
-		/* Not all version 1 daemons set argument 5 correctly */
-		mbox_flash->shift = 12; /* Protocol hardcodes to 4K anyway */
-		mbox_flash->read.size = blocks_to_bytes(mbox_flash, msg_get_u16(msg, 1));
-		mbox_flash->write.size = blocks_to_bytes(mbox_flash, msg_get_u16(msg, 3));
-	} else { /* V2 compatible */
-		mbox_flash->shift = msg_get_u8(msg, 5);
+	switch (mbox_flash->version) {
+		case 1:
+			/* Not all version 1 daemons set argument 5 correctly */
+			mbox_flash->shift = 12; /* Protocol hardcodes to 4K anyway */
+			mbox_flash->read.size = blocks_to_bytes(mbox_flash, msg_get_u16(msg, 1));
+			mbox_flash->write.size = blocks_to_bytes(mbox_flash, msg_get_u16(msg, 3));
+			break;
+		case 3:
+		case 2:
+			mbox_flash->shift = msg_get_u8(msg, 5);
+			mbox_flash->timeout = msg_get_u16(msg, 6);
+			if (mbox_flash->timeout == 0)
+				mbox_flash->timeout = MBOX_DEFAULT_TIMEOUT;
+			break;
 	}
 	/* Callers will handle the case where the version is not known
 	 *
@@ -375,7 +454,8 @@ static void mbox_flash_do_get_mbox_info(struct mbox_flash_data *mbox_flash,
 	 */
 }
 
-static void mbox_flash_do_get_flash_info_v2(struct mbox_flash_data *mbox_flash,
+/* Version 2 and 3 compatible */
+static void mbox_flash_do_get_flash_info(struct mbox_flash_data *mbox_flash,
 		struct bmc_mbox_msg *msg)
 {
 	mbox_flash->total_size = blocks_to_bytes(mbox_flash, msg_get_u16(msg, 0));
@@ -389,7 +469,8 @@ static void mbox_flash_do_get_flash_info_v1(struct mbox_flash_data *mbox_flash,
 	mbox_flash->erase_granule = msg_get_u32(msg, 4);
 }
 
-static void mbox_flash_do_create_read_window_v2(struct mbox_flash_data *mbox_flash,
+/* Version 2 and 3 compatible */
+static void mbox_flash_do_create_read_window(struct mbox_flash_data *mbox_flash,
 		struct bmc_mbox_msg *msg)
 {
 	mbox_flash->read.lpc_addr = blocks_to_bytes(mbox_flash, msg_get_u16(msg, 0));
@@ -407,7 +488,8 @@ static void mbox_flash_do_create_read_window_v1(struct mbox_flash_data *mbox_fla
 	mbox_flash->write.open = false;
 }
 
-static void mbox_flash_do_create_write_window_v2(struct mbox_flash_data *mbox_flash,
+/* Version 2 and 3 compatible */
+static void mbox_flash_do_create_write_window(struct mbox_flash_data *mbox_flash,
 		struct bmc_mbox_msg *msg)
 {
 	mbox_flash->write.lpc_addr = blocks_to_bytes(mbox_flash, msg_get_u16(msg, 0));
@@ -459,7 +541,7 @@ static int handle_reboot(struct mbox_flash_data *mbox_flash)
 		return rc;
 	}
 
-	rc = protocol_init(mbox_flash);
+	rc = protocol_init(mbox_flash, 0);
 	if (rc)
 		mbox_flash->reboot = true;
 
@@ -475,21 +557,17 @@ static bool do_delayed_work(struct mbox_flash_data *mbox_flash)
 static int mbox_flash_mark_write(struct mbox_flash_data *mbox_flash,
 				 uint64_t pos, uint64_t len, int type)
 {
-	struct bmc_mbox_msg *msg;
+	struct bmc_mbox_msg msg = MSG_CREATE(type);
 	int rc;
-
-	msg = msg_alloc(mbox_flash, type);
-	if (!msg)
-		return FLASH_ERR_MALLOC_FAILED;
 
 	if (mbox_flash->version == 1) {
 		uint32_t start = ALIGN_DOWN(pos, 1 << mbox_flash->shift);
-		msg_put_u16(msg, 0, bytes_to_blocks(mbox_flash, pos));
+		msg_put_u16(&msg, 0, bytes_to_blocks(mbox_flash, pos));
 		/*
 		 * We need to make sure that we mark dirty until up to atleast
 		 * pos + len.
 		 */
-		msg_put_u32(msg, 2, pos + len - start);
+		msg_put_u32(&msg, 2, pos + len - start);
 	} else {
 		uint64_t window_pos = pos - mbox_flash->write.cur_pos;
 		uint16_t start = bytes_to_blocks(mbox_flash, window_pos);
@@ -497,24 +575,20 @@ static int mbox_flash_mark_write(struct mbox_flash_data *mbox_flash,
 					       ALIGN_UP(window_pos + len,
 							1 << mbox_flash->shift));
 
-		msg_put_u16(msg, 0, start);
-		msg_put_u16(msg, 2, end - start); /* Total Length */
+		msg_put_u16(&msg, 0, start);
+		msg_put_u16(&msg, 2, end - start); /* Total Length */
 	}
 
-	rc = msg_send(mbox_flash, msg);
+	rc = msg_send(mbox_flash, &msg, mbox_flash->timeout);
 	if (rc) {
 		prlog(PR_ERR, "Failed to enqueue/send BMC MBOX message\n");
-		goto out;
+		return rc;
 	}
 
-	rc = wait_for_bmc(mbox_flash, MBOX_DEFAULT_TIMEOUT);
-	if (rc) {
+	rc = wait_for_bmc(mbox_flash, mbox_flash->timeout);
+	if (rc)
 		prlog(PR_ERR, "Error waiting for BMC\n");
-		goto out;
-	}
 
-out:
-	msg_free_memory(msg);
 	return rc;
 }
 
@@ -544,7 +618,7 @@ static int mbox_flash_erase(struct mbox_flash_data *mbox_flash, uint64_t pos,
 
 static int mbox_flash_flush(struct mbox_flash_data *mbox_flash)
 {
-	struct bmc_mbox_msg *msg;
+	struct bmc_mbox_msg msg = MSG_CREATE(MBOX_C_WRITE_FLUSH);
 	int rc;
 
 	if (!mbox_flash->write.open) {
@@ -552,22 +626,16 @@ static int mbox_flash_flush(struct mbox_flash_data *mbox_flash)
 		return FLASH_ERR_DEVICE_GONE;
 	}
 
-	msg = msg_alloc(mbox_flash, MBOX_C_WRITE_FLUSH);
-	if (!msg)
-		return FLASH_ERR_MALLOC_FAILED;
-
-	rc = msg_send(mbox_flash, msg);
+	rc = msg_send(mbox_flash, &msg, mbox_flash->timeout);
 	if (rc) {
 		prlog(PR_ERR, "Failed to enqueue/send BMC MBOX message\n");
-		goto out;
+		return rc;
 	}
 
-	rc = wait_for_bmc(mbox_flash, MBOX_DEFAULT_TIMEOUT);
+	rc = wait_for_bmc(mbox_flash, mbox_flash->timeout);
 	if (rc)
 		prlog(PR_ERR, "Error waiting for BMC\n");
 
-out:
-	msg_free_memory(msg);
 	return rc;
 }
 
@@ -588,7 +656,7 @@ static int mbox_window_move(struct mbox_flash_data *mbox_flash,
 			    struct lpc_window *win, uint8_t command,
 			    uint64_t pos, uint64_t len, uint64_t *size)
 {
-	struct bmc_mbox_msg *msg;
+	struct bmc_mbox_msg msg = MSG_CREATE(command);
 	int rc;
 
 	/* Is the window currently open valid */
@@ -597,8 +665,6 @@ static int mbox_window_move(struct mbox_flash_data *mbox_flash,
 		return 0;
 	}
 
-	prlog(PR_DEBUG, "Adjusting the window\n");
-
 	/* V1 needs to remember where it has opened the window, note it
 	 * here.
 	 * If we're running V2 the response to the CREATE_*_WINDOW command
@@ -606,21 +672,20 @@ static int mbox_window_move(struct mbox_flash_data *mbox_flash,
 	 */
 	win->cur_pos = pos & ~mbox_flash_mask(mbox_flash);
 
-	msg = msg_alloc(mbox_flash, command);
-	if (!msg)
-		return FLASH_ERR_MALLOC_FAILED;
-
-	msg_put_u16(msg, 0, bytes_to_blocks(mbox_flash, pos));
-	rc = msg_send(mbox_flash, msg);
+	msg_put_u16(&msg, 0, bytes_to_blocks(mbox_flash, pos));
+	rc = msg_send(mbox_flash, &msg, mbox_flash->timeout);
 	if (rc) {
 		prlog(PR_ERR, "Failed to enqueue/send BMC MBOX message\n");
-		goto out;
+		return rc;
 	}
 
-	rc = wait_for_bmc(mbox_flash, MBOX_DEFAULT_TIMEOUT);
+	mbox_flash->read.open = false;
+	mbox_flash->write.open = false;
+
+	rc = wait_for_bmc(mbox_flash, mbox_flash->timeout);
 	if (rc) {
 		prlog(PR_ERR, "Error waiting for BMC\n");
-		goto out;
+		return rc;
 	}
 
 	*size = len;
@@ -638,13 +703,19 @@ static int mbox_window_move(struct mbox_flash_data *mbox_flash,
 	 * bug will be obvious from the barf.
 	 */
 	if (len != 0 && *size == 0) {
+		prlog(PR_ERR, "Failed read/write!\n");
+		prlog(PR_ERR, "Please update your BMC firmware\n");
 		prlog(PR_ERR, "Move window is indicating size zero!\n");
 		prlog(PR_ERR, "pos: 0x%" PRIx64 ", len: 0x%" PRIx64 "\n", pos, len);
 		prlog(PR_ERR, "win pos: 0x%08x win size: 0x%08x\n", win->cur_pos, win->size);
+		/*
+		 * In practice skiboot gets stuck and this eventually
+		 * brings down the host. Just fail pass the error back
+		 * up and hope someone makes a good decision
+		 */
+		return MBOX_R_SYSTEM_ERROR;
 	}
 
-out:
-	msg_free_memory(msg);
 	return rc;
 }
 
@@ -748,18 +819,14 @@ static int mbox_flash_read(struct blocklevel_device *bl, uint64_t pos,
 static int mbox_flash_get_info(struct blocklevel_device *bl, const char **name,
 		uint64_t *total_size, uint32_t *erase_granule)
 {
+	struct bmc_mbox_msg msg = MSG_CREATE(MBOX_C_GET_FLASH_INFO);
 	struct mbox_flash_data *mbox_flash;
-	struct bmc_mbox_msg *msg;
 	int rc;
 
 	mbox_flash = container_of(bl, struct mbox_flash_data, bl);
 
 	if (do_delayed_work(mbox_flash))
 		return FLASH_ERR_AGAIN;
-
-	msg = msg_alloc(mbox_flash, MBOX_C_GET_FLASH_INFO);
-	if (!msg)
-		return FLASH_ERR_MALLOC_FAILED;
 
 	/*
 	 * We want to avoid runtime mallocs in skiboot. The expected
@@ -771,15 +838,15 @@ static int mbox_flash_get_info(struct blocklevel_device *bl, const char **name,
 		*name = NULL;
 
 	mbox_flash->busy = true;
-	rc = msg_send(mbox_flash, msg);
+	rc = msg_send(mbox_flash, &msg, mbox_flash->timeout);
 	if (rc) {
 		prlog(PR_ERR, "Failed to enqueue/send BMC MBOX message\n");
-		goto out;
+		return rc;
 	}
 
-	if (wait_for_bmc(mbox_flash, MBOX_DEFAULT_TIMEOUT)) {
+	if (wait_for_bmc(mbox_flash, mbox_flash->timeout)) {
 		prlog(PR_ERR, "Error waiting for BMC\n");
-		goto out;
+		return rc;
 	}
 
 	mbox_flash->bl.erase_mask = mbox_flash->erase_granule - 1;
@@ -789,8 +856,6 @@ static int mbox_flash_get_info(struct blocklevel_device *bl, const char **name,
 	if (erase_granule)
 		*erase_granule = mbox_flash->erase_granule;
 
-out:
-	msg_free_memory(msg);
 	return rc;
 }
 
@@ -880,9 +945,6 @@ static void mbox_flash_attn(uint8_t attn, void *priv)
 	} else {
 		mbox_flash->pause = false;
 	}
-
-	if (attn & MBOX_ATTN_BMC_DAEMON_READY)
-		attn &= ~MBOX_ATTN_BMC_DAEMON_READY;
 }
 
 static void mbox_flash_callback(struct bmc_mbox_msg *msg, void *priv)
@@ -894,14 +956,6 @@ static void mbox_flash_callback(struct bmc_mbox_msg *msg, void *priv)
 	if (msg->response != MBOX_R_SUCCESS) {
 		prlog(PR_ERR, "Bad response code from BMC %d\n", msg->response);
 		mbox_flash->rc = msg->response;
-		goto out;
-	}
-
-	if (msg->seq != mbox_flash->seq) {
-		/* Uhoh */
-		prlog(PR_ERR, "Sequence numbers don't match! Got: %02x Expected: %02x\n",
-				msg->seq, mbox_flash->seq);
-		mbox_flash->rc = MBOX_R_SYSTEM_ERROR;
 		goto out;
 	}
 
@@ -926,91 +980,145 @@ out:
 	mbox_flash->busy = false;
 }
 
-static int protocol_init(struct mbox_flash_data *mbox_flash)
+static int protocol_init(struct mbox_flash_data *mbox_flash, uint8_t shift)
 {
-	struct bmc_mbox_msg *msg;
+	struct bmc_mbox_msg msg = MSG_CREATE(MBOX_C_GET_MBOX_INFO);
 	int rc;
 
-	/* Assume V2 */
+	mbox_flash->read.open = false;
+	mbox_flash->write.open = false;
+
+	/* Assume V2+ */
 	mbox_flash->bl.read = &mbox_flash_read;
 	mbox_flash->bl.write = &mbox_flash_write;
 	mbox_flash->bl.erase = &mbox_flash_erase_v2;
 	mbox_flash->bl.get_info = &mbox_flash_get_info;
 
-	/* Assume V2 */
-	mbox_flash->handlers[0] = NULL;
-	mbox_flash->handlers[MBOX_C_RESET_STATE] = &mbox_flash_do_nop;
-	mbox_flash->handlers[MBOX_C_GET_MBOX_INFO] = &mbox_flash_do_get_mbox_info;
-	mbox_flash->handlers[MBOX_C_GET_FLASH_INFO] = &mbox_flash_do_get_flash_info_v2;
-	mbox_flash->handlers[MBOX_C_CREATE_READ_WINDOW] = &mbox_flash_do_create_read_window_v2;
-	mbox_flash->handlers[MBOX_C_CLOSE_WINDOW] = &mbox_flash_do_close_window;
-	mbox_flash->handlers[MBOX_C_CREATE_WRITE_WINDOW] = &mbox_flash_do_create_write_window_v2;
-	mbox_flash->handlers[MBOX_C_MARK_WRITE_DIRTY] = &mbox_flash_do_nop;
-	mbox_flash->handlers[MBOX_C_WRITE_FLUSH] = &mbox_flash_do_nop;
-	mbox_flash->handlers[MBOX_C_BMC_EVENT_ACK] = &mbox_flash_do_nop;
-	mbox_flash->handlers[MBOX_C_MARK_WRITE_ERASED] = &mbox_flash_do_nop;
-
+	/* Assume V3 */
+	mbox_flash->handlers = handlers_v3;
 
 	bmc_mbox_register_callback(&mbox_flash_callback, mbox_flash);
 	bmc_mbox_register_attn(&mbox_flash_attn, mbox_flash);
 
 	/*
 	 * For V1 of the protocol this is fixed.
-	 * V2: The init code will update this
+	 * V2+: The init code will update this
 	 */
 	mbox_flash->shift = 12;
 
 	/*
-	 * Always attempt init with V2.
-	 * The GET_MBOX_INFO response will confirm that the other side can
-	 * talk V2, we'll update this variable then if V2 is not supported
+	 * For V1 we'll use this value.
+	 * V2+: The init code (may) update this
 	 */
-	mbox_flash->version = 2;
+	mbox_flash->timeout = MBOX_DEFAULT_TIMEOUT;
 
-	msg = msg_alloc(mbox_flash, MBOX_C_GET_MBOX_INFO);
-	if (!msg)
-		return FLASH_ERR_MALLOC_FAILED;
+	/*
+	 * Always attempt init with highest version known.
+	 * The GET_MBOX_INFO response will confirm that the other side can
+	 * talk the highest version, we'll update this variable then if
+	 * our highest version is not supported
+	 */
+	mbox_flash->version = 3;
 
-	msg_put_u8(msg, 0, mbox_flash->version);
-	rc = msg_send(mbox_flash, msg);
+negotiate_version:
+	msg_put_u8(&msg, 0, mbox_flash->version);
+	msg_put_u8(&msg, 1, shift);
+	rc = msg_send(mbox_flash, &msg, mbox_flash->timeout);
 	if (rc) {
 		prlog(PR_ERR, "Failed to enqueue/send BMC MBOX message\n");
-		goto out;
+		return rc;
 	}
 
-	rc = wait_for_bmc(mbox_flash, MBOX_DEFAULT_TIMEOUT);
+	rc = wait_for_bmc(mbox_flash, mbox_flash->timeout);
 	if (rc) {
 		prlog(PR_ERR, "Error waiting for BMC\n");
-		goto out;
+		if (mbox_flash->version > 1) {
+			mbox_flash->version--;
+			prlog(PR_INFO, "Retrying MBOX negotiation with BMC"
+			      " with MBOXv%d\n", mbox_flash->version);
+			goto negotiate_version;
+		}
+		return rc;
 	}
-
-	msg_free_memory(msg);
 
 	prlog(PR_INFO, "Detected mbox protocol version %d\n", mbox_flash->version);
-	if (mbox_flash->version == 1) {
-		mbox_flash->bl.erase = &mbox_flash_erase_v1;
-		/* Not all handlers differ, update those which do */
-		mbox_flash->handlers[MBOX_C_GET_FLASH_INFO] = &mbox_flash_do_get_flash_info_v1;
-		mbox_flash->handlers[MBOX_C_CREATE_READ_WINDOW] =
-			&mbox_flash_do_create_read_window_v1;
-		mbox_flash->handlers[MBOX_C_CREATE_WRITE_WINDOW] =
-			&mbox_flash_do_create_write_window_v1;
-		mbox_flash->handlers[MBOX_C_MARK_WRITE_ERASED] = NULL; /* Not in V1 */
-	} else if (mbox_flash->version > 2) {
-		/*
-		 * Uh, we requested version 2... The BMC is can only lower the
-		 * requested version not do anything else. FWIW there is no
-		 * verion 0
-		 */
-		prlog(PR_CRIT, "Bad version: %u\n", mbox_flash->version);
-		rc = FLASH_ERR_PARM_ERROR;
-		goto out;
+	switch (mbox_flash->version) {
+		case 1:
+			mbox_flash->bl.erase = &mbox_flash_erase_v1;
+			mbox_flash->handlers = handlers_v1;
+			break;
+		case 2:
+			mbox_flash->handlers = handlers_v2;
+			break;
+		case 3:
+			/* Nothing to do we assumed it would be V3 */
+			break;
+		default:
+			/*
+			 * The BMC is can only lower the requested version not do
+			 * anything else. FWIW there is no verion 0.
+			 */
+			prlog(PR_CRIT, "Bad version: %u\n", mbox_flash->version);
+			rc = FLASH_ERR_PARM_ERROR;
 	}
 
+	return rc;
+}
 
-	return 0;
-out:
-	msg_free_memory(msg);
+int mbox_flash_lock(struct blocklevel_device *bl, uint64_t pos, uint64_t len)
+{
+	struct mbox_flash_data *mbox_flash;
+	struct bmc_mbox_msg msg = MSG_CREATE(MBOX_C_MARK_LOCKED);
+	int rc;
+
+	/* mbox-flash only talks 32bit for now */
+	if (pos > UINT_MAX || len > UINT_MAX)
+		return FLASH_ERR_PARM_ERROR;
+
+	/*
+	 * If the region isn't at least 4k aligned and in size then bail
+	 * out, the protocol won't allow for smaller block sizes.
+	 */
+	if (pos & ((1 << 12) - 1) || len & ((1 << 12) - 1))
+		return FLASH_ERR_PARM_ERROR;
+
+	mbox_flash = container_of(bl, struct mbox_flash_data, bl);
+	if ((pos & mbox_flash_mask(mbox_flash)) || (len & mbox_flash_mask(mbox_flash))) {
+		uint8_t shift = 0;
+		/*
+		 * The current block size won't work for locking the requested
+		 * region must reinit.
+		 */
+		while (!((1 << shift) & pos) && !((1 << shift) & len))
+			shift++;
+
+		prlog(PR_INFO, "Locking flash requires re-init from shift of %d to shift of %d\n",
+				mbox_flash->shift, shift);
+
+		rc = protocol_init(mbox_flash, shift);
+		if (rc)
+			return rc;
+
+		/*
+		 * The daemon didn't agree with the requested shift - the
+		 * flash won't be able to be locked
+		 */
+		if (mbox_flash->shift > shift)
+			return FLASH_ERR_PARM_ERROR;
+	}
+
+	msg_put_u16(&msg, 0, bytes_to_blocks(mbox_flash, pos));
+	msg_put_u16(&msg, 2, bytes_to_blocks(mbox_flash, len));
+	rc = msg_send(mbox_flash, &msg, mbox_flash->timeout);
+	if (rc) {
+		prlog(PR_ERR, "Failed to enqueue/send BMC MBOX message\n");
+		return rc;
+	}
+
+	rc = wait_for_bmc(mbox_flash, mbox_flash->timeout);
+	if (rc)
+		prlog(PR_ERR, "Error waiting for BMC\n");
+
 	return rc;
 }
 
@@ -1019,8 +1127,18 @@ int mbox_flash_init(struct blocklevel_device **bl)
 	struct mbox_flash_data *mbox_flash;
 	int rc;
 
+	CHECK_HANDLER_SIZE(handlers_v3);
+	CHECK_HANDLER_SIZE(handlers_v2);
+	CHECK_HANDLER_SIZE(handlers_v1);
+
 	if (!bl)
 		return FLASH_ERR_PARM_ERROR;
+
+	/* XXX: We only support one blocklevel flash device over mbox. If we
+	 * ever support more than one, move this out. The chances of that are
+	 * slim though due to circumstances.
+	 */
+	mbox_init();
 
 	*bl = NULL;
 
@@ -1028,7 +1146,7 @@ int mbox_flash_init(struct blocklevel_device **bl)
 	if (!mbox_flash)
 		return FLASH_ERR_MALLOC_FAILED;
 
-	/* Assume V2 */
+	/* Assume V2+ */
 	mbox_flash->bl.read = &mbox_flash_read;
 	mbox_flash->bl.write = &mbox_flash_write;
 	mbox_flash->bl.erase = &mbox_flash_erase_v2;
@@ -1037,7 +1155,7 @@ int mbox_flash_init(struct blocklevel_device **bl)
 	if (bmc_mbox_get_attn_reg() & MBOX_ATTN_BMC_REBOOT)
 		rc = handle_reboot(mbox_flash);
 	else
-		rc = protocol_init(mbox_flash);
+		rc = protocol_init(mbox_flash, 0);
 	if (rc) {
 		free(mbox_flash);
 		return rc;

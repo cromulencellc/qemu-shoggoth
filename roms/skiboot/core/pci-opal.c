@@ -111,8 +111,13 @@ static int64_t opal_pci_eeh_freeze_status(uint64_t phb_id, uint64_t pe_number,
 	if (!phb->ops->eeh_freeze_status)
 		return OPAL_UNSUPPORTED;
 	phb_lock(phb);
+
+	if (phb_status)
+		prlog(PR_ERR, "PHB#%04llx: %s: deprecated PHB status\n",
+				phb_id, __func__);
+
 	rc = phb->ops->eeh_freeze_status(phb, pe_number, freeze_state,
-					 pci_error_type, NULL, phb_status);
+					 pci_error_type, NULL);
 	phb_unlock(phb);
 
 	return rc;
@@ -785,8 +790,10 @@ static int64_t opal_pci_set_power_state(uint64_t async_token,
 	switch (*state) {
 	case OPAL_PCI_SLOT_POWER_OFF:
 		if (!slot->ops.prepare_link_change ||
-		    !slot->ops.set_power_state)
+		    !slot->ops.set_power_state) {
+			phb_unlock(phb);
 			return OPAL_UNSUPPORTED;
+		}
 
 		slot->async_token = async_token;
 		slot->ops.prepare_link_change(slot, false);
@@ -794,22 +801,28 @@ static int64_t opal_pci_set_power_state(uint64_t async_token,
 		break;
 	case OPAL_PCI_SLOT_POWER_ON:
 		if (!slot->ops.set_power_state ||
-		    !slot->ops.get_link_state)
+		    !slot->ops.get_link_state) {
+			phb_unlock(phb);
 			return OPAL_UNSUPPORTED;
+		}
 
 		slot->async_token = async_token;
 		rc = slot->ops.set_power_state(slot, PCI_SLOT_POWER_ON);
 		break;
 	case OPAL_PCI_SLOT_OFFLINE:
-		if (!pd)
+		if (!pd) {
+			phb_unlock(phb);
 			return OPAL_PARAMETER;
+		}
 
 		pci_remove_bus(phb, &pd->children);
 		phb_unlock(phb);
 		return OPAL_SUCCESS;
 	case OPAL_PCI_SLOT_ONLINE:
-		if (!pd)
+		if (!pd) {
+			phb_unlock(phb);
 			return OPAL_PARAMETER;
+		}
 		pci_scan_bus(phb, pd->secondary_bus, pd->subordinate_bus,
 			     &pd->children, pd, true);
 		pci_add_device_nodes(phb, &pd->children, pd->dn,
@@ -953,8 +966,13 @@ static int64_t opal_pci_eeh_freeze_status2(uint64_t phb_id, uint64_t pe_number,
 	if (!phb->ops->eeh_freeze_status)
 		return OPAL_UNSUPPORTED;
 	phb_lock(phb);
+
+	if (phb_status)
+		prlog(PR_ERR, "PHB#%04llx: %s: deprecated PHB status\n",
+				phb_id, __func__);
+
 	rc = phb->ops->eeh_freeze_status(phb, pe_number, freeze_state,
-					 pci_error_type, severity, phb_status);
+					 pci_error_type, severity);
 	phb_unlock(phb);
 
 	return rc;
@@ -1016,3 +1034,39 @@ static int64_t opal_pci_set_p2p(uint64_t phbid_init, uint64_t phbid_target,
 	return OPAL_SUCCESS;
 }
 opal_call(OPAL_PCI_SET_P2P, opal_pci_set_p2p, 4);
+
+static int64_t opal_pci_get_pbcq_tunnel_bar(uint64_t phb_id, uint64_t *addr)
+{
+	struct phb *phb = pci_get_phb(phb_id);
+
+	if (!opal_addr_valid(addr))
+		return OPAL_PARAMETER;
+
+	if (!phb)
+		return OPAL_PARAMETER;
+	if (!phb->ops->get_tunnel_bar)
+		return OPAL_UNSUPPORTED;
+
+	phb_lock(phb);
+	phb->ops->get_tunnel_bar(phb, addr);
+	phb_unlock(phb);
+	return OPAL_SUCCESS;
+}
+opal_call(OPAL_PCI_GET_PBCQ_TUNNEL_BAR, opal_pci_get_pbcq_tunnel_bar, 2);
+
+static int64_t opal_pci_set_pbcq_tunnel_bar(uint64_t phb_id, uint64_t addr)
+{
+	struct phb *phb = pci_get_phb(phb_id);
+	int64_t rc;
+
+	if (!phb)
+		return OPAL_PARAMETER;
+	if (!phb->ops->set_tunnel_bar)
+		return OPAL_UNSUPPORTED;
+
+	phb_lock(phb);
+	rc = phb->ops->set_tunnel_bar(phb, addr);
+	phb_unlock(phb);
+	return rc;
+}
+opal_call(OPAL_PCI_SET_PBCQ_TUNNEL_BAR, opal_pci_set_pbcq_tunnel_bar, 2);

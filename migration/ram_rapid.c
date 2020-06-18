@@ -37,6 +37,7 @@
 #include "trace.h"
 #include "exec/ram_addr.h"
 #include "exec/target_page.h"
+#include "exec/ramlist.h"
 #include "qemu/rcu_queue.h"
 #include "migration/colo.h"
 #include "migration/block.h"
@@ -101,6 +102,8 @@ struct RAMState {
     uint32_t last_version;
     /* We are in the first round */
     bool ram_bulk_stage;
+    /* The free page optimization is enabled */
+    bool fpo_enabled;
     /* How many times we have dirty too many pages */
     int dirty_rate_high_cnt;
     /* these variables are used for bitmap sync */
@@ -134,6 +137,11 @@ typedef struct RAMState RAMState;
 
 static RAMState *ram_state = NULL;
 
+void ram_rapid_precopy_enable_free_page_optimization(void)
+{
+    ram_state->fpo_enabled = true;
+}
+
 /* used by the search for pages to send */
 struct PageSearchStatus {
     /* Current block being searched */
@@ -148,6 +156,10 @@ struct PageSearchStatus {
 typedef struct PageSearchStatus PageSearchStatus;
 
 /* Should be holding either ram_list.mutex, or the RCU lock. */
+#define RAMBLOCK_FOREACH_NOT_IGNORED(block)            \
+    INTERNAL_RAMBLOCK_FOREACH(block)                   \
+        if (ramblock_is_ignored(block)) {} else
+
 #define RAMBLOCK_FOREACH_MIGRATABLE(block)             \
     INTERNAL_RAMBLOCK_FOREACH(block)                   \
         if (!qemu_ram_is_migratable(block)) {} else
@@ -234,16 +246,21 @@ unsigned long migration_bitmap_find_dirty(RAMState *rs, RAMBlock *rb,
                                           unsigned long start)
 {
     unsigned long size = rb->used_length >> TARGET_PAGE_BITS;
+    unsigned long *bitmap = rb->bmap;
     unsigned long next;
 
-    if (!qemu_ram_is_migratable(rb)) {
+    if (ramblock_is_ignored(rb)) {
         return size;
     }
 
-    if (rs->ram_bulk_stage && start > 0) {
+    /*
+     * When the free page optimization is enabled, we need to check the bitmap
+     * to send the non-free pages rather than all the pages in the bulk stage.
+     */
+    if (!rs->fpo_enabled && rs->ram_bulk_stage && start > 0) {
         next = start + 1;
     } else {
-        next = find_next_bit(rb->bmap, size, start);
+        next = find_next_bit(bitmap, size, start);
     }
 
     return next;
@@ -255,12 +272,20 @@ static inline bool migration_bitmap_clear_dirty(RAMState *rs,
 {
     bool ret;
 
+    qemu_mutex_lock(&rs->bitmap_mutex);
     ret = test_and_clear_bit(page, rb->bmap);
 
     if (ret) {
         rs->migration_dirty_pages--;
     }
+    qemu_mutex_unlock(&rs->bitmap_mutex);
+
     return ret;
+}
+
+uint64_t ram_rapid_get_total_transferred_pages(void)
+{
+    return ram_counters.normal + ram_counters.duplicate;
 }
 
 /**
@@ -1121,6 +1146,7 @@ static void ram_state_reset(RAMState *rs)
     rs->last_page = 0;
     rs->last_version = ram_list.version;
     rs->ram_bulk_stage = true;
+    rs->fpo_enabled = false;
 }
 
 static int ram_state_init(RAMState **rsp)
@@ -1154,7 +1180,7 @@ static void ram_list_init_bitmaps(void)
 
     /* Skip setting bitmap if there is no RAM */
     if (ram_bytes_total()) {
-        RAMBLOCK_FOREACH_MIGRATABLE(block) {
+        RAMBLOCK_FOREACH_NOT_IGNORED(block) {
             pages = block->max_length >> TARGET_PAGE_BITS;
             block->bmap = bitmap_new(pages);
             bitmap_set(block->bmap, 0, pages);
@@ -1189,7 +1215,7 @@ static void ram_state_resume_prepare(RAMState *rs, QEMUFile *out)
     RAMBlock *block;
     uint64_t pages = 0;
 
-    RAMBLOCK_FOREACH_MIGRATABLE(block) {
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
         pages += bitmap_count_one(block->bmap,
                                   block->used_length >> TARGET_PAGE_BITS);
     }
@@ -1211,6 +1237,15 @@ static void ram_state_resume_prepare(RAMState *rs, QEMUFile *out)
     rs->f = out;
 
     trace_ram_state_resume_prepare(pages);
+}
+
+void ram_rapid_update_dirty_pages(RAMBlock *rb, size_t start, size_t npages)
+{
+    qemu_mutex_lock(&ram_state->bitmap_mutex);
+    ram_state->migration_dirty_pages -=
+                  bitmap_count_one_with_offset(rb->bmap, start, npages);
+    bitmap_clear(rb->bmap, start, npages);
+    qemu_mutex_unlock(&ram_state->bitmap_mutex);
 }
 
 /**
@@ -1241,6 +1276,10 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
         qemu_put_byte(f, strlen(block->idstr));
         qemu_put_buffer(f, (uint8_t *)block->idstr, strlen(block->idstr));
         qemu_put_be64(f, block->used_length);
+        if (migrate_ignore_shared()) {
+            qemu_put_be64(f, block->mr->addr);
+            qemu_put_byte(f, ramblock_is_ignored(block) ? 1 : 0);
+        }
     }
 
     rcu_read_unlock();
@@ -1737,7 +1776,7 @@ static inline RAMBlock *ram_block_from_stream(QEMUFile *f, int flags)
         return NULL;
     }
 
-    if (!qemu_ram_is_migratable(block)) {
+    if (ramblock_is_ignored(block)) {
         error_report("block %s should not be migrated !", id);
         return NULL;
     }
@@ -1838,6 +1877,23 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                                               &local_err);
                         if (local_err) {
                             error_report_err(local_err);
+                        }
+                    }
+                    if (migrate_ignore_shared()) {
+                        hwaddr addr = qemu_get_be64(f);
+                        bool ignored = qemu_get_byte(f);
+                        if (ignored != ramblock_is_ignored(block)) {
+                            error_report("RAM block %s should %s be migrated",
+                                         id, ignored ? "" : "not");
+                            ret = -EINVAL;
+                        }
+                        if (ramblock_is_ignored(block) &&
+                            block->mr->addr != addr) {
+                            error_report("Mismatched GPAs for block %s "
+                                         "%" PRId64 "!= %" PRId64,
+                                         id, (uint64_t)addr,
+                                         (uint64_t)block->mr->addr);
+                            ret = -EINVAL;
                         }
                     }
                     ram_control_load_hook(f, RAM_CONTROL_BLOCK_REG,
@@ -1982,7 +2038,7 @@ static void ram_save_cleanup(void *opaque)
      */
     memory_global_dirty_log_stop();
 
-    QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
         g_free(block->bmap);
         block->bmap = NULL;
     }

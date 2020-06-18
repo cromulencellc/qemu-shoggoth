@@ -22,6 +22,7 @@
 #include <string.h>
 #include <inttypes.h>
 
+#include <libflash/libflash.h>
 #include <libflash/errors.h>
 
 #include "blocklevel.h"
@@ -34,7 +35,7 @@
  * 0  - The region is not ECC protected
  * -1 - Partially protected
  */
-static int ecc_protected(struct blocklevel_device *bl, uint64_t pos, uint64_t len)
+static int ecc_protected(struct blocklevel_device *bl, uint64_t pos, uint64_t len, uint64_t *start)
 {
 	int i;
 
@@ -44,19 +45,32 @@ static int ecc_protected(struct blocklevel_device *bl, uint64_t pos, uint64_t le
 
 	for (i = 0; i < bl->ecc_prot.n_prot; i++) {
 		/* Fits entirely within the range */
-		if (bl->ecc_prot.prot[i].start <= pos && bl->ecc_prot.prot[i].start + bl->ecc_prot.prot[i].len >= pos + len)
+		if (bl->ecc_prot.prot[i].start <= pos &&
+				bl->ecc_prot.prot[i].start + bl->ecc_prot.prot[i].len >= pos + len) {
+			if (start)
+				*start = bl->ecc_prot.prot[i].start;
 			return 1;
+		}
 
 		/*
-		 * Since we merge regions on inserting we can be sure that a
-		 * partial fit means that the non fitting region won't fit in another ecc
-		 * region
+		 * Even if ranges are merged we can't currently guarantee two
+		 * contiguous regions are sanely ECC protected so a partial fit
+		 * is no good.
 		 */
 		if ((bl->ecc_prot.prot[i].start >= pos && bl->ecc_prot.prot[i].start < pos + len) ||
-		   (bl->ecc_prot.prot[i].start <= pos && bl->ecc_prot.prot[i].start + bl->ecc_prot.prot[i].len > pos))
+		   (bl->ecc_prot.prot[i].start <= pos &&
+			bl->ecc_prot.prot[i].start + bl->ecc_prot.prot[i].len > pos)) {
+			if (start)
+				*start = bl->ecc_prot.prot[i].start;
 			return -1;
+		}
 	}
 	return 0;
+}
+
+static uint64_t with_ecc_pos(uint64_t ecc_start, uint64_t pos)
+{
+	return pos + ((pos - ecc_start) / (BYTES_PER_ECC));
 }
 
 static int reacquire(struct blocklevel_device *bl)
@@ -101,9 +115,9 @@ int blocklevel_raw_read(struct blocklevel_device *bl, uint64_t pos, void *buf, u
 
 int blocklevel_read(struct blocklevel_device *bl, uint64_t pos, void *buf, uint64_t len)
 {
-	int rc;
+	int rc, ecc_protection;
 	struct ecc64 *buffer;
-	uint64_t ecc_len = ecc_buffer_size(len);
+	uint64_t ecc_pos, ecc_start, ecc_diff, ecc_len;
 
 	FL_DBG("%s: 0x%" PRIx64 "\t%p\t0x%" PRIx64 "\n", __func__, pos, buf, len);
 	if (!bl || !buf) {
@@ -111,10 +125,34 @@ int blocklevel_read(struct blocklevel_device *bl, uint64_t pos, void *buf, uint6
 		return FLASH_ERR_PARM_ERROR;
 	}
 
-	if (!ecc_protected(bl, pos, len))
+	ecc_protection = ecc_protected(bl, pos, len, &ecc_start);
+
+	FL_DBG("%s: 0x%" PRIx64 " for 0x%" PRIx64 " ecc=%s\n",
+		__func__, pos, len, ecc_protection ?
+		(ecc_protection == -1 ? "partial" : "yes") : "no");
+
+	if (!ecc_protection)
 		return blocklevel_raw_read(bl, pos, buf, len);
 
-	FL_DBG("%s: region has ECC\n", __func__);
+	/*
+	 * The region we're reading to has both ecc protection and not.
+	 * Perhaps one day in the future blocklevel can cope with this.
+	 */
+	if (ecc_protection == -1) {
+		FL_ERR("%s: Can't cope with partial ecc\n", __func__);
+		errno = EINVAL;
+		return FLASH_ERR_PARM_ERROR;
+	}
+
+	pos = with_ecc_pos(ecc_start, pos);
+
+	ecc_pos = ecc_buffer_align(ecc_start, pos);
+	ecc_diff = pos - ecc_pos;
+	ecc_len = ecc_buffer_size(len + ecc_diff);
+
+	FL_DBG("%s: adjusted_pos: 0x%" PRIx64 ", ecc_pos: 0x%" PRIx64
+			", ecc_diff: 0x%" PRIx64 ", ecc_len: 0x%" PRIx64 "\n",
+			__func__, pos, ecc_pos, ecc_diff, ecc_len);
 	buffer = malloc(ecc_len);
 	if (!buffer) {
 		errno = ENOMEM;
@@ -122,11 +160,15 @@ int blocklevel_read(struct blocklevel_device *bl, uint64_t pos, void *buf, uint6
 		goto out;
 	}
 
-	rc = blocklevel_raw_read(bl, pos, buffer, ecc_len);
+	rc = blocklevel_raw_read(bl, ecc_pos, buffer, ecc_len);
 	if (rc)
 		goto out;
 
-	if (memcpy_from_ecc(buf, buffer, len)) {
+	/*
+	 * Could optimise and simply call memcpy_from_ecc() if ecc_diff
+	 * == 0 but _unaligned checks and bascially does that for us
+	 */
+	if (memcpy_from_ecc_unaligned(buf, buffer, len, ecc_diff)) {
 		errno = EBADF;
 		rc = FLASH_ERR_ECC_INVALID;
 	}
@@ -161,9 +203,10 @@ int blocklevel_raw_write(struct blocklevel_device *bl, uint64_t pos,
 int blocklevel_write(struct blocklevel_device *bl, uint64_t pos, const void *buf,
 		uint64_t len)
 {
-	int rc;
+	int rc, ecc_protection;
 	struct ecc64 *buffer;
-	uint64_t ecc_len = ecc_buffer_size(len);
+	uint64_t ecc_len;
+	uint64_t ecc_start, ecc_pos, ecc_diff;
 
 	FL_DBG("%s: 0x%" PRIx64 "\t%p\t0x%" PRIx64 "\n", __func__, pos, buf, len);
 	if (!bl || !buf) {
@@ -171,10 +214,35 @@ int blocklevel_write(struct blocklevel_device *bl, uint64_t pos, const void *buf
 		return FLASH_ERR_PARM_ERROR;
 	}
 
-	if (!ecc_protected(bl, pos, len))
+	ecc_protection = ecc_protected(bl, pos, len, &ecc_start);
+
+	FL_DBG("%s: 0x%" PRIx64 " for 0x%" PRIx64 " ecc=%s\n",
+		__func__, pos, len, ecc_protection ?
+		(ecc_protection == -1 ? "partial" : "yes") : "no");
+
+	if (!ecc_protection)
 		return blocklevel_raw_write(bl, pos, buf, len);
 
-	FL_DBG("%s: region has ECC\n", __func__);
+	/*
+	 * The region we're writing to has both ecc protection and not.
+	 * Perhaps one day in the future blocklevel can cope with this.
+	 */
+	if (ecc_protection == -1) {
+		FL_ERR("%s: Can't cope with partial ecc\n", __func__);
+		errno = EINVAL;
+		return FLASH_ERR_PARM_ERROR;
+	}
+
+	pos = with_ecc_pos(ecc_start, pos);
+
+	ecc_pos = ecc_buffer_align(ecc_start, pos);
+	ecc_diff = pos - ecc_pos;
+	ecc_len = ecc_buffer_size(len + ecc_diff);
+
+	FL_DBG("%s: adjusted_pos: 0x%" PRIx64 ", ecc_pos: 0x%" PRIx64
+			", ecc_diff: 0x%" PRIx64 ", ecc_len: 0x%" PRIx64 "\n",
+			__func__, pos, ecc_pos, ecc_diff, ecc_len);
+
 	buffer = malloc(ecc_len);
 	if (!buffer) {
 		errno = ENOMEM;
@@ -182,12 +250,46 @@ int blocklevel_write(struct blocklevel_device *bl, uint64_t pos, const void *buf
 		goto out;
 	}
 
-	if (memcpy_to_ecc(buffer, buf, len)) {
-		errno = EBADF;
-		rc = FLASH_ERR_ECC_INVALID;
-		goto out;
-	}
+	if (ecc_diff) {
+		uint64_t start_chunk = ecc_diff;
+		uint64_t end_chunk = BYTES_PER_ECC - ecc_diff;
+		uint64_t end_len = ecc_len - end_chunk;
 
+		/*
+		 * Read the start bytes that memcpy_to_ecc_unaligned() will need
+		 * to calculate the first ecc byte
+		 */
+		rc = blocklevel_raw_read(bl, ecc_pos, buffer, start_chunk);
+		if (rc) {
+			errno = EBADF;
+			rc = FLASH_ERR_ECC_INVALID;
+			goto out;
+		}
+
+		/*
+		 * Read the end bytes that memcpy_to_ecc_unaligned() will need
+		 * to calculate the last ecc byte
+		 */
+		rc = blocklevel_raw_read(bl, ecc_pos + end_len, ((char *)buffer) + end_len,
+				end_chunk);
+		if (rc) {
+			errno = EBADF;
+			rc = FLASH_ERR_ECC_INVALID;
+			goto out;
+		}
+
+		if (memcpy_to_ecc_unaligned(buffer, buf, len, ecc_diff)) {
+			errno = EBADF;
+			rc = FLASH_ERR_ECC_INVALID;
+			goto out;
+		}
+	} else {
+		if (memcpy_to_ecc(buffer, buf, len)) {
+			errno = EBADF;
+			rc = FLASH_ERR_ECC_INVALID;
+			goto out;
+		}
+	}
 	rc = blocklevel_raw_write(bl, pos, buffer, ecc_len);
 
 out:
@@ -348,7 +450,7 @@ int blocklevel_smart_erase(struct blocklevel_device *bl, uint64_t pos, uint64_t 
 		 * so we need to write back the chunk at the end of the block
 		 */
 		if (base_pos + base_len + len < base_pos + block_size) {
-			rc = bl->write(bl, pos + len, erase_buf + pos + len,
+			rc = bl->write(bl, pos + len, erase_buf + base_len + len,
 					block_size - base_len - len);
 			FL_DBG("%s: Early exit, everything was in one erase block\n",
 					__func__);
@@ -420,6 +522,7 @@ int blocklevel_smart_write(struct blocklevel_device *bl, uint64_t pos, const voi
 	uint32_t erase_size;
 	const void *write_buf = buf;
 	void *write_buf_start = NULL;
+	uint64_t ecc_start;
 	void *erase_buf;
 	int rc = 0;
 
@@ -439,7 +542,7 @@ int blocklevel_smart_write(struct blocklevel_device *bl, uint64_t pos, const voi
 	if (rc)
 		return rc;
 
-	if (ecc_protected(bl, pos, len)) {
+	if (ecc_protected(bl, pos, len, &ecc_start)) {
 		FL_DBG("%s: region has ECC\n", __func__);
 
 		len = ecc_buffer_size(len);
@@ -591,26 +694,6 @@ static bool insert_bl_prot_range(struct blocklevel_range *ranges, struct bl_prot
 		ranges->prot = new_ranges;
 		ranges->n_prot++;
 		prot = new_ranges;
-	}
-
-	/* Probably only worth mergeing when we're low on space */
-	if (ranges->n_prot + 1 == ranges->total_prot) {
-		FL_DBG("%s: merging ranges\n", __func__);
-		/* Check to see if we can merge ranges */
-		for (i = 0; i < ranges->n_prot - 1; i++) {
-			if (prot[i].start + prot[i].len == prot[i + 1].start) {
-				int j;
-				FL_DBG("%s: merging 0x%" PRIx64 "..0x%" PRIx64 " with "
-						"0x%" PRIx64 "..0x%" PRIx64 "\n",
-						__func__, prot[i].start, prot[i].start + prot[i].len,
-						prot[i + 1].start, prot[i + 1].start + prot[i + 1].len);
-				prot[i].len += prot[i + 1].len;
-				for (j = i + 1; j < ranges->n_prot - 1; j++)
-					memcpy(&prot[j] , &prot[j + 1], sizeof(range));
-				ranges->n_prot--;
-				i--; /* Maybe the next one can merge too */
-			}
-		}
 	}
 
 	return true;

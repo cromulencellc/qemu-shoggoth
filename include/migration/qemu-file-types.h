@@ -25,6 +25,25 @@
 #ifndef QEMU_FILE_H
 #define QEMU_FILE_H
 
+typedef struct QEMUFilePublic QEMUFilePublic;
+
+struct QEMUFilePublic {
+    int last_error;
+};
+
+/*
+ * Get last error for stream f
+ *
+ * Return negative error value if there has been an error on previous
+ * operations, return 0 if no error happened.
+ *
+ */
+static inline int qemu_file_get_error(QEMUFile *f)
+{
+    QEMUFilePublic *fp = (QEMUFilePublic *)f;
+    return fp->last_error;
+}
+
 void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, size_t size);
 void qemu_put_byte(QEMUFile *f, int v);
 

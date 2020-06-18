@@ -18,11 +18,12 @@
 
 #include "qemu/osdep.h"
 #include "qom/cpu.h"
+#include "sysemu/hw_accel.h"
 #include "target-types.h"
 #include "qemu-memory.h"
 #include "cpu.h"
 
-bool qemu_get_virtual_memory(int cpu_id, uint64_t address, uint8_t size, uint8_t **data)
+bool qemu_get_virtual_memory(int cpu_id, uint64_t address, uint64_t size, uint8_t **data)
 {
     CPUState *cpu = qemu_get_cpu(cpu_id);
     if (cpu)
@@ -34,11 +35,11 @@ bool qemu_get_virtual_memory(int cpu_id, uint64_t address, uint8_t size, uint8_t
 
         CPUClass *cc = CPU_GET_CLASS(cpu);
         if (cc->memory_rw_debug) {
-            if(cc->memory_rw_debug(cpu, address, *data, size, 0) != 0){
+            if(cc->memory_rw_debug(cpu, address, *data, size, 0) < 0){
                 return false;
             }
         }else{
-            if(cpu_memory_rw_debug(cpu, address, *data, size, 0) != 0){
+            if(cpu_memory_rw_debug(cpu, address, *data, size, 0) < 0){
                 return false;
             }
         }
@@ -47,7 +48,7 @@ bool qemu_get_virtual_memory(int cpu_id, uint64_t address, uint8_t size, uint8_t
     return true;
 }
 
-bool qemu_set_virtual_memory(int cpu_id, uint64_t address, uint8_t size, uint8_t *data)
+bool qemu_set_virtual_memory(int cpu_id, uint64_t address, uint64_t size, uint8_t *data)
 {
     CPUState *cpu = qemu_get_cpu(cpu_id);
     if (cpu)
@@ -72,7 +73,7 @@ void qemu_get_physical_memory(uint64_t address, uint64_t size, uint8_t **data)
 {
     if(*data)
     {
-        // Use existing memory...
+        // Read into existing memory...
         cpu_physical_memory_read(address, *data, size);
     }else{
         // Get the pointer to physical memory in host memory.

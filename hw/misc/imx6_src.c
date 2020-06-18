@@ -130,6 +130,7 @@ static void imx6_clear_reset_bit(CPUState *cpu, run_on_cpu_data data)
     IMX6SRCState *s = ri->s;
 
     qemu_mutex_lock_iothread();
+
     s->regs[SRC_SCR] = deposit32(s->regs[SRC_SCR], ri->reset_bit, 1, 0);
     DPRINTF("reg[%s] <= 0x%" PRIx32 "\n",
             imx6_src_reg_name(SRC_SCR), s->regs[SRC_SCR]);

@@ -360,7 +360,7 @@ ata_try_dma(struct disk_op_s *op, int iswrite, int blocksize)
 {
     if (! CONFIG_ATA_DMA)
         return -1;
-    ASSERT16(); // behin ATA_DMA, needed on parisc to boot via ata
+    ASSERT16(); // behind ATA_DMA, needed on parisc to boot via ata
     u32 dest = (u32)op->buf_fl;
     if (dest & 1)
         // Need minimum alignment of 1.
@@ -1035,7 +1035,7 @@ ata_setup(void)
     if (!CONFIG_ATA)
         return;
 
-    dprintf(0, "init hard drives\n");
+    dprintf(3, "init hard drives\n");
 
     SpinupEnd = timer_calc(IDE_TIMEOUT);
     ata_scan();

@@ -22,6 +22,7 @@
 #include <device.h>
 #include "hdata.h"
 #include <inttypes.h>
+#include <mem_region-malloc.h>
 
 struct card_info {
 	const char *ccin; 	/* Customer card identification number */
@@ -221,6 +222,47 @@ static const struct card_info *card_info_lookup(char *ccin)
 	return NULL;
 }
 
+/* Discard trailing spaces and populate device tree */
+static struct dt_property *dt_add_prop_sanitize_val(struct dt_node *node,
+			     const char *name, const char *val, int vlen)
+{
+	char *prop = zalloc(vlen + 1);
+	int i;
+	struct dt_property *p = NULL;
+
+	if (!prop)
+		return p;
+
+	memcpy(prop, val, vlen);
+	for (i = vlen - 1; i >= 0; i--) {
+		if (prop[i] != 0x20) {
+			prop[i + 1] = '\0';
+			break;
+		}
+	}
+
+	if (i >= 0 && !dt_find_property(node, name))
+		p = dt_add_property_string(node, name, prop);
+
+	free(prop);
+	return p;
+}
+
+/*
+ * OpenPower system does not provide processor vendor name under FRU VPD.
+ * Parse processor module VPD to get vendor detail
+ */
+void dt_add_proc_vendor(struct dt_node *proc_node,
+			const void *mvpd, unsigned int mvpd_sz)
+{
+	const void *kw;
+	uint8_t sz;
+
+	kw = vpd_find(mvpd, mvpd_sz, "VINI", "VN", &sz);
+	if (kw)
+		dt_add_prop_sanitize_val(proc_node, "vendor", kw, sz);
+}
+
 /*
  * For OpenPOWER, we only decipher OPFR records. While OP HDAT have VINI
  * records too, populating the fields in there is optional. Also, there
@@ -235,27 +277,49 @@ static void vpd_opfr_parse(struct dt_node *node,
 	/* Vendor Name */
 	kw = vpd_find(fruvpd, fruvpd_sz, "OPFR", "VN", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "vendor", kw, sz);
+		dt_add_prop_sanitize_val(node, "vendor", kw, sz);
 
 	/* FRU Description */
 	kw = vpd_find(fruvpd, fruvpd_sz, "OPFR", "DR", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "description", kw, sz);
+		dt_add_prop_sanitize_val(node, "description", kw, sz);
 
 	/* Part number */
 	kw = vpd_find(fruvpd, fruvpd_sz, "OPFR", "VP", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "part-number", kw, sz);
+		dt_add_prop_sanitize_val(node, "part-number", kw, sz);
 
 	/* Serial number */
 	kw = vpd_find(fruvpd, fruvpd_sz, "OPFR", "VS", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "serial-number", kw, sz);
+		dt_add_prop_sanitize_val(node, "serial-number", kw, sz);
 
 	/* Build date in BCD */
 	kw = vpd_find(fruvpd, fruvpd_sz, "OPFR", "MB", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "build-date", kw, sz);
+		dt_add_prop_sanitize_val(node, "build-date", kw, sz);
+
+	return;
+}
+
+/*
+ * For CPUs, parse the VRML data.
+ */
+static void vpd_vrml_parse(struct dt_node *node,
+		const void *fruvpd, unsigned int fruvpd_sz)
+{
+	const void *kw;
+	uint8_t sz;
+
+	/* Part number */
+	kw = vpd_find(fruvpd, fruvpd_sz, "VRML", "PN", &sz);
+	if (kw)
+		dt_add_prop_sanitize_val(node, "part-number", kw, sz);
+
+	/* Serial number */
+	kw = vpd_find(fruvpd, fruvpd_sz, "VRML", "SN", &sz);
+	if (kw)
+		dt_add_prop_sanitize_val(node, "serial-number", kw, sz);
 
 	return;
 }
@@ -270,42 +334,47 @@ static void vpd_vini_parse(struct dt_node *node,
 	/* FRU Stocking Part Number */
 	kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "FN", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "fru-number", kw, sz);
+		dt_add_prop_sanitize_val(node, "fru-number", kw, sz);
 
 	/* Serial Number */
 	kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "SN", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "serial-number", kw, sz);
+		dt_add_prop_sanitize_val(node, "serial-number", kw, sz);
 
 	/* Part Number */
 	kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "PN", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "part-number", kw, sz);
+		dt_add_prop_sanitize_val(node, "part-number", kw, sz);
+
+	/* Vendor Name */
+	kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "VN", &sz);
+	if (kw)
+		dt_add_prop_sanitize_val(node, "vendor", kw, sz);
 
 	/* CCIN Extension */
 	kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "CE", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "ccin-extension", kw, sz);
+		dt_add_prop_sanitize_val(node, "ccin-extension", kw, sz);
 
 	/* HW Version info */
 	kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "HW", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "hw-version", kw, sz);
+		dt_add_prop_sanitize_val(node, "hw-version", kw, sz);
 
 	/* Card type info */
 	kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "CT", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "card-type", kw, sz);
+		dt_add_prop_sanitize_val(node, "card-type", kw, sz);
 
 	/* HW characteristics info */
 	kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "B3", &sz);
 	if (kw)
-		dt_add_property_nstr(node, "hw-characteristics", kw, sz);
+		dt_add_prop_sanitize_val(node, "hw-characteristics", kw, sz);
 
 	/* Customer Card Identification Number (CCIN) */
 	kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "CC", &sz);
 	if (kw) {
-		dt_add_property_nstr(node, "ccin", kw, sz);
+		dt_add_prop_sanitize_val(node, "ccin", kw, sz);
 
 		cinfo = card_info_lookup((char *)kw);
 		if (cinfo) {
@@ -314,7 +383,7 @@ static void vpd_vini_parse(struct dt_node *node,
 		} else {
 			kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "DR", &sz);
 			if (kw) {
-				dt_add_property_nstr(node,
+				dt_add_prop_sanitize_val(node,
 						     "description", kw, sz);
 			} else {
 				dt_add_property_string(node, "description", "Unknown");
@@ -341,6 +410,8 @@ void vpd_data_parse(struct dt_node *node, const void *fruvpd, u32 fruvpd_sz)
 {
 	if (vpd_find_record(fruvpd, fruvpd_sz, "OPFR", NULL))
 		vpd_opfr_parse(node, fruvpd, fruvpd_sz);
+	else if (vpd_find_record(fruvpd, fruvpd_sz, "VRML", NULL))
+		vpd_vrml_parse(node, fruvpd, fruvpd_sz);
 	else
 		vpd_vini_parse(node, fruvpd, fruvpd_sz);
 }
@@ -359,6 +430,8 @@ void dt_init_vpd_node(void)
 	dt_vpd = dt_new(dt_root, "vpd");
 	assert(dt_vpd);
 	dt_add_property_string(dt_vpd, "compatible", "ibm,opal-v3-vpd");
+	dt_add_property_cells(dt_vpd, "#size-cells", 0);
+	dt_add_property_cells(dt_vpd, "#address-cells", 1);
 
 	slca_hdr = get_hdif(&spira.ntuples.slca, SLCA_HDIF_SIG);
 	if (!slca_hdr) {
@@ -376,7 +449,7 @@ void dt_init_vpd_node(void)
 		/* Get SLCA entry */
 		entry = slca_get_entry(index);
 		if (!entry)
-			goto next_entry;
+			continue;
 
 		/*
 		 * A child entry is valid if all of the following criteria is met
@@ -418,6 +491,9 @@ void dt_init_vpd_node(void)
 		slca_vpd_add_loc_code(node, be16_to_cpu(entry->my_index));
 		/* Add FRU label */
 		dt_add_property(node, "fru-type", entry->fru_id, 2);
+		dt_add_property_cells(node, "reg", addr);
+		dt_add_property_cells(node, "#size-cells", 0);
+		dt_add_property_cells(node, "#address-cells", 1);
 
 next_entry:
 		/* Skip dups -- dups are contiguous */
@@ -514,13 +590,13 @@ static void sysvpd_parse_opp(const void *sysvpd, unsigned int sysvpd_sz)
 
 	v = vpd_find(sysvpd, sysvpd_sz, "OSYS", "MM", &sz);
 	if (v)
-		dt_add_property_nstr(dt_root, "model", v, sz);
+		dt_add_prop_sanitize_val(dt_root, "model", v, sz);
 	else
 		dt_add_property_string(dt_root, "model", "Unknown");
 
 	v = vpd_find(sysvpd, sysvpd_sz, "OSYS", "SS", &sz);
 	if (v)
-		dt_add_property_nstr(dt_root, "system-id", v, sz);
+		dt_add_prop_sanitize_val(dt_root, "system-id", v, sz);
 	else
 		dt_add_property_string(dt_root, "system-id", "Unknown");
 }
@@ -535,19 +611,19 @@ static void sysvpd_parse_legacy(const void *sysvpd, unsigned int sysvpd_sz)
 
 	model = vpd_find(sysvpd, sysvpd_sz, "VSYS", "TM", &sz);
 	if (model)
-		dt_add_property_nstr(dt_root, "model", model, sz);
+		dt_add_prop_sanitize_val(dt_root, "model", model, sz);
 	else
 		dt_add_property_string(dt_root, "model", "Unknown");
 
 	system_id = vpd_find(sysvpd, sysvpd_sz, "VSYS", "SE", &sz);
 	if (system_id)
-		dt_add_property_nstr(dt_root, "system-id", system_id, sz);
+		dt_add_prop_sanitize_val(dt_root, "system-id", system_id, sz);
 	else
 		dt_add_property_string(dt_root, "system-id", "Unknown");
 
 	brand = vpd_find(sysvpd, sysvpd_sz, "VSYS", "BR", &sz);
 	if (brand)
-		dt_add_property_nstr(dt_root, "system-brand", brand, sz);
+		dt_add_prop_sanitize_val(dt_root, "system-brand", brand, sz);
 	else
 		dt_add_property_string(dt_root, "brand", "Unknown");
 }

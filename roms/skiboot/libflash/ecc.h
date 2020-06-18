@@ -28,8 +28,12 @@ struct ecc64 {
 } __attribute__((__packed__));
 
 extern int memcpy_from_ecc(uint64_t *dst, struct ecc64 *src, uint64_t len);
+extern int memcpy_from_ecc_unaligned(uint64_t *dst, struct ecc64 *src, uint64_t len,
+		uint8_t alignment);
 
 extern int memcpy_to_ecc(struct ecc64 *dst, const uint64_t *src, uint64_t len);
+extern int memcpy_to_ecc_unaligned(struct ecc64 *dst, const uint64_t *src, uint64_t len,
+		uint8_t alignment);
 
 /*
  * Calculate the size of a buffer if ECC is added
@@ -61,6 +65,11 @@ static inline int ecc_buffer_size_check(uint64_t len)
 static inline uint64_t ecc_buffer_size_minus_ecc(uint64_t len)
 {
 	return len * BYTES_PER_ECC / (BYTES_PER_ECC + 1);
+}
+
+static inline uint64_t ecc_buffer_align(uint64_t start, uint64_t pos)
+{
+	return pos - ((pos - start) % (BYTES_PER_ECC + 1));
 }
 
 #endif

@@ -25,8 +25,8 @@
 #include "oshandler/ostypes.h"
 
 void notify_exec_instruction(CPUState *cs, uint64_t vaddr);
-void notify_read_memory(CPUState *cs, uint64_t paddr, uint8_t *value, int size);
-void notify_write_memory(CPUState *cs, uint64_t paddr, const uint8_t *value, int size);
+void notify_read_memory(CPUState *cs, uint64_t paddr, uint64_t vaddr, uint8_t *value, int size);
+void notify_write_memory(CPUState *cs, uint64_t paddr, uint64_t vaddr, const uint8_t *value, int size);
 void notify_breakpoint_hit(CPUState *cs, OSBreakpoint* bp);
 void notify_exception(int32_t exception);
 void notify_syscall(uint64_t number, ...);

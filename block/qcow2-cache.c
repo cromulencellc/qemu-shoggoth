@@ -46,32 +46,6 @@ struct Qcow2Cache {
     uint64_t                cache_clean_lru_counter;
 };
 
-static inline void qcow2_cache_table_pretty_print(Qcow2CachedTable *t)
-{
-    printf("Cache Table:\n");
-    printf("Offset: %.16lx\n", t->offset);
-    printf("LRU Counter: %.16lx\n", t->lru_counter);
-    printf("Reference Count: %d\n", t->ref);
-    printf("Dirty: %s\n", t->dirty ? "True" : "False");
-}
-
-void qcow2_cache_pretty_print(Qcow2Cache *c)
-{
-    printf("Cache Data:");
-    printf("Size: %d\n", c->size);
-    printf("Table Size: %d\n", c->table_size);
-    printf("Depends On Flush: %s\n", c->depends_on_flush ? "True" : "False");
-    printf("LRU Counter: %.16lx\n", c->lru_counter);
-    printf("Cache Clean LRU Counter: %.16lx\n", c->cache_clean_lru_counter);
-
-    int i;
-    for (i = 0; i < c->size; ++i)
-    {
-        printf("\n");
-        qcow2_cache_table_pretty_print(&c->entries[i]);
-    }
-}
-
 static inline void *qcow2_cache_get_table_addr(Qcow2Cache *c, int table)
 {
     return (uint8_t *) c->table_array + (size_t) table * c->table_size;
@@ -231,13 +205,13 @@ static int qcow2_cache_entry_flush(BlockDriverState *bs, Qcow2Cache *c, int i)
 
     if (c == s->refcount_block_cache) {
         ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_REFCOUNT_BLOCK,
-                c->entries[i].offset, c->table_size);
+                c->entries[i].offset, c->table_size, false);
     } else if (c == s->l2_table_cache) {
         ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_ACTIVE_L2,
-                c->entries[i].offset, c->table_size);
+                c->entries[i].offset, c->table_size, false);
     } else {
         ret = qcow2_pre_write_overlap_check(bs, 0,
-                c->entries[i].offset, c->table_size);
+                c->entries[i].offset, c->table_size, false);
     }
 
     if (ret < 0) {

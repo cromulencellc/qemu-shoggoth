@@ -29,27 +29,6 @@
 static struct phb *phbs[MAX_PHB_ID];
 int last_phb_id = 0;
 
-#define PCITRACE(_p, _bdfn, fmt, a...) \
-	prlog(PR_TRACE, "PHB#%04x:%02x:%02x.%x " fmt,	\
-	      (_p)->opal_id,				\
-	      ((_bdfn) >> 8) & 0xff,			\
-	      ((_bdfn) >> 3) & 0x1f, (_bdfn) & 0x7, ## a)
-#define PCIDBG(_p, _bdfn, fmt, a...) \
-	prlog(PR_DEBUG, "PHB#%04x:%02x:%02x.%x " fmt,	\
-	      (_p)->opal_id,				\
-	      ((_bdfn) >> 8) & 0xff,			\
-	      ((_bdfn) >> 3) & 0x1f, (_bdfn) & 0x7, ## a)
-#define PCINOTICE(_p, _bdfn, fmt, a...) \
-	prlog(PR_NOTICE, "PHB#%04x:%02x:%02x.%x " fmt,	\
-	      (_p)->opal_id,				\
-	      ((_bdfn) >> 8) & 0xff,			\
-	      ((_bdfn) >> 3) & 0x1f, (_bdfn) & 0x7, ## a)
-#define PCIERR(_p, _bdfn, fmt, a...) \
-	prlog(PR_ERR, "PHB#%04x:%02x:%02x.%x " fmt,	\
-	      (_p)->opal_id,				\
-	      ((_bdfn) >> 8) & 0xff,			\
-	      ((_bdfn) >> 3) & 0x1f, (_bdfn) & 0x7, ## a)
-
 /*
  * Generic PCI utilities
  */
@@ -358,7 +337,7 @@ static void pci_check_clear_freeze(struct phb *phb)
 
 	/* Retrieve the frozen state */
 	rc = phb->ops->eeh_freeze_status(phb, pe_number, &freeze_state,
-					 &pci_error_type, &sev, NULL);
+					 &pci_error_type, &sev);
 	if (rc)
 		return;
 	if (freeze_state == OPAL_EEH_STOPPED_NOT_FROZEN)
@@ -401,8 +380,10 @@ static void pci_slot_set_power_state(struct phb *phb,
 
 	if (state == PCI_SLOT_POWER_OFF) {
 		/* Bail if there're something connected */
-		if (!list_empty(&pd->children))
+		if (!list_empty(&pd->children)) {
+			PCIERR(phb, pd->bdfn, "Attempted to power off slot with attached devices!\n");
 			return;
+		}
 
 		pci_slot_add_flags(slot, PCI_SLOT_FLAG_BOOTUP);
 		rc = slot->ops.get_power_state(slot, &cur_state);
@@ -713,6 +694,37 @@ void pci_remove_bus(struct phb *phb, struct list_head *list)
 	}
 }
 
+static void pci_set_power_limit(struct pci_device *pd)
+{
+	uint32_t offset, val;
+	uint16_t caps;
+
+	offset = pci_cap(pd, PCI_CFG_CAP_ID_EXP, false);
+	if (!offset)
+		return; /* legacy dev */
+
+	pci_cfg_read16(pd->phb, pd->bdfn,
+			offset + PCICAP_EXP_CAPABILITY_REG, &caps);
+
+	if (!(caps & PCICAP_EXP_CAP_SLOT))
+		return; /* bridge has no slot capabilities */
+	if (!pd->slot || !pd->slot->power_limit)
+		return;
+
+	pci_cfg_read32(pd->phb, pd->bdfn, offset + PCICAP_EXP_SLOTCAP, &val);
+
+	val = SETFIELD(PCICAP_EXP_SLOTCAP_SPLSC, val, 0); /* 1W scale */
+	val = SETFIELD(PCICAP_EXP_SLOTCAP_SPLVA, val, pd->slot->power_limit);
+
+	pci_cfg_write32(pd->phb, pd->bdfn, offset + PCICAP_EXP_SLOTCAP, val);
+
+	/* update the cached copy in the slot */
+	pd->slot->slot_cap = val;
+
+	PCIDBG(pd->phb, pd->bdfn, "Slot power limit set to %dW\n",
+		pd->slot->power_limit);
+}
+
 /* Perform a recursive scan of the bus at bus_number populating
  * the list passed as an argument. This also performs the bus
  * numbering, so it returns the largest bus number that was
@@ -775,6 +787,12 @@ uint8_t pci_scan_bus(struct phb *phb, uint8_t bus, uint8_t max_bus,
 			       rc->secondary_bus);
 		pci_cfg_write8(phb, rc->bdfn, PCI_CFG_SUBORDINATE_BUS,
 			       rc->subordinate_bus);
+	}
+
+	/* set the power limit for any downstream slots while we're here */
+	list_for_each(list, pd, link) {
+		if (pd->is_bridge)
+			pci_set_power_limit(pd);
 	}
 
 	/*
@@ -878,7 +896,9 @@ uint8_t pci_scan_bus(struct phb *phb, uint8_t bus, uint8_t max_bus,
 		pci_cfg_write8(phb, pd->bdfn, PCI_CFG_SUBORDINATE_BUS, max_sub);
 		next_bus = max_sub + 1;
 
-		pci_slot_set_power_state(phb, pd, PCI_SLOT_POWER_OFF);
+		/* power off the slot if there's nothing below it */
+		if (list_empty(&pd->children))
+			pci_slot_set_power_state(phb, pd, PCI_SLOT_POWER_OFF);
 	}
 
 	return max_sub;
@@ -973,13 +993,13 @@ static void pci_reset_phb(void *data)
 	struct pci_slot *slot = phb->slot;
 	int64_t rc;
 
-	if (!slot || !slot->ops.freset) {
-		PCINOTICE(phb, 0, "Cannot issue fundamental reset\n");
+	if (!slot || !slot->ops.run_sm) {
+		PCINOTICE(phb, 0, "Cannot issue reset\n");
 		return;
 	}
 
 	pci_slot_add_flags(slot, PCI_SLOT_FLAG_BOOTUP);
-	rc = slot->ops.freset(slot);
+	rc = slot->ops.run_sm(slot);
 	while (rc > 0) {
 		PCITRACE(phb, 0, "Waiting %ld ms\n", tb_to_msecs(rc));
 		time_wait(rc);
@@ -987,7 +1007,7 @@ static void pci_reset_phb(void *data)
 	}
 	pci_slot_remove_flags(slot, PCI_SLOT_FLAG_BOOTUP);
 	if (rc < 0)
-		PCIERR(phb, 0, "Error %lld fundamental resetting\n", rc);
+		PCIDBG(phb, 0, "Error %lld resetting\n", rc);
 }
 
 static void pci_scan_phb(void *data)
@@ -1518,6 +1538,7 @@ static void pci_add_one_device_node(struct phb *phb,
 	uint32_t rev_class, vdid;
 	uint32_t reg[5];
 	uint8_t intpin;
+	bool is_pcie;
 	const uint32_t ranges_direct[] = {
 				/* 64-bit direct mapping. We know the bridges
 				 * don't cover the entire address space so
@@ -1529,14 +1550,14 @@ static void pci_add_one_device_node(struct phb *phb,
 	pci_cfg_read32(phb, pd->bdfn, 0, &vdid);
 	pci_cfg_read32(phb, pd->bdfn, PCI_CFG_REV_ID, &rev_class);
 	pci_cfg_read8(phb, pd->bdfn, PCI_CFG_INT_PIN, &intpin);
+	is_pcie = pci_has_cap(pd, PCI_CFG_CAP_ID_EXP, false);
 
 	/*
-	 * Quirk for IBM bridge bogus class on PCIe root complex.
-	 * Without it, the PCI DN won't be created for its downstream
-	 * devices in Linux.
+	 * Some IBM PHBs (p7ioc?) have an invalid PCI class code. Linux
+	 * uses prefers to read the class code from the DT rather than
+	 * re-reading config space we can hack around it here.
 	 */
-	if (pci_has_cap(pd, PCI_CFG_CAP_ID_EXP, false) &&
-	    parent_node == phb->dt_node)
+	if (is_pcie && parent_node == phb->dt_node)
 		rev_class = (rev_class & 0xff) | 0x6040000;
 	cname = pci_class_name(rev_class >> 8);
 
@@ -1548,8 +1569,12 @@ static void pci_add_one_device_node(struct phb *phb,
 			 cname, (pd->bdfn >> 3) & 0x1f);
 	pd->dn = np = dt_new(parent_node, name);
 
-	/* XXX FIXME: make proper "compatible" properties */
-	if (pci_has_cap(pd, PCI_CFG_CAP_ID_EXP, false)) {
+	/*
+	 * NB: ibm,pci-config-space-type is the PAPR way of indicating the
+	 * device has a 4KB config space. It's got nothing to do with the
+	 * standard Type 0/1 config spaces defined by PCI.
+	 */
+	if (is_pcie || phb->phb_type == phb_type_npu_v2_opencapi) {
 		snprintf(compat, MAX_NAME, "pciex%x,%x",
 			 vdid & 0xffff, vdid >> 16);
 		dt_add_property_cells(np, "ibm,pci-config-space-type", 1);
@@ -1602,7 +1627,7 @@ static void pci_add_one_device_node(struct phb *phb,
 	dt_add_property_cells(np, "#interrupt-cells", 1);
 
 	/* We want "device_type" for bridges */
-	if (pci_has_cap(pd, PCI_CFG_CAP_ID_EXP, false))
+	if (is_pcie)
 		dt_add_property_string(np, "device_type", "pciex");
 	else
 		dt_add_property_string(np, "device_type", "pci");
@@ -1648,70 +1673,6 @@ void pci_add_device_nodes(struct phb *phb,
 	}
 }
 
-static void __pci_reset(struct list_head *list)
-{
-	struct pci_device *pd;
-	struct pci_cfg_reg_filter *pcrf;
-	int i;
-
-	while ((pd = list_pop(list, struct pci_device, link)) != NULL) {
-		__pci_reset(&pd->children);
-		dt_free(pd->dn);
-		free(pd->slot);
-		while((pcrf = list_pop(&pd->pcrf, struct pci_cfg_reg_filter, link)) != NULL) {
-			free(pcrf);
-		}
-		for(i=0; i < 64; i++)
-			if (pd->cap[i].free_func)
-				pd->cap[i].free_func(pd->cap[i].data);
-		free(pd);
-	}
-}
-
-void pci_reset(void)
-{
-	unsigned int i;
-	struct pci_slot *slot;
-	int64_t rc;
-
-	prlog(PR_NOTICE, "PCI: Clearing all devices...\n");
-
-	/* XXX Do those in parallel (at least the power up
-	 * state machine could be done in parallel)
-	 */
-	for (i = 0; i < ARRAY_SIZE(phbs); i++) {
-		struct phb *phb = phbs[i];
-		if (!phb)
-			continue;
-		__pci_reset(&phb->devices);
-
-		slot = phb->slot;
-		if (!slot || !slot->ops.creset) {
-			PCINOTICE(phb, 0, "Can't do complete reset\n");
-		} else {
-			rc = slot->ops.creset(slot);
-			while (rc > 0) {
-				time_wait(rc);
-				rc = slot->ops.run_sm(slot);
-			}
-			if (rc < 0) {
-				PCIERR(phb, 0, "Complete reset failed, aborting"
-				               "fast reboot (rc=%lld)\n", rc);
-				if (platform.cec_reboot)
-					platform.cec_reboot();
-				while (true) {}
-			}
-		}
-
-		if (phb->ops->ioda_reset)
-			phb->ops->ioda_reset(phb, true);
-	}
-
-	/* Re-Initialize all discovered PCI slots */
-	pci_init_slots();
-
-}
-
 static void pci_do_jobs(void (*fn)(void *))
 {
 	struct cpu_job **jobs;
@@ -1744,7 +1705,7 @@ static void pci_do_jobs(void (*fn)(void *))
 	free(jobs);
 }
 
-void pci_init_slots(void)
+static void __pci_init_slots(void)
 {
 	unsigned int i;
 
@@ -1770,7 +1731,7 @@ void pci_init_slots(void)
 	if (platform.pci_probe_complete)
 		platform.pci_probe_complete();
 
-	prlog(PR_DEBUG, "PCI Summary:\n");
+	prlog(PR_NOTICE, "PCI Summary:\n");
 
 	for (i = 0; i < ARRAY_SIZE(phbs); i++) {
 		if (!phbs[i])
@@ -1787,6 +1748,60 @@ void pci_init_slots(void)
 
 		phbs[i]->ops->phb_final_fixup(phbs[i]);
 	}
+}
+
+static void __pci_reset(struct list_head *list)
+{
+	struct pci_device *pd;
+	struct pci_cfg_reg_filter *pcrf;
+	int i;
+
+	while ((pd = list_pop(list, struct pci_device, link)) != NULL) {
+		__pci_reset(&pd->children);
+		dt_free(pd->dn);
+		free(pd->slot);
+		while((pcrf = list_pop(&pd->pcrf, struct pci_cfg_reg_filter, link)) != NULL) {
+			free(pcrf);
+		}
+		for(i=0; i < 64; i++)
+			if (pd->cap[i].free_func)
+				pd->cap[i].free_func(pd->cap[i].data);
+		free(pd);
+	}
+}
+
+int64_t pci_reset(void)
+{
+	unsigned int i;
+
+	prlog(PR_NOTICE, "PCI: Clearing all devices...\n");
+
+	for (i = 0; i < ARRAY_SIZE(phbs); i++) {
+		struct phb *phb = phbs[i];
+		if (!phb)
+			continue;
+		__pci_reset(&phb->devices);
+
+		pci_slot_set_state(phb->slot, PCI_SLOT_STATE_CRESET_START);
+	}
+
+	/* Do init and discovery of PCI slots in parallel */
+	__pci_init_slots();
+
+	return 0;
+}
+
+void pci_init_slots(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(phbs); i++) {
+		struct phb *phb = phbs[i];
+		if (!phb)
+			continue;
+		pci_slot_set_state(phb->slot, PCI_SLOT_STATE_FRESET_POWER_OFF);
+	}
+	__pci_init_slots();
 }
 
 /*
@@ -1889,6 +1904,22 @@ static int __pci_restore_bridge_buses(struct phb *phb,
 void pci_restore_bridge_buses(struct phb *phb, struct pci_device *pd)
 {
 	pci_walk_dev(phb, pd, __pci_restore_bridge_buses, NULL);
+}
+
+void pci_restore_slot_bus_configs(struct pci_slot *slot)
+{
+	/*
+	 * We might lose the bus numbers during the reset operation
+	 * and we need to restore them. Otherwise, some adapters (e.g.
+	 * IPR) can't be probed properly by the kernel. We don't need
+	 * to restore bus numbers for every kind of reset, however,
+	 * it's not harmful to always restore the bus numbers, which
+	 * simplifies the logic.
+	 */
+	pci_restore_bridge_buses(slot->phb, slot->pd);
+	if (slot->phb->ops->device_init)
+		pci_walk_dev(slot->phb, slot->pd,
+			     slot->phb->ops->device_init, NULL);
 }
 
 struct pci_cfg_reg_filter *pci_find_cfg_reg_filter(struct pci_device *pd,

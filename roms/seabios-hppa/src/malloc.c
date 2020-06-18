@@ -232,7 +232,7 @@ zonelow_expand(u32 size, u32 align, struct allocinfo_s *fill)
  ****************************************************************/
 
 // Allocate physical memory from the given zone and track it as a PMM allocation
-u32
+unsigned long
 malloc_palloc(struct zone_s *zone, u32 size, u32 align)
 {
     ASSERT32FLAT();
@@ -263,7 +263,7 @@ malloc_palloc(struct zone_s *zone, u32 size, u32 align)
 
 // Allocate virtual memory from the given zone
 void * __malloc
-_malloc(struct zone_s *zone, u32 size, u32 align)
+x86_malloc(struct zone_s *zone, u32 size, u32 align)
 {
     return memremap(malloc_palloc(zone, size, align), size);
 }

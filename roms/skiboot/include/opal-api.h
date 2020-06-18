@@ -1,4 +1,4 @@
-/* Copyright 2013-2014 IBM Corp.
+/* Copyright 2013-2018 IBM Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -214,7 +214,25 @@
 #define OPAL_SET_POWER_SHIFT_RATIO		155
 #define OPAL_SENSOR_GROUP_CLEAR			156
 #define OPAL_PCI_SET_P2P			157
-#define OPAL_LAST				157
+#define OPAL_QUIESCE				158
+#define OPAL_NPU_SPA_SETUP			159
+#define OPAL_NPU_SPA_CLEAR_CACHE		160
+#define OPAL_NPU_TL_SET				161
+#define OPAL_SENSOR_READ_U64			162
+#define OPAL_SENSOR_GROUP_ENABLE		163
+#define OPAL_PCI_GET_PBCQ_TUNNEL_BAR		164
+#define OPAL_PCI_SET_PBCQ_TUNNEL_BAR		165
+#define OPAL_HANDLE_HMI2			166
+#define OPAL_NX_COPROC_INIT			167
+#define OPAL_NPU_SET_RELAXED_ORDER		168
+#define OPAL_NPU_GET_RELAXED_ORDER		169
+#define OPAL_LAST				169
+
+#define QUIESCE_HOLD			1 /* Spin all calls at entry */
+#define QUIESCE_REJECT			2 /* Fail all calls with OPAL_BUSY */
+#define QUIESCE_LOCK_BREAK		3 /* Set to ignore locks. */
+#define QUIESCE_RESUME			4 /* Un-quiesce */
+#define QUIESCE_RESUME_FAST_REBOOT	5 /* Un-quiesce, fast reboot */
 
 /* Device tree flags */
 
@@ -754,6 +772,15 @@ struct OpalHMIEvent {
 	} u;
 };
 
+/* OPAL_HANDLE_HMI2 out_flags */
+enum {
+	OPAL_HMI_FLAGS_TB_RESYNC	= (1ull << 0), /* Timebase has been resynced */
+	OPAL_HMI_FLAGS_DEC_LOST		= (1ull << 1), /* DEC lost, needs to be reprogrammed */
+	OPAL_HMI_FLAGS_HDEC_LOST	= (1ull << 2), /* HDEC lost, needs to be reprogrammed */
+	OPAL_HMI_FLAGS_TOD_TB_FAIL	= (1ull << 3), /* TOD/TB recovery failed. */
+	OPAL_HMI_FLAGS_NEW_EVENT	= (1ull << 63), /* An event has been created */
+};
+
 enum {
 	OPAL_P7IOC_DIAG_TYPE_NONE	= 0,
 	OPAL_P7IOC_DIAG_TYPE_RGC	= 1,
@@ -1054,6 +1081,11 @@ enum opal_prd_msg_type {
 	OPAL_PRD_MSG_TYPE_FIRMWARE_RESPONSE, /* HBRT <-- OPAL */
 	OPAL_PRD_MSG_TYPE_FIRMWARE_NOTIFY, /* HBRT <-- OPAL */
 	OPAL_PRD_MSG_TYPE_SBE_PASSTHROUGH, /* HBRT <-- OPAL */
+	OPAL_PRD_MSG_TYPE_FSP_OCC_RESET, /* HBRT <-- OPAL */
+	OPAL_PRD_MSG_TYPE_FSP_OCC_RESET_STATUS, /* HBRT --> OPAL */
+	OPAL_PRD_MSG_TYPE_CORE_SPECIAL_WAKEUP, /* HBRT --> OPAL */
+	OPAL_PRD_MSG_TYPE_FSP_OCC_LOAD_START, /* HBRT <-- OPAL */
+	OPAL_PRD_MSG_TYPE_FSP_OCC_LOAD_START_STATUS, /* HBRT --> OPAL */
 };
 
 struct opal_prd_msg_header {
@@ -1101,6 +1133,14 @@ struct opal_prd_msg {
 		struct {
 			__be64	chip;
 		} sbe_passthrough;
+		struct {
+			__be64 chip;
+			__be64 status; /* 0 SUCCESS */
+		} fsp_occ_reset_status;
+		struct {
+			__be32 core;
+			__be32 mode;
+		} spl_wakeup;
 	};
 };
 
@@ -1233,6 +1273,7 @@ enum {
 /* Flags for OPAL_XIVE_GET/SET_VP_INFO */
 enum {
 	OPAL_XIVE_VP_ENABLED		= 0x00000001,
+	OPAL_XIVE_VP_SINGLE_ESCALATION	= 0x00000002,
 };
 
 /* "Any chip" replacement for chip ID for allocation functions */

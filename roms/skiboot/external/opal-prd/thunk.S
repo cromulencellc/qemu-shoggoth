@@ -100,6 +100,7 @@ call_##name:					;\
 	CALL_THUNK(reset_pm_complex, 19)
 	CALL_THUNK(get_ipoll_events, 20)
 	CALL_THUNK(firmware_notify, 21)
+	CALL_THUNK(prepare_hbrt_update, 22)
 
 	.globl call_hbrt_init
 call_hbrt_init:
@@ -118,7 +119,7 @@ call_le:
 	std %r0,(32+16)(%r1)
 
 	/* Branch to original function */
-	mtlr	%r11
+	mtlr	%r12
 	blrl
 
 	/* Restore stack and LR */
@@ -136,7 +137,7 @@ call_le:
 	/* Callback from HBRT. There is one entry point per function.
 	 *
 	 * We assume the proper r2 is already set via the OPD, so we grab our
-	 * target function pointer in r11 and jump to call_le
+	 * target function pointer in r12 and jump to call_le
 	 */
 #define CALLBACK_THUNK(name)							 \
 	.pushsection ".text","ax" 						;\
@@ -145,7 +146,7 @@ name##_thunk:									;\
 	.long 0x00000038 | le_si16(__NR_switch_endian)				;\
 			/* byteswapped li %r0,__NR_switch_endian */		;\
 	.long 0x02000044 /* byteswapped sc */					;\
-	ld %r11,name@got(%r2)							;\
+	ld %r12,name@got(%r2)							;\
 	b call_le								;\
 	.popsection								;\
 	.pushsection ".data.thunk_opd","aw" 					;\
@@ -183,7 +184,7 @@ hinterface:
 	DISABLED_THUNK(hservice_lid_load)
 	DISABLED_THUNK(hservice_lid_unload)
 	CALLBACK_THUNK(hservice_get_reserved_mem)
-	DISABLED_THUNK(hservice_wakeup)
+	CALLBACK_THUNK(hservice_wakeup)
 	CALLBACK_THUNK(hservice_nanosleep)
 	DISABLED_THUNK(hservice_report_occ_failure)
 	CALLBACK_THUNK(hservice_clock_gettime)

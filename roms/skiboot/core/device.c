@@ -494,7 +494,10 @@ struct dt_property *dt_add_property_string(struct dt_node *node,
 					   const char *name,
 					   const char *value)
 {
-	return dt_add_property(node, name, value, strlen(value)+1);
+	size_t len = 0;
+	if (value)
+		len = strlen(value) + 1;
+	return dt_add_property(node, name, value, len);
 }
 
 struct dt_property *dt_add_property_nstr(struct dt_node *node,
@@ -598,6 +601,13 @@ u32 dt_property_get_cell(const struct dt_property *prop, u32 index)
 	return fdt32_to_cpu(((const u32 *)prop->prop)[index]);
 }
 
+void dt_property_set_cell(struct dt_property *prop, u32 index, u32 val)
+{
+	assert(prop->len >= (index+1)*sizeof(u32));
+	/* Always aligned, so this works. */
+	((u32 *)prop->prop)[index] = cpu_to_fdt32(val);
+}
+
 /* First child of this node. */
 struct dt_node *dt_first(const struct dt_node *root)
 {
@@ -608,6 +618,15 @@ struct dt_node *dt_first(const struct dt_node *root)
 struct dt_node *dt_next(const struct dt_node *root,
 			const struct dt_node *prev)
 {
+	if (!prev) {
+		struct dt_node *first = dt_first(root);
+
+		if (!first)
+			return NULL;
+		else
+			return first;
+	}
+
 	/* Children? */
 	if (!list_empty(&prev->children))
 		return dt_first(prev);
@@ -719,10 +738,9 @@ struct dt_node *dt_find_compatible_node(struct dt_node *root,
 					struct dt_node *prev,
 					const char *compat)
 {
-	struct dt_node *node;
+	struct dt_node *node = prev;
 
-	node = prev ? dt_next(root, prev) : root;
-	for (; node; node = dt_next(root, node))
+	while ((node = dt_next(root, node)))
 		if (dt_node_is_compatible(node, compat))
 			return node;
 	return NULL;
@@ -940,7 +958,7 @@ u64 dt_get_address(const struct dt_node *node, unsigned int index,
 	return dt_get_number(p->prop + pos, na);
 }
 
-static u32 __dt_get_chip_id(const struct dt_node *node)
+u32 __dt_get_chip_id(const struct dt_node *node)
 {
 	const struct dt_property *prop;
 
@@ -964,10 +982,9 @@ struct dt_node *dt_find_compatible_node_on_chip(struct dt_node *root,
 						const char *compat,
 						uint32_t chip_id)
 {
-	struct dt_node *node;
+	struct dt_node *node = prev;
 
-	node = prev ? dt_next(root, prev) : root;
-	for (; node; node = dt_next(root, node)) {
+	while ((node = dt_next(root, node))) {
 		u32 cid = __dt_get_chip_id(node);
 		if (cid == chip_id &&
 		    dt_node_is_compatible(node, compat))

@@ -283,9 +283,11 @@ int scsi_sequential_scan(struct drive_s *tmp_drive, u32 maxluns,
 
 // Validate drive, find block size / sector count, and register drive.
 int
-scsi_drive_setup(struct drive_s *drive, const char *s, int prio)
+scsi_drive_setup(struct drive_s *drive, const char *s, int prio, u8 target, u8 lun)
 {
     ASSERT32FLAT();
+    drive->target = target;
+    drive->lun = lun;
     struct disk_op_s dop;
     memset(&dop, 0, sizeof(dop));
     dop.drive_fl = drive;

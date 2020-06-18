@@ -26,6 +26,8 @@
 #include "exec/memattrs.h"
 #include "qapi/qapi-types-run-state.h"
 #include "qemu/bitmap.h"
+#include "qemu/fprintf-fn.h"
+#include "qemu/rcu_queue.h"
 #include "qemu/queue.h"
 #include "qemu/thread.h"
 #include "ra-types.h"
@@ -102,9 +104,21 @@ struct TranslationBlock;
  * @get_arch_id: Callback for getting architecture-dependent CPU ID.
  * @get_paging_enabled: Callback for inquiring whether paging is enabled.
  * @get_memory_mapping: Callback for obtaining the memory mappings.
- * @set_pc: Callback for setting the Program Counter register.
+ * @set_pc: Callback for setting the Program Counter register. This
+ *       should have the semantics used by the target architecture when
+ *       setting the PC from a source such as an ELF file entry point;
+ *       for example on Arm it will also set the Thumb mode bit based
+ *       on the least significant bit of the new PC value.
+ *       If the target behaviour here is anything other than "set
+ *       the PC register to the value passed in" then the target must
+ *       also implement the synchronize_from_tb hook.
  * @synchronize_from_tb: Callback for synchronizing state from a TCG
- * #TranslationBlock.
+ *       #TranslationBlock. This is called when we abandon execution
+ *       of a TB before starting it, and must set all parts of the CPU
+ *       state which the previous TB in the chain may not have updated.
+ *       This always includes at least the program counter; some targets
+ *       will need to do more. If this hook is not implemented then the
+ *       default is to call @set_pc(tb->pc).
  * @handle_mmu_fault: Callback for handling an MMU fault.
  * @get_phys_page_debug: Callback for obtaining a physical address.
  * @get_phys_page_attrs_debug: Callback for obtaining a physical address and the
@@ -207,7 +221,6 @@ typedef struct CPUClass {
     const struct VMStateDescription *vmsd;
     const char *gdb_core_xml_file;
     gchar * (*gdb_arch_name)(CPUState *cpu);
-
     const char * (*gdb_get_dynamic_xml)(CPUState *cpu, const char *xmlname);
     void (*cpu_exec_enter)(CPUState *cpu);
     void (*cpu_exec_exit)(CPUState *cpu);
@@ -285,6 +298,11 @@ struct qemu_work_item;
 /**
  * CPUState:
  * @cpu_index: CPU index (informative).
+ * @cluster_index: Identifies which cluster this CPU is in.
+ *   For boards which don't define clusters or for "loose" CPUs not assigned
+ *   to a cluster this will be UNASSIGNED_CLUSTER_INDEX; otherwise it will
+ *   be the same as the cluster-id property of the CPU object's TYPE_CPU_CLUSTER
+ *   QOM parent.
  * @nr_cores: Number of cores within this CPU package.
  * @nr_threads: Number of threads within this CPU.
  * @running: #true if CPU is currently running (lockless).
@@ -381,9 +399,9 @@ struct CPUState {
     QTAILQ_ENTRY(CPUState) node;
 
     /* ice debug support */
-    QTAILQ_HEAD(breakpoints_head, CPUBreakpoint) breakpoints;
+    QTAILQ_HEAD(, CPUBreakpoint) breakpoints;
 
-    QTAILQ_HEAD(watchpoints_head, CPUWatchpoint) watchpoints;
+    QTAILQ_HEAD(, CPUWatchpoint) watchpoints;
     CPUWatchpoint *watchpoint_hit;
 
     void *opaque;
@@ -393,6 +411,12 @@ struct CPUState {
      */
     uintptr_t mem_io_pc;
     vaddr mem_io_vaddr;
+    /*
+     * This is only needed for the legacy cpu_unassigned_access() hook;
+     * when all targets using it have been converted to use
+     * cpu_transaction_failed() instead it can be removed.
+     */
+    MMUAccessType mem_io_access_type;
 
     int kvm_fd;
     struct KVMState *kvm_state;
@@ -404,6 +428,7 @@ struct CPUState {
 
     /* TODO Move common fields from CPUArchState here. */
     int cpu_index;
+    int cluster_index;
     uint32_t halted;
     uint32_t can_do_io;
     int32_t exception_index;
@@ -429,12 +454,6 @@ struct CPUState {
 
     struct hax_vcpu_state *hax_vcpu;
 
-    /* The pending_tlb_flush flag is set and cleared atomically to
-     * avoid potential races. The aim of the flag is to avoid
-     * unnecessary flushes.
-     */
-    uint16_t pending_tlb_flush;
-
     int hvf_fd;
     Object *rapid_analysis;
 
@@ -443,15 +462,14 @@ struct CPUState {
     GArray *iommu_notifiers;
 };
 
-QTAILQ_HEAD(CPUTailQ, CPUState);
-extern struct CPUTailQ cpus;
-#define CPU_NEXT(cpu) QTAILQ_NEXT(cpu, node)
-#define CPU_FOREACH(cpu) QTAILQ_FOREACH(cpu, &cpus, node)
+typedef QTAILQ_HEAD(CPUTailQ, CPUState) CPUTailQ;
+extern CPUTailQ cpus;
+
+#define first_cpu        QTAILQ_FIRST_RCU(&cpus)
+#define CPU_NEXT(cpu)    QTAILQ_NEXT_RCU(cpu, node)
+#define CPU_FOREACH(cpu) QTAILQ_FOREACH_RCU(cpu, &cpus, node)
 #define CPU_FOREACH_SAFE(cpu, next_cpu) \
-    QTAILQ_FOREACH_SAFE(cpu, &cpus, node, next_cpu)
-#define CPU_FOREACH_REVERSE(cpu) \
-    QTAILQ_FOREACH_REVERSE(cpu, &cpus, CPUTailQ, node)
-#define first_cpu QTAILQ_FIRST(&cpus)
+    QTAILQ_FOREACH_SAFE_RCU(cpu, &cpus, node, next_cpu)
 
 extern __thread CPUState *current_cpu;
 
@@ -750,6 +768,7 @@ bool cpu_is_stopped(CPUState *cpu);
  * @cpu: The vCPU to run on.
  * @func: The function to be executed.
  * @data: Data to pass to the function.
+ * @mutex: Mutex to release while waiting for @func to run.
  *
  * Used internally in the implementation of run_on_cpu.
  */
@@ -865,7 +884,7 @@ extern CPUInterruptHandler cpu_interrupt_handler;
 /**
  * cpu_interrupt:
  * @cpu: The CPU to set an interrupt on.
- * @mask: The interupts to set.
+ * @mask: The interrupts to set.
  *
  * Invokes the interrupt handler.
  */
@@ -1098,6 +1117,17 @@ void cpu_exec_initfn(CPUState *cpu);
 void cpu_exec_realizefn(CPUState *cpu, Error **errp);
 void cpu_exec_unrealizefn(CPUState *cpu);
 
+/**
+ * target_words_bigendian:
+ * Returns true if the (default) endianness of the target is big endian,
+ * false otherwise. Note that in target-specific code, you can use
+ * TARGET_WORDS_BIGENDIAN directly instead. On the other hand, common
+ * code should normally never need to know about the endianness of the
+ * target, so please do *not* use this function unless you know very well
+ * what you are doing!
+ */
+bool target_words_bigendian(void);
+
 #ifdef NEED_CPU_H
 
 #ifdef CONFIG_SOFTMMU
@@ -1117,5 +1147,6 @@ extern const struct VMStateDescription vmstate_cpu_common;
 #endif /* NEED_CPU_H */
 
 #define UNASSIGNED_CPU_INDEX -1
+#define UNASSIGNED_CLUSTER_INDEX -1
 
 #endif

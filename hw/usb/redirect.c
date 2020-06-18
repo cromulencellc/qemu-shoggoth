@@ -1494,6 +1494,11 @@ static void usbredir_check_bulk_receiving(USBRedirDevice *dev)
     for (i = EP2I(USB_DIR_IN); i < MAX_ENDPOINTS; i++) {
         dev->endpoint[i].bulk_receiving_enabled = 0;
     }
+
+    if (dev->interface_info.interface_count == NO_INTERFACE_INFO) {
+        return;
+    }
+
     for (i = 0; i < dev->interface_info.interface_count; i++) {
         quirks = usb_get_quirks(dev->device_info.vendor_id,
                                 dev->device_info.product_id,
@@ -1728,6 +1733,7 @@ static void usbredir_ep_info(void *priv,
     USBRedirDevice *dev = priv;
     int i;
 
+    assert(dev != NULL);
     for (i = 0; i < MAX_ENDPOINTS; i++) {
         dev->endpoint[i].type = ep_info->type[i];
         dev->endpoint[i].interval = ep_info->interval[i];
@@ -2125,7 +2131,7 @@ static int usbredir_post_load(void *priv, int version_id)
 {
     USBRedirDevice *dev = priv;
 
-    if (dev->parser == NULL) {
+    if (dev == NULL || dev->parser == NULL) {
         return 0;
     }
 
@@ -2155,7 +2161,7 @@ static int usbredir_post_load(void *priv, int version_id)
 
 /* For usbredirparser migration */
 static int usbredir_put_parser(QEMUFile *f, void *priv, size_t unused,
-                               VMStateField *field, QJSON *vmdesc)
+                               const VMStateField *field, QJSON *vmdesc)
 {
     USBRedirDevice *dev = priv;
     uint8_t *data;
@@ -2178,7 +2184,7 @@ static int usbredir_put_parser(QEMUFile *f, void *priv, size_t unused,
 }
 
 static int usbredir_get_parser(QEMUFile *f, void *priv, size_t unused,
-                               VMStateField *field)
+                               const VMStateField *field)
 {
     USBRedirDevice *dev = priv;
     uint8_t *data;
@@ -2222,7 +2228,7 @@ static const VMStateInfo usbredir_parser_vmstate_info = {
 
 /* For buffered packets (iso/irq) queue migration */
 static int usbredir_put_bufpq(QEMUFile *f, void *priv, size_t unused,
-                              VMStateField *field, QJSON *vmdesc)
+                              const VMStateField *field, QJSON *vmdesc)
 {
     struct endp_data *endp = priv;
     USBRedirDevice *dev = endp->dev;
@@ -2245,7 +2251,7 @@ static int usbredir_put_bufpq(QEMUFile *f, void *priv, size_t unused,
 }
 
 static int usbredir_get_bufpq(QEMUFile *f, void *priv, size_t unused,
-                              VMStateField *field)
+                              const VMStateField *field)
 {
     struct endp_data *endp = priv;
     USBRedirDevice *dev = endp->dev;
@@ -2349,7 +2355,7 @@ static const VMStateDescription usbredir_ep_vmstate = {
 
 /* For PacketIdQueue migration */
 static int usbredir_put_packet_id_q(QEMUFile *f, void *priv, size_t unused,
-                                    VMStateField *field, QJSON *vmdesc)
+                                    const VMStateField *field, QJSON *vmdesc)
 {
     struct PacketIdQueue *q = priv;
     USBRedirDevice *dev = q->dev;
@@ -2368,7 +2374,7 @@ static int usbredir_put_packet_id_q(QEMUFile *f, void *priv, size_t unused,
 }
 
 static int usbredir_get_packet_id_q(QEMUFile *f, void *priv, size_t unused,
-                                    VMStateField *field)
+                                    const VMStateField *field)
 {
     struct PacketIdQueue *q = priv;
     USBRedirDevice *dev = q->dev;

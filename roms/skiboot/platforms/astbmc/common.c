@@ -120,11 +120,15 @@ static int astbmc_fru_init(void)
 
 void astbmc_init(void)
 {
+	/* Register the BT interface with the IPMI layer
+	 *
+	 * Initialise this first to enable PNOR access
+	 */
+	bt_init();
+
 	/* Initialize PNOR/NVRAM */
 	pnor_init();
 
-	/* Register the BT interface with the IPMI layer */
-	bt_init();
 	/* Initialize elog */
 	elog_init();
 	ipmi_sel_init();
@@ -134,8 +138,8 @@ void astbmc_init(void)
 	astbmc_fru_init();
 	ipmi_sensor_init();
 
-	/* Preload PNOR VERSION section */
-	flash_fw_version_preload();
+	/* Request BMC information */
+	ipmi_get_bmc_info_request();
 
 	/* As soon as IPMI is up, inform BMC we are in "S0" */
 	ipmi_set_power_state(IPMI_PWR_SYS_S0_WORKING, IPMI_PWR_NOCHANGE);
@@ -147,9 +151,6 @@ void astbmc_init(void)
 
 	/* Setup UART console for use by Linux via OPAL API */
 	set_opal_console(&uart_opal_con);
-
-	/* Add ibm,firmware-versions node */
-	flash_dt_add_fw_version();
 }
 
 int64_t astbmc_ipmi_power_down(uint64_t request)
@@ -207,8 +208,16 @@ static void astbmc_fixup_dt_mbox(struct dt_node *lpc)
 	struct dt_node *mbox;
 	char namebuf[32];
 
-	/* All P9 machines have this and no earlier machines do */
-	if (proc_gen != proc_gen_p9)
+	if (!lpc)
+		return;
+
+	/*
+	 * P9 machines always use hiomap, either by ipmi or mbox. P8 machines
+	 * can indicate they support mbox using the scratch register, or ipmi
+	 * by configuring the hiomap ipmi command. If neither are configured
+	 * for P8 then skiboot will drive the flash controller directly.
+	 */
+	if (proc_gen != proc_gen_p9 && !ast_scratch_reg_is_mbox())
 		return;
 
 	/* First check if the mbox interface is already there */
@@ -308,7 +317,7 @@ static void astbmc_fixup_bmc_sensors(void)
 	}
 }
 
-static void astbmc_fixup_dt(void)
+static struct dt_node *dt_find_primary_lpc(void)
 {
 	struct dt_node *n, *primary_lpc = NULL;
 
@@ -326,6 +335,15 @@ static void astbmc_fixup_dt(void)
 			break;
 	}
 
+	return primary_lpc;
+}
+
+static void astbmc_fixup_dt(void)
+{
+	struct dt_node *primary_lpc;
+
+	primary_lpc = dt_find_primary_lpc();
+
 	if (!primary_lpc)
 		return;
 
@@ -335,14 +353,12 @@ static void astbmc_fixup_dt(void)
 	/* BT is not in HB either */
 	astbmc_fixup_dt_bt(primary_lpc);
 
-	/* MBOX is not in HB */
-	astbmc_fixup_dt_mbox(primary_lpc);
-
 	/* The pel logging code needs a system-id property to work so
 	   make sure we have one. */
 	astbmc_fixup_dt_system_id();
 
-	astbmc_fixup_bmc_sensors();
+	if (proc_gen == proc_gen_p8)
+		astbmc_fixup_bmc_sensors();
 }
 
 static void astbmc_fixup_psi_bar(void)
@@ -364,13 +380,31 @@ static void astbmc_fixup_psi_bar(void)
 		return;
 
 	/* Hard wire ... yuck */
-	psibar = 0x3fffe80000001;
+	psibar = 0x3fffe80000001UL;
 
 	printf("PLAT: Fixing up PSI BAR on chip %d BAR=%llx\n",
 	       chip->id, psibar);
 
 	/* Now write it */
 	xscom_write(chip->id, 0x201090A, psibar);
+}
+
+static void astbmc_fixup_uart(void)
+{
+	/*
+	 * Depending on which image we are running, it may be configuring the
+	 * virtual UART or not.  Check if VUART is enabled and use SIO if not.
+	 * We also correct the configuration of VUART as some BMC images don't
+	 * setup the interrupt properly
+	 */
+	if (ast_is_vuart1_enabled()) {
+		printf("PLAT: Using virtual UART\n");
+		ast_disable_sio_uart1();
+		ast_setup_vuart1(UART_IO_BASE, UART_LPC_IRQ);
+	} else {
+		printf("PLAT: Using SuperIO UART\n");
+		ast_setup_sio_uart1(UART_IO_BASE, UART_LPC_IRQ);
+	}
 }
 
 void astbmc_early_init(void)
@@ -384,44 +418,85 @@ void astbmc_early_init(void)
 	/* Send external interrupts to me */
 	psi_set_external_irq_policy(EXTERNAL_IRQ_POLICY_SKIBOOT);
 
-	/* Initialize AHB accesses via AST2400 */
-	ast_io_init();
+	if (ast_sio_init()) {
+		if (ast_io_init()) {
+			astbmc_fixup_uart();
+			ast_setup_ibt(BT_IO_BASE, BT_LPC_IRQ);
+		} else
+			prerror("PLAT: AST IO initialisation failed!\n");
 
-	/*
-	 * Depending on which image we are running, it may be configuring
-	 * the virtual UART or not. Check if VUART is enabled and use
-	 * SIO if not. We also correct the configuration of VUART as some
-	 * BMC images don't setup the interrupt properly
-	 */
-	if (ast_is_vuart1_enabled()) {
-		printf("PLAT: Using virtual UART\n");
-		ast_disable_sio_uart1();
-		ast_setup_vuart1(UART_IO_BASE, UART_LPC_IRQ);
+		/*
+		 * P9 prefers IPMI for HIOMAP but will use MBOX if IPMI is not
+		 * supported. P8 either uses IPMI HIOMAP or direct IO, and
+		 * never MBOX. Thus only populate the MBOX node on P9 to allow
+		 * fallback.
+		 */
+		if (proc_gen == proc_gen_p9) {
+			astbmc_fixup_dt_mbox(dt_find_primary_lpc());
+			ast_setup_sio_mbox(MBOX_IO_BASE, MBOX_LPC_IRQ);
+		}
 	} else {
-		printf("PLAT: Using SuperIO UART\n");
-		ast_setup_sio_uart1(UART_IO_BASE, UART_LPC_IRQ);
+		/*
+		 * This may or may not be an error depending on if we set up
+		 * hiomap or not. In the old days it *was* an error, but now
+		 * with the way we configure the BMC hardware, this is actually
+		 * the not error case.
+		 */
+		prlog(PR_INFO, "PLAT: AST SIO unavailable!\n");
 	}
-
-	/* Similarly, some BMCs don't configure the BT interrupt properly */
-	ast_setup_ibt(BT_IO_BASE, BT_LPC_IRQ);
-
-	ast_setup_sio_mbox(MBOX_IO_BASE, MBOX_LPC_IRQ);
 
 	/* Setup UART and use it as console */
 	uart_init();
 
-	mbox_init();
-
 	prd_init();
 }
 
-const struct bmc_platform astbmc_ami = {
-	.name = "AMI",
-	.ipmi_oem_partial_add_esel   = IPMI_CODE(0x32, 0xf0),
+void astbmc_exit(void)
+{
+	ipmi_wdt_final_reset();
+}
+
+const struct bmc_sw_config bmc_sw_ami = {
+	.ipmi_oem_partial_add_esel   = IPMI_CODE(0x3a, 0xf0),
 	.ipmi_oem_pnor_access_status = IPMI_CODE(0x3a, 0x07),
+	.ipmi_oem_hiomap_cmd         = IPMI_CODE(0x3a, 0x5a),
 };
 
-const struct bmc_platform astbmc_openbmc = {
-	.name = "OpenBMC",
-	.ipmi_oem_partial_add_esel   = IPMI_CODE(0x32, 0xf0),
+const struct bmc_sw_config bmc_sw_openbmc = {
+	.ipmi_oem_partial_add_esel   = IPMI_CODE(0x3a, 0xf0),
+	.ipmi_oem_hiomap_cmd         = IPMI_CODE(0x3a, 0x5a),
+};
+
+/* Extracted from a Palmetto */
+const struct bmc_hw_config bmc_hw_ast2400 = {
+	.scu_revision_id = 0x2010303,
+	.mcr_configuration = 0x00000577,
+	.mcr_scu_mpll = 0x000050c0,
+	.mcr_scu_strap = 0x00000000,
+};
+
+/* Extracted from a Witherspoon */
+const struct bmc_hw_config bmc_hw_ast2500 = {
+	.scu_revision_id = 0x04030303,
+	.mcr_configuration = 0x11200756,
+	.mcr_scu_mpll = 0x000071C1,
+	.mcr_scu_strap = 0x00000000,
+};
+
+const struct bmc_platform bmc_plat_ast2400_ami = {
+	.name = "ast2400:ami",
+	.hw = &bmc_hw_ast2400,
+	.sw = &bmc_sw_ami,
+};
+
+const struct bmc_platform bmc_plat_ast2500_ami = {
+	.name = "ast2500:ami",
+	.hw = &bmc_hw_ast2500,
+	.sw = &bmc_sw_ami,
+};
+
+const struct bmc_platform bmc_plat_ast2500_openbmc = {
+	.name = "ast2500:openbmc",
+	.hw = &bmc_hw_ast2500,
+	.sw = &bmc_sw_openbmc,
 };

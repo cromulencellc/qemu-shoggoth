@@ -54,7 +54,7 @@ bsscdone:
 	/* jump to c-code                       */
 	/* r31 = fdt                    - r5    */
 	/* ------------------------------------ */
-	li	r3, r0
+	li	r3, 0
 	mr	r4, r31
 	bl	.early_c_entry
 

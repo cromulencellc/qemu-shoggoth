@@ -66,22 +66,24 @@ struct PluginCallbacks {
      *
      * @param opaque "This" pointer to the state 
      * @param paddr Physical address in guest memory
+     * @param vaddr Virtual address in guest memory
      * @param value Value from read (host endianess)
      * @param addr Address in host memory (if one...)
      * @param size Size of read access
      */
-    void (*on_memory_read)(void *opaque, uint64_t paddr, uint8_t *value, void *addr, int size);
+    void (*on_memory_read)(void *opaque, uint64_t paddr, uint64_t vaddr, uint8_t *value, void *addr, int size);
 
     /**
      * Alerts the plugin to memory writes. Called before write occurs.
      *
      * @param opaque "This" pointer to the state 
      * @param paddr Physical address in guest memory
+     * @param vaddr Virtual address in guest memory
      * @param value Value to write (host endianess)
      * @param addr Address in host memory (if one...)
      * @param size Size of write access
      */    
-    void (*on_memory_write)(void *opaque, uint64_t paddr, const uint8_t *value, void *addr, int size);
+    void (*on_memory_write)(void *opaque, uint64_t paddr, uint64_t vaddr, const uint8_t *value, void *addr, int size);
     
     /**
      * This callback is executed when the RA system has started. Add an

@@ -228,7 +228,7 @@ megasas_add_lun(struct pci_device *pci, u32 iobase, u8 target, u8 lun)
     name = znprintf(MAXDESCSIZE, "MegaRAID SAS (PCI %pP) LD %d:%d"
                     , pci, target, lun);
     prio = bootprio_find_scsi_device(pci, target, lun);
-    ret = scsi_drive_setup(&mlun->drive, name, prio);
+    ret = scsi_drive_setup(&mlun->drive, name, prio, target, lun);
     free(name);
     if (ret) {
         free(mlun->frame);

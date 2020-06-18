@@ -25,6 +25,7 @@
 #define CQ_SWI_RSP		0x048
 #define X_CQ_CFG_PB_GEN		0x0a
 #define CQ_CFG_PB_GEN		0x050
+#define   CQ_INT_ADDR_OPT	PPC_BITMASK(14,15)
 #define X_CQ_IC_BAR		0x10
 #define X_CQ_MSGSND		0x0b
 #define CQ_MSGSND		0x058
@@ -69,16 +70,29 @@
 #define CQ_AIB_CTL		0x110
 #define X_CQ_RST_CTL		0x23
 #define CQ_RST_CTL		0x118
+#define X_CQ_FIRMASK		0x33
+#define CQ_FIRMASK		0x198
+#define  CQ_FIR_PB_RCMDX_CI_ERR1	PPC_BIT(19)
+#define  CQ_FIR_VC_INFO_ERROR_0_1	PPC_BITMASK(62,63)
+#define X_CQ_FIRMASK_AND	0x34
+#define CQ_FIRMASK_AND		0x1a0
+#define X_CQ_FIRMASK_OR		0x35
+#define CQ_FIRMASK_OR		0x1a8
 
 /* PC LBS1 register offsets */
 #define X_PC_TCTXT_CFG		0x100
 #define PC_TCTXT_CFG		0x400
 #define  PC_TCTXT_CFG_BLKGRP_EN		PPC_BIT(0)
 #define  PC_TCTXT_CFG_TARGET_EN		PPC_BIT(1)
+#define  PC_TCTXT_CFG_LGS_EN		PPC_BIT(2)
 #define  PC_TCTXT_CFG_STORE_ACK		PPC_BIT(3)
 #define  PC_TCTXT_CFG_HARD_CHIPID_BLK	PPC_BIT(8)
 #define  PC_TCTXT_CHIPID_OVERRIDE	PPC_BIT(9)
 #define  PC_TCTXT_CHIPID		PPC_BITMASK(12,15)
+#define  PC_TCTXT_INIT_AGE		PPC_BITMASK(30,31)
+#define X_PC_TCTXT_TRACK	0x101
+#define PC_TCTXT_TRACK		0x408
+#define  PC_TCTXT_TRACK_EN		PPC_BIT(0)
 #define X_PC_TCTXT_INDIR0	0x104
 #define PC_TCTXT_INDIR0		0x420
 #define  PC_TCTXT_INDIR_VALID		PPC_BIT(0)
@@ -174,6 +188,9 @@
 #define VC_IRQ_CONFIG_CASCADE2	0x858
 #define VC_IRQ_CONFIG_REDIST	0x860
 #define VC_IRQ_CONFIG_IPI_CASC	0x868
+#define X_VC_AIB_TX_ORDER_TAG2	0x22d
+#define  VC_AIB_TX_ORDER_TAG2_REL_TF	PPC_BIT(20)
+#define VC_AIB_TX_ORDER_TAG2	0x890
 #define X_VC_AT_MACRO_KILL	0x23e
 #define VC_AT_MACRO_KILL	0x8b0
 #define X_VC_AT_MACRO_KILL_MASK	0x23f
@@ -196,11 +213,17 @@
 #define X_VC_EQC_CWATCH_SPEC	0x215
 #define VC_EQC_CONFIG		0x920
 #define X_VC_EQC_CONFIG		0x214
-#define  VC_EQC_CONF_SYNC_IPI	PPC_BIT(32)
-#define  VC_EQC_CONF_SYNC_HW	PPC_BIT(33)
-#define  VC_EQC_CONF_SYNC_ESC1	PPC_BIT(34)
-#define  VC_EQC_CONF_SYNC_ESC2	PPC_BIT(35)
-#define  VC_EQC_CONF_SYNC_REDI	PPC_BIT(36)
+#define  VC_EQC_CONF_SYNC_IPI		PPC_BIT(32)
+#define  VC_EQC_CONF_SYNC_HW		PPC_BIT(33)
+#define  VC_EQC_CONF_SYNC_ESC1		PPC_BIT(34)
+#define  VC_EQC_CONF_SYNC_ESC2		PPC_BIT(35)
+#define  VC_EQC_CONF_SYNC_REDI		PPC_BIT(36)
+#define  VC_EQC_CONF_EQP_INTERLEAVE	PPC_BIT(38)
+#define  VC_EQC_CONF_ENABLE_END_s_BIT	PPC_BIT(39)
+#define  VC_EQC_CONF_ENABLE_END_u_BIT	PPC_BIT(40)
+#define  VC_EQC_CONF_ENABLE_END_c_BIT	PPC_BIT(41)
+#define  VC_EQC_CONF_ENABLE_MORE_QSZ	PPC_BIT(42)
+#define  VC_EQC_CONF_SKIP_ESCALATE	PPC_BIT(43)
 #define VC_EQC_CWATCH_SPEC	0x928
 #define  VC_EQC_CWATCH_CONFLICT	PPC_BIT(0)
 #define  VC_EQC_CWATCH_FULL	PPC_BIT(8)
@@ -382,13 +405,14 @@ struct xive_ive {
 /* EQ */
 struct xive_eq {
 	uint32_t	w0;
-#define EQ_W0_VALID		PPC_BIT32(0)
-#define EQ_W0_ENQUEUE		PPC_BIT32(1)
-#define EQ_W0_UCOND_NOTIFY	PPC_BIT32(2)
-#define EQ_W0_BACKLOG		PPC_BIT32(3)
-#define EQ_W0_PRECL_ESC_CTL	PPC_BIT32(4)
-#define EQ_W0_ESCALATE_CTL	PPC_BIT32(5)
-#define EQ_W0_END_OF_INTR	PPC_BIT32(6)
+#define EQ_W0_VALID		PPC_BIT32(0) /* "v" bit */
+#define EQ_W0_ENQUEUE		PPC_BIT32(1) /* "q" bit */
+#define EQ_W0_UCOND_NOTIFY	PPC_BIT32(2) /* "n" bit */
+#define EQ_W0_BACKLOG		PPC_BIT32(3) /* "b" bit */
+#define EQ_W0_PRECL_ESC_CTL	PPC_BIT32(4) /* "p" bit */
+#define EQ_W0_ESCALATE_CTL	PPC_BIT32(5) /* "e" bit */
+#define EQ_W0_UNCOND_ESCALATE	PPC_BIT32(6) /* "u" bit - DD2.0 */
+#define EQ_W0_SILENT_ESCALATE	PPC_BIT32(7) /* "s" bit - DD2.0 */
 #define EQ_W0_QSIZE		PPC_BITMASK32(12,15)
 #define EQ_W0_SW0		PPC_BIT32(16)
 #define EQ_W0_FIRMWARE		EQ_W0_SW0 /* Owned by FW */
@@ -454,6 +478,7 @@ struct xive_vp {
 #define XIVE_IRQ_ERROR	0xffffffff
 
 void init_xive(void);
+int64_t xive_reset(void);
 
 /* Allocate a chunk of HW sources */
 uint32_t xive_alloc_hw_irqs(uint32_t chip_id, uint32_t count, uint32_t align);
@@ -466,6 +491,9 @@ uint32_t xive_alloc_ipi_irqs(uint32_t chip_id, uint32_t count, uint32_t align);
 
 uint64_t xive_get_notify_port(uint32_t chip_id, uint32_t ent);
 uint32_t xive_get_notify_base(uint32_t girq);
+
+/* XIVE feature flag to de/activate store EOI */
+#define XIVE_STORE_EOI_ENABLED 0
 
 /* Internal IRQ flags */
 #define XIVE_SRC_TRIGGER_PAGE	0x01 /* Trigger page exist (either separate

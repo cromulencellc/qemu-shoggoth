@@ -232,16 +232,6 @@ int qemu_add_child_watch(pid_t pid);
 #endif
 
 /**
- * qemu_mutex_iothread_locked: Return lock status of the main loop mutex.
- *
- * The main loop mutex is the coarsest lock in QEMU, and as such it
- * must always be taken outside other locks.  This function helps
- * functions take different paths depending on whether the current
- * thread is running within the main loop mutex.
- */
-//bool qemu_mutex_iothread_locked(void);
-
-/**
  * qemu_mutex_lock_iothread: Lock the main loop mutex.
  *
  * This function locks the main loop mutex.  The mutex is taken by
@@ -270,6 +260,19 @@ void qemu_mutex_lock_iothread(void);
  * is a no-op there.
  */
 void qemu_mutex_unlock_iothread(void);
+
+/**
+ * qemu_mutex_unlockall_iothread: Force the main loop mutex to unlock.
+ *
+ * This function unlocks the main loop mutex.  The mutex is taken by
+ * main() in vl.c and always taken except while waiting on
+ * external events (such as with select).  This must be called
+ * from the owning thread after which the owning thread is immediately
+ * completely unreferenced no matter the reference count.
+ *
+ * NOTE: tools currently are single-threaded and qemu_mutex_unlock_iothread
+ * is a no-op there.
+ */
 void qemu_mutex_unlockall_iothread(void);
 
 void qemu_cond_wait_iothread(QemuCond *cond);
@@ -280,5 +283,20 @@ void qemu_fd_register(int fd);
 
 QEMUBH *qemu_bh_new(QEMUBHFunc *cb, void *opaque);
 void qemu_bh_schedule_idle(QEMUBH *bh);
+
+enum {
+    MAIN_LOOP_POLL_FILL,
+    MAIN_LOOP_POLL_ERR,
+    MAIN_LOOP_POLL_OK,
+};
+
+typedef struct MainLoopPoll {
+    int state;
+    uint32_t timeout;
+    GArray *pollfds;
+} MainLoopPoll;
+
+void main_loop_poll_add_notifier(Notifier *notify);
+void main_loop_poll_remove_notifier(Notifier *notify);
 
 #endif

@@ -20,6 +20,12 @@
 #include "hdif.h"
 
 /*
+ * To help the FSP to distinguish between physical address and TCE mapped address.
+ * Also to help hostboot to distinguish physical and relative address.
+ */
+#define HRMOR_BIT (1ul << 63)
+
+/*
  * The SPIRA structure
  *
  * NOTE: This is one of the only HDIF structure that we layout entirely
@@ -40,7 +46,7 @@ struct spira_ntuple {
 	__be64		padding;
 } __packed;
 
-#define SPIRA_NTUPLES_COUNT	0x18
+#define SPIRA_NTUPLES_COUNT	0x19
 
 struct spira_ntuples {
 	struct HDIF_array_hdr	array_hdr;
@@ -69,6 +75,7 @@ struct spira_ntuples {
 	struct spira_ntuple	proc_chip;		/* 0x300 */
 	struct spira_ntuple	hs_data;		/* 0x320 */
 	struct spira_ntuple	ipmi_sensor;		/* 0x360 */
+	struct spira_ntuple	node_stb_data;		/* 0x380 */
 };
 
 struct spira {
@@ -82,7 +89,7 @@ struct spira {
 	 *
 	 * According to FSP engineers, this is an okay thing to do.
 	 */
-	u8			reserved[0xa0];
+	u8			reserved[0x80];
 } __packed __align(0x100);
 
 extern struct spira spira;
@@ -146,7 +153,7 @@ struct spiras_ntuples {
 	struct spira_ntuple	hs_data;		/* 0x200 */
 	struct spira_ntuple	hbrt_data;		/* 0x220 */
 	struct spira_ntuple	ipmi_sensor;		/* 0x240 */
-	struct spira_ntuple	node_data;		/* 0x260 */
+	struct spira_ntuple	node_stb_data;		/* 0x260 */
 };
 
 struct spiras {
@@ -354,6 +361,7 @@ struct iplparams_sysparams {
 	__be32		abc_bus_speed;
 	__be32		wxyz_bus_speed;
 	__be32		sys_eco_mode;
+#define SYS_ATTR_MULTIPLE_TPM PPC_BIT32(0)
 #define SYS_ATTR_RISK_LEVEL PPC_BIT32(3)
 	__be32		sys_attributes;
 	__be32		mem_scrubbing;
@@ -368,12 +376,14 @@ struct iplparams_sysparams {
 	uint8_t		split_core_mode;	/* >= 0x5c */
 	uint8_t		reserved[3];
 	uint8_t		sys_vendor[64];		/* >= 0x5f */
-	/* >= 0x60 */
-	__be16		sys_sec_setting;
-	__be16		tpm_config_bit;
-	__be16		tpm_drawer;
-	__be16		reserved2;
-	uint8_t		hw_key_hash[64];
+#define SEC_CONTAINER_SIG_CHECKING PPC_BIT16(0)
+#define SEC_HASHES_EXTENDED_TO_TPM PPC_BIT16(1)
+	__be16		sys_sec_setting;	/* >= 0x60 */
+	__be16		tpm_config_bit;		/* >= 0x60 */
+	__be16		tpm_drawer;		/* >= 0x60 */
+	__be16		hw_key_hash_size;	/* >= 0x60 */
+#define SYSPARAMS_HW_KEY_HASH_MAX   64
+	uint8_t		hw_key_hash[SYSPARAMS_HW_KEY_HASH_MAX];  /* >= 0x60 */
 	uint8_t		sys_family_str[64];	/* vendor,name */
 	uint8_t		sys_type_str[64];	/* vendor,type */
 } __packed;
@@ -437,6 +447,13 @@ struct iplparms_serial {
 	__be16		rsrc_id;
 	__be16		flags;
 #define PLPARMS_SERIAL_FLAGS_CALLHOME	0x8000
+} __packed;
+
+/* Idata index 9: FW features */
+#define IPLPARAMS_FEATURES	9
+struct iplparams_feature {
+	char name[64];
+	__be64 flags;
 } __packed;
 
 /*
@@ -524,12 +541,15 @@ struct msvpd_trace {
 
 /* Idata index 5: Hostboot reserved memory address range */
 #define MSVPD_IDATA_HB_RESERVED_MEM	5
+#define HB_RESERVE_MEM_LABEL_SIZE	64
 struct msvpd_hb_reserved_mem {
+#define MSVPD_HBRMEM_RANGE_TYPE	PPC_BITMASK32(0,7)
+#define HBRMEM_CONTAINER_VERIFICATION_CODE 	0x3
 	__be32		type_instance;
 	__be64		start_addr;
 	__be64		end_addr;
 	__be32		label_size;
-	uint8_t		label[64];
+	uint8_t		label[HB_RESERVE_MEM_LABEL_SIZE];
 	uint8_t		rw_perms;
 #define HB_RESERVE_READABLE 0x80
 #define HB_RESERVE_WRITEABLE 0x40
@@ -642,7 +662,7 @@ struct cechub_io_hub {
 #define CECHUB_HUB_NIMBUS_SFORAZ	0x0020	/* Nimbus+sforaz from spec */
 #define CECHUB_HUB_NIMBUS_MONZA		0x0021	/* Nimbus+monza from spec */
 #define CECHUB_HUB_NIMBUS_LAGRANGE	0x0022	/* Nimbus+lagrange from spec */
-#define CECHUB_HUB_CUMULUS_DUOMO	0x0031	/* cumulus+duomo from spec */
+#define CECHUB_HUB_CUMULUS_DUOMO	0x0030	/* cumulus+duomo from spec */
 	__be32		ec_level;
 	__be32		aff_dom2;	/* HDAT < v9.x only */
 	__be32		aff_dom3;	/* HDAT < v9.x only */
@@ -1103,6 +1123,7 @@ struct sppcrd_chip_info {
 #define CHIP_VERIFY_USABLE_FAILURES		1
 #define CHIP_VERIFY_NOT_INSTALLED		2
 #define CHIP_VERIFY_UNUSABLE			3
+#define CHIP_VERIFY_MASTER_PROC			PPC_BIT32(4)
 	__be32 nx_state;
 	__be32 pore_state;
 	__be32 xscom_id;
@@ -1221,6 +1242,51 @@ struct ipmi_sensors {
 
 /* Idata index 1 : LED - sensors ID mapping data */
 #define IPMI_SENSORS_IDATA_LED		1
+
+/*
+ * Node Secure and Trusted Boot Related Data
+ */
+#define STB_HDIF_SIG	"TPMREL"
+
+/*
+ * Idata index 0 : Secure Boot and TPM Instance Info
+ *
+ * There can be multiple entries with each entry corresponding to
+ * a master processor that has a TPM device
+ */
+#define TPMREL_IDATA_SECUREBOOT_TPM_INFO	0
+
+struct secureboot_tpm_info {
+	__be32 chip_id;
+	__be32 dbob_id;
+	uint8_t locality1;
+	uint8_t locality2;
+	uint8_t locality3;
+	uint8_t locality4;
+#define TPM_PRESENT_AND_FUNCTIONAL	0x01
+#define TPM_PRESENT_AND_NOT_FUNCTIONAL	0x02
+#define TPM_NOT_PRESENT			0x03
+	uint8_t tpm_status;
+	uint8_t reserved[3];
+	/* zero indicates no tpm log data */
+	__be32 srtm_log_offset;
+	__be32 srtm_log_size;
+	/* zero indicates no tpm log data */
+	__be32 drtm_log_offset;
+	__be32 drtm_log_size;
+} __packed;
+
+/* Idata index 2: Hash and Verification Function Offsets Array */
+#define TPMREL_IDATA_HASH_VERIF_OFFSETS 	2
+
+struct hash_and_verification {
+#define TPMREL_HV_SHA512	0x00
+#define TPMREL_HV_VERIFY	0x01
+	__be32 type;
+	__be32 version;
+	__be32 dbob_id;
+	__be32 offset;
+} __packed;
 
 static inline const char *cpu_state(u32 flags)
 {

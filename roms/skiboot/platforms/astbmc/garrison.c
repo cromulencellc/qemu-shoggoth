@@ -210,8 +210,8 @@ static const struct slot_table_entry garrison_phb_table[] = {
 
 #define NPU_BASE 0x8013c00
 #define NPU_SIZE 0x2c
-#define NPU_INDIRECT0	0x8000000008010c3f
-#define NPU_INDIRECT1	0x8000000008010c7f
+#define NPU_INDIRECT0	0x8000000008010c3fUL
+#define NPU_INDIRECT1	0x8000000008010c7fUL
 
 static void create_link(struct dt_node *npu, int group, int index)
 {
@@ -293,7 +293,7 @@ static bool garrison_probe(void)
 
 DECLARE_PLATFORM(garrison) = {
 	.name			= "Garrison",
-	.bmc			= &astbmc_ami,
+	.bmc			= &bmc_plat_ast2400_ami,
 	.probe			= garrison_probe,
 	.init			= astbmc_init,
 	.pci_get_slot_info	= slot_table_get_slot_info,

@@ -180,6 +180,7 @@ int nvram_check(void *nvram_image, const uint32_t nvram_size)
 	}
 
 	prlog(PR_INFO, "NVRAM: Layout appears sane\n");
+	assert(skiboot_part_hdr);
 	return 0;
  failed:
 	return -1;
@@ -216,6 +217,18 @@ const char *nvram_query(const char *key)
 	const char *part_end, *start;
 	int key_len = strlen(key);
 
+	assert(key);
+
+	if (!nvram_has_loaded()) {
+		prlog(PR_DEBUG,
+			"NVRAM: Query for '%s' must wait for NVRAM to load\n",
+			key);
+		if (!nvram_wait_for_load()) {
+			prlog(PR_CRIT, "NVRAM: Failed to load\n");
+			return NULL;
+		}
+	}
+
 	/*
 	 * The running OS can modify the NVRAM as it pleases so we need to be
 	 * a little paranoid and check that it's ok before we try parse it.
@@ -224,6 +237,8 @@ const char *nvram_query(const char *key)
 	 */
 	if (!nvram_validate())
 		return NULL;
+
+	assert(skiboot_part_hdr);
 
 	part_end = (const char *) skiboot_part_hdr
 		+ be16_to_cpu(skiboot_part_hdr->len) * 16 - 1;
@@ -266,6 +281,14 @@ const char *nvram_query(const char *key)
 }
 
 
+/*
+ * nvram_query_eq() - Check if the given 'key' exists and
+ * is set to 'value'.
+ *
+ * Note: Its an error to check for non-existence of a key
+ * by passing 'value == NULL' as a key's value can never be
+ * NULL in nvram.
+ */
 bool nvram_query_eq(const char *key, const char *value)
 {
 	const char *s = nvram_query(key);
@@ -273,5 +296,6 @@ bool nvram_query_eq(const char *key, const char *value)
 	if (!s)
 		return false;
 
+	assert(value != NULL);
 	return !strcmp(s, value);
 }

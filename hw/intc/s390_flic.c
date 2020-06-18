@@ -107,7 +107,7 @@ static int qemu_s390_clear_io_flic(S390FLICState *fs, uint16_t subchannel_id,
 
     qemu_mutex_lock_iothread();
     if (!(flic->pending & FLIC_PENDING_IO)) {
-        qemu_mutex_unlock_iothread();
+    	qemu_mutex_unlock_iothread();
         return 0;
     }
 
@@ -227,7 +227,6 @@ uint32_t qemu_s390_flic_dequeue_service(QEMUS390FLICState *flic)
 
     qemu_mutex_lock_iothread();
     g_assert(flic->pending & FLIC_PENDING_SERVICE);
-
     tmp = flic->service_param;
     flic->service_param = 0;
     flic->pending &= ~FLIC_PENDING_SERVICE;
@@ -244,7 +243,7 @@ QEMUS390FlicIO *qemu_s390_flic_dequeue_io(QEMUS390FLICState *flic, uint64_t cr6)
 
     qemu_mutex_lock_iothread();
     if (!(flic->pending & CR6_TO_PENDING_IO(cr6))) {
-        qemu_mutex_unlock_iothread();
+    	qemu_mutex_unlock_iothread();
         return NULL;
     }
 
@@ -259,7 +258,7 @@ QEMUS390FlicIO *qemu_s390_flic_dequeue_io(QEMUS390FLICState *flic, uint64_t cr6)
         if (QLIST_EMPTY(&flic->io[isc])) {
             flic->pending &= ~ISC_TO_PENDING_IO(isc);
         }
-        qemu_mutex_unlock_iothread();
+    	qemu_mutex_unlock_iothread();
         return io;
     }
     qemu_mutex_unlock_iothread();
@@ -279,8 +278,8 @@ static void qemu_s390_inject_service(S390FLICState *fs, uint32_t parm)
 {
     QEMUS390FLICState *flic = s390_get_qemu_flic(fs);
 
-    /* multiplexing is good enough for sclp - kvm does it internally as well */
     qemu_mutex_lock_iothread();
+    /* multiplexing is good enough for sclp - kvm does it internally as well */
     flic->service_param |= parm;
     flic->pending |= FLIC_PENDING_SERVICE;
 

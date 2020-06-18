@@ -20,6 +20,8 @@
 #include <device.h>
 #include <opal-msg.h>
 #include <timebase.h>
+#include <processor.h>
+#include <timer.h>
 
 static LIST_HEAD(i2c_bus_list);
 
@@ -50,7 +52,7 @@ static void opal_i2c_request_complete(int rc, struct i2c_request *req)
 	uint64_t token = (uint64_t)(unsigned long)req->user_data;
 
 	opal_queue_msg(OPAL_MSG_ASYNC_COMP, NULL, NULL, token, rc);
-	i2c_free_req(req);
+	free(req);
 }
 
 static int opal_i2c_request(uint64_t async_token, uint32_t bus_id,
@@ -79,7 +81,7 @@ static int opal_i2c_request(uint64_t async_token, uint32_t bus_id,
 		return OPAL_PARAMETER;
 	}
 
-	req = i2c_alloc_req(bus);
+	req = zalloc(sizeof(*req));
 	if (!req) {
 		/**
 		 * @fwts-label I2CFailedAllocation
@@ -100,34 +102,34 @@ static int opal_i2c_request(uint64_t async_token, uint32_t bus_id,
 		break;
 	case OPAL_I2C_SM_READ:
 		req->op = SMBUS_READ;
-		req->offset = oreq->subaddr;
+		req->offset = be32_to_cpu(oreq->subaddr);
 		req->offset_bytes = oreq->subaddr_sz;
 		break;
 	case OPAL_I2C_SM_WRITE:
 		req->op = SMBUS_WRITE;
-		req->offset = oreq->subaddr;
+		req->offset = be32_to_cpu(oreq->subaddr);
 		req->offset_bytes = oreq->subaddr_sz;
 		break;
 	default:
-		bus->free_req(req);
+		free(req);
 		return OPAL_PARAMETER;
 	}
-	req->dev_addr = oreq->addr;
-	req->rw_len = oreq->size;
-	req->rw_buf = (void *)oreq->buffer_ra;
+	req->dev_addr = be16_to_cpu(oreq->addr);
+	req->rw_len = be32_to_cpu(oreq->size);
+	req->rw_buf = (void *)be64_to_cpu(oreq->buffer_ra);
 	req->completion = opal_i2c_request_complete;
 	req->user_data = (void *)(unsigned long)async_token;
 	req->bus = bus;
 
 	if (i2c_check_quirk(req, &rc)) {
-		i2c_free_req(req);
+		free(req);
 		return rc;
 	}
 
 	/* Finally, queue the OPAL i2c request and return */
 	rc = i2c_queue_req(req);
 	if (rc) {
-		i2c_free_req(req);
+		free(req);
 		return rc;
 	}
 
@@ -148,6 +150,7 @@ static void i2c_sync_request_complete(int rc, struct i2c_request *req)
 {
 	struct i2c_sync_userdata *ud = req->user_data;
 	ud->rc = rc;
+	lwsync();
 	ud->done = true;
 }
 
@@ -175,6 +178,7 @@ int i2c_request_send(int bus_id, int dev_addr, int read_write,
 	struct i2c_bus *bus;
 	uint64_t time_to_wait = 0;
 	struct i2c_sync_userdata ud;
+	uint64_t timer_period = msecs_to_tb(5), timer_count;
 
 	bus = i2c_find_bus_by_id(bus_id);
 	if (!bus) {
@@ -187,7 +191,7 @@ int i2c_request_send(int bus_id, int dev_addr, int read_write,
 		return OPAL_PARAMETER;
 	}
 
-	req = i2c_alloc_req(bus);
+	req = zalloc(sizeof(*req));
 	if (!req) {
 		/**
 		 * @fwts-label I2CAllocationFailed
@@ -195,10 +199,11 @@ int i2c_request_send(int bus_id, int dev_addr, int read_write,
 		 * i2c_request. This points to an OPAL bug as OPAL run out of
 		 * memory and this should never happen.
 		 */
-		prlog(PR_ERR, "I2C: i2c_alloc_req failed\n");
+		prlog(PR_ERR, "I2C: allocating i2c_request failed\n");
 		return OPAL_INTERNAL_ERROR;
 	}
 
+	req->bus	= bus;
 	req->dev_addr   = dev_addr;
 	req->op         = read_write;
 	req->offset     = offset;
@@ -206,12 +211,14 @@ int i2c_request_send(int bus_id, int dev_addr, int read_write,
 	req->rw_buf     = (void*) buf;
 	req->rw_len     = buflen;
 	req->completion = i2c_sync_request_complete;
+	req->timeout    = timeout;
 	ud.done = false;
 	req->user_data = &ud;
 
 	for (retries = 0; retries <= MAX_NACK_RETRIES; retries++) {
 		waited = 0;
-		i2c_set_req_timeout(req, timeout);
+		timer_count = 0;
+
 		i2c_queue_req(req);
 
 		do {
@@ -220,15 +227,28 @@ int i2c_request_send(int bus_id, int dev_addr, int read_write,
 				time_to_wait = REQ_COMPLETE_POLLING;
 			time_wait(time_to_wait);
 			waited += time_to_wait;
+			timer_count += time_to_wait;
+			if (timer_count > timer_period) {
+				/*
+				 * The above request may be relying on
+				 * timers to complete, yet there may
+				 * not be called, especially during
+				 * opal init. We could be looping here
+				 * forever. So explicitly check the
+				 * timers once in a while
+				 */
+				check_timers(false);
+				timer_count = 0;
+			}
 		} while (!ud.done);
 
+		lwsync();
 		rc = ud.rc;
 
-		if (rc == OPAL_I2C_NACK_RCVD)
-			continue;
-		else
-			/* error or success */
+		/* error or success */
+		if (rc != OPAL_I2C_NACK_RCVD)
 			break;
+		ud.done = false;
 	}
 
 	prlog(PR_DEBUG, "I2C: %s req op=%x offset=%x buf=%016llx buflen=%d "
@@ -236,7 +256,7 @@ int i2c_request_send(int bus_id, int dev_addr, int read_write,
 	      (rc) ? "!!!!" : "----", req->op, req->offset,
 	      *(uint64_t*) buf, req->rw_len, tb_to_msecs(waited), timeout, rc);
 
-	i2c_free_req(req);
+	free(req);
 	if (rc)
 		return OPAL_HARDWARE;
 

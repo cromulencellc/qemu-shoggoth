@@ -613,7 +613,7 @@ process_op(struct disk_op_s *op)
             , op->count, op->command);
 
     int ret, origcount = op->count;
-    /* Only x86 arch has problems with large reads/writes above 64kb */
+    /* Only x86 arch has problems with large reads/writes greater than 64kb */
     if (CONFIG_X86 &&
 	(origcount * GET_FLATPTR(op->drive_fl->blksize) > 64*1024)) {
         op->count = 0;

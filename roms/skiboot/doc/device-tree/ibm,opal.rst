@@ -50,3 +50,34 @@ Top level ibm,opal node
 		opal-runtime-size = <0x0 0x9a00000>;
 		phandle = <0x10000003>;
     };
+
+.. ibm-heartbeat-ms:
+
+ibm,heartbeat-ms
+^^^^^^^^^^^^^^^^
+
+.. code-block:: dts
+
+   ibm,opal {
+		ibm,heartbeat-ms = <0x7d0>;
+   }
+
+
+Any OS targetting POWER9 processors *must* respect `ibm,heartbeat-ms`.
+
+Linux kernels prior to v4.1-rc1 would ignore `ibm,heartbeat-ms`. These only
+supported POWER8 systems.
+
+On the earliest POWER8 OPAL systems, there was `ibm,heartbeat-freq` instead.
+However, no OS at the time ever looked at that value, so it can be ignored
+by any new operating systems.
+
+fast-reboot property
+^^^^^^^^^^^^^^^^^^^^
+
+This property of the `ibm,opal` node is an option property that will either be
+the string `okay` or the reason the fast reboot feature was disabled on boot.
+
+The motivation behind adding this property is to help the OPAL test suite work
+out if it should even try the fast reboot test on a particular platform
+(without it having to resort to grepping firmware logs).

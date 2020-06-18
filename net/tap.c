@@ -221,7 +221,6 @@ static void tap_send(void *opaque)
         uint8_t *buf = s->buf;
 
         size = tap_read_packet(s->fd, s->buf, sizeof(s->buf));
-        
         if (size <= 0) {
             break;
         }
@@ -636,7 +635,7 @@ int net_init_bridge(const Netdev *netdev, const char *name,
         return -1;
     }
 
-    fcntl(fd, F_SETFL, O_NONBLOCK);
+    qemu_set_nonblock(fd);
     vnet_hdr = tap_probe_vnet_hdr(fd);
     s = net_tap_fd_init(peer, "bridge", name, fd, vnet_hdr);
 
@@ -751,7 +750,7 @@ static void net_init_tap_one(const NetdevTapOptions *tap, NetClientState *peer,
                 }
                 return;
             }
-            fcntl(vhostfd, F_SETFL, O_NONBLOCK);
+            qemu_set_nonblock(vhostfd);
         }
         options.opaque = (void *)(uintptr_t)vhostfd;
 
@@ -835,7 +834,7 @@ int net_init_tap(const Netdev *netdev, const char *name,
             return -1;
         }
 
-        fcntl(fd, F_SETFL, O_NONBLOCK);
+        qemu_set_nonblock(fd);
 
         vnet_hdr = tap_probe_vnet_hdr(fd);
 
@@ -883,7 +882,7 @@ int net_init_tap(const Netdev *netdev, const char *name,
                 goto free_fail;
             }
 
-            fcntl(fd, F_SETFL, O_NONBLOCK);
+            qemu_set_nonblock(fd);
 
             if (i == 0) {
                 vnet_hdr = tap_probe_vnet_hdr(fd);
@@ -931,7 +930,7 @@ free_fail:
             return -1;
         }
 
-        fcntl(fd, F_SETFL, O_NONBLOCK);
+        qemu_set_nonblock(fd);
         vnet_hdr = tap_probe_vnet_hdr(fd);
 
         net_init_tap_one(tap, peer, "bridge", name, ifname,

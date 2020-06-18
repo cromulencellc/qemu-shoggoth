@@ -10,6 +10,7 @@
 #include "hw/pci.h" // pci_config_readl
 #include "hw/pci_regs.h" // PCI_BASE_ADDRESS_0
 #include "vgahw.h"
+#include "parisc/sticore.h"
 
 /****************************************************************
  * PCI Data

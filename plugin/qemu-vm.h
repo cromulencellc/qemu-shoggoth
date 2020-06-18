@@ -42,6 +42,7 @@ void qemu_vm_send_keystring(const char *string);
 bool qemu_vm_save_screenshot(const char *file_name, bool has_device, const char *device,
                     bool has_head, int64_t head);
 void qemu_vm_get_snapshots(ImageInfoList **snapshots);
+const char *qemu_vm_get_arch(int cpu_idx);
 
 #ifdef __cplusplus
 }

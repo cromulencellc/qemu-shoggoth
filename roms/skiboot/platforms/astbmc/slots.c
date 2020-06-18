@@ -77,7 +77,7 @@ static const struct slot_table_entry *match_slot_dev_entry(struct phb *phb,
 		if (ent->etype == st_npu_slot)
 			bdfn = pd->bdfn & 0xf8;
 		else
-			bdfn = pd->bdfn & 0xffff;
+			bdfn = pd->bdfn & 0xff;
 
 		if (ent->location == bdfn)
 			return ent;
@@ -96,18 +96,13 @@ static void slot_table_add_properties(struct pci_slot *slot,
 		pci_slot_add_loc(slot, np, NULL);
 }
 
-void slot_table_get_slot_info(struct phb *phb, struct pci_device *pd)
+void slot_table_add_slot_info(struct pci_device *pd,
+		const struct slot_table_entry *ent)
 {
-	const struct slot_table_entry *ent;
 	struct pci_slot *slot;
 
-	if (!pd || pd->slot)
-		return;
-
-	ent = match_slot_dev_entry(phb, pd);
-
 	if (!ent || !ent->name) {
-		slot = pcie_slot_create_dynamic(phb, pd);
+		slot = pcie_slot_create_dynamic(pd->phb, pd);
 		if (slot) {
 			slot->ops.add_properties = slot_table_add_properties;
 			slot->pluggable = true;
@@ -116,12 +111,24 @@ void slot_table_get_slot_info(struct phb *phb, struct pci_device *pd)
 		return;
 	}
 
-	slot = pcie_slot_create(phb, pd);
+	slot = pcie_slot_create(pd->phb, pd);
 	assert(slot);
 
 	slot->pluggable = !!(ent->etype == st_pluggable_slot);
 	slot->ops.add_properties = slot_table_add_properties;
+	slot->power_limit = ent->power_limit;
 	slot->data = (void *)ent;
+}
+
+void slot_table_get_slot_info(struct phb *phb, struct pci_device *pd)
+{
+	const struct slot_table_entry *ent;
+
+	if (!pd || pd->slot)
+		return;
+
+	ent = match_slot_dev_entry(phb, pd);
+	slot_table_add_slot_info(pd, ent);
 }
 
 static void dt_slot_add_properties(struct pci_slot *slot,
@@ -141,6 +148,7 @@ void dt_slot_get_slot_info(struct phb *phb, struct pci_device *pd)
 	struct dt_node *slot_np;
 	struct pci_slot *slot;
 	const char *name = NULL;
+	uint32_t power_limit = 0;
 	bool pluggable = false;
 
 	if (!pd || pd->slot)
@@ -150,6 +158,8 @@ void dt_slot_get_slot_info(struct phb *phb, struct pci_device *pd)
 	if (slot_np) {
 		pluggable = dt_has_node_property(slot_np,
 					"ibm,pluggable", NULL);
+		power_limit = dt_prop_get_u32_def(slot_np,
+					"ibm,power-limit", 0);
 		name = dt_prop_get_def(slot_np, "ibm,slot-label", NULL);
 	}
 
@@ -169,6 +179,7 @@ void dt_slot_get_slot_info(struct phb *phb, struct pci_device *pd)
 
 	slot->ops.add_properties = dt_slot_add_properties;
 	slot->pluggable = pluggable;
+	slot->power_limit = power_limit;
 	slot->data = (void *)slot_np;
 }
 

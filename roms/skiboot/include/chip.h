@@ -113,6 +113,7 @@ struct mfsi;
 struct xive;
 struct lpcm;
 struct vas;
+struct p9_sbe;
 
 /* Chip type */
 enum proc_chip_type {
@@ -124,6 +125,7 @@ enum proc_chip_type {
 	PROC_CHIP_P8_NAPLES,
 	PROC_CHIP_P9_NIMBUS,
 	PROC_CHIP_P9_CUMULUS,
+	PROC_CHIP_P9P,
 };
 
 /* Simulator quirks */
@@ -196,7 +198,6 @@ struct proc_chip {
 
 	/* Must hold capi_lock to change */
 	uint8_t			capp_phb3_attached_mask;
-	uint8_t			capp_phb4_attached_mask;
 	uint8_t			capp_ucode_loaded;
 
 	/* Used by hw/centaur.c */
@@ -215,6 +216,14 @@ struct proc_chip {
 	struct xive		*xive;
 
 	struct vas		*vas;
+
+	/* Used by hw/nx-compress.c */
+	uint64_t		nx_base;
+	/* location code of this chip */
+	const uint8_t		*loc_code;
+
+	/* Used by hw/sbe-p9.c */
+	struct p9_sbe		*sbe;
 };
 
 extern uint32_t pir_to_chip_id(uint32_t pir);
@@ -239,6 +248,18 @@ static inline int nr_chips(void)
 		nr_chips++;
 
 	return nr_chips;
+}
+
+/* helper to get location code of a chip */
+static inline const char *chip_loc_code(uint32_t chip_id)
+{
+	struct proc_chip *chip;
+
+	chip = get_chip(chip_id);
+	if (!chip)
+		return NULL;
+
+	return chip->loc_code;
 }
 
 #endif /* __CHIP_H */

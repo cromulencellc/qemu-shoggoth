@@ -50,7 +50,7 @@ endchoice
             running on an emulator.
 
     config XEN
-        depends on QEMU && X86
+        depends on QEMU && !PARISC
         bool "Support Xen HVM"
         default y
         help
@@ -66,6 +66,7 @@ endchoice
     config RELOCATE_INIT
         bool "Copy init code to high memory"
         default y
+        depends on X86
         help
             Support relocating the one time initialization code to high memory.
 
@@ -76,7 +77,7 @@ endchoice
         help
             Support an interactive boot menu at end of post.
     config BOOTSPLASH
-        depends on BOOTMENU
+        depends on BOOTMENU && !PARISC
         bool "Graphical boot splash screen"
         default y
         help
@@ -122,6 +123,7 @@ endchoice
     config ENTRY_EXTRASTACK
         bool "Use internal stack for 16bit interrupt entry points"
         default y
+        depends on X86
         help
             Utilize an internal stack for all the legacy 16bit
             interrupt entry points.  This reduces the amount of space
@@ -132,6 +134,7 @@ endchoice
     config MALLOC_UPPERMEMORY
         bool "Allocate memory that needs to be in first Meg above 0xc0000"
         default y
+        depends on X86
         help
             Use the "Upper Memory Block" area (0xc0000-0xf0000) for
             internal "low memory" allocations.  If this is not
@@ -373,6 +376,7 @@ menu "Hardware support"
     config PMTIMER
         bool "Support ACPI timer"
         default y
+        depends on X86
         help
             Detect and use the ACPI timer for timekeeping.
     config TSC_TIMER
@@ -419,6 +423,7 @@ menu "BIOS interfaces"
         help
             Support PnP BIOS entry point.
     config OPTIONROMS
+        depends on !PARISC
         bool "Option ROMS"
         default y
         help

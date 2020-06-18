@@ -28,11 +28,18 @@
 #define STACK_TOP_GAP		0x100
 
 /* Remaining stack space (gap included) */
-#define NORMAL_STACK_SIZE	STACK_SIZE
+#define NORMAL_STACK_SIZE	(STACK_SIZE/2)
+
+/* Emergency (re-entry) stack size */
+#define EMERGENCY_STACK_SIZE	(STACK_SIZE/2)
 
 /* Offset to get to normal CPU stacks */
 #define CPU_STACKS_OFFSET	(CPU_STACKS_BASE + \
 				 NORMAL_STACK_SIZE - STACK_TOP_GAP)
+
+/* Offset to get to emergency CPU stacks */
+#define EMERGENCY_CPU_STACKS_OFFSET	(CPU_STACKS_BASE + NORMAL_STACK_SIZE + \
+				 EMERGENCY_STACK_SIZE - STACK_TOP_GAP)
 
 /* Gap below the stack. If our stack checker sees the stack below that
  * gap, it will flag a stack overflow
@@ -44,9 +51,12 @@
  */
 #define STACK_WARNING_GAP	2048
 
+#define STACK_CHECK_GUARD_BASE	0xdeadf00dbaad300
+
 #ifndef __ASSEMBLY__
 
 #include <stdint.h>
+#include <opal-api.h>
 
 /* This is the struct used to save GPRs etc.. on OPAL entry
  * and from some exceptions. It is not always entirely populated
@@ -84,14 +94,17 @@ struct stack_frame {
 	 */
 	uint32_t	cr;
 	uint32_t	xer;
+	uint32_t	dsisr;
 	uint64_t	ctr;
 	uint64_t	lr;
 	uint64_t	pc;
+	uint64_t	msr;
 	uint64_t	cfar;
 	uint64_t	srr0;
 	uint64_t	srr1;
 	uint64_t	hsrr0;
 	uint64_t	hsrr1;
+	uint64_t	dar;
 } __attribute__((aligned(16)));
 
 /* Backtrace */
@@ -104,12 +117,30 @@ struct bt_entry {
 extern void *boot_stack_top;
 
 /* Create a backtrace */
-extern void __backtrace(struct bt_entry *entries, unsigned int *count);
+void ___backtrace(struct bt_entry *entries, unsigned int *count,
+				unsigned long r1,
+				unsigned long *token, unsigned long *r1_caller);
+static inline void __backtrace(struct bt_entry *entries, unsigned int *count)
+{
+	unsigned long token, r1_caller;
+
+	___backtrace(entries, count,
+			(unsigned long)__builtin_frame_address(0),
+			&token, &r1_caller);
+}
 
 /* Convert a backtrace to ASCII */
-extern void __print_backtrace(unsigned int pir, struct bt_entry *entries,
-			      unsigned int count, char *out_buf,
+extern void ___print_backtrace(unsigned int pir, struct bt_entry *entries,
+			      unsigned int count, unsigned long token,
+			      unsigned long r1_caller, char *out_buf,
 			      unsigned int *len, bool symbols);
+
+static inline void __print_backtrace(unsigned int pir, struct bt_entry *entries,
+			      unsigned int count, char *out_buf,
+			      unsigned int *len, bool symbols)
+{
+	___print_backtrace(pir, entries, count, OPAL_LAST + 1, 0, out_buf, len, symbols);
+}
 
 /* For use by debug code, create and print backtrace, uses a static buffer */
 extern void backtrace(void);

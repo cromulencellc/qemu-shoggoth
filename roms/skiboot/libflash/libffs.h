@@ -88,7 +88,14 @@ struct ffs_entry_user {
 #define FFS_MISCFLAGS_READONLY 0x40
 #define FFS_MISCFLAGS_BACKUP 0x20
 #define FFS_MISCFLAGS_REPROVISION 0x10
+#define FFS_MISCFLAGS_VOLATILE 0x08
+#define FFS_MISCFLAGS_CLEARECC 0x04
+#define FFS_MISCFLAGS_GOLDEN 0x01
 
+
+int ffs_string_to_entry_user(const char *flags, int nflags,
+		struct ffs_entry_user *user);
+char *ffs_entry_user_to_string(struct ffs_entry_user *user);
 
 bool has_ecc(struct ffs_entry *ent);
 
@@ -134,19 +141,24 @@ int ffs_update_act_size(struct ffs_handle *ffs, uint32_t part_idx,
 			uint32_t act_size);
 
 int ffs_hdr_new(uint32_t block_size, uint32_t block_count,
-		struct ffs_hdr **r);
+		struct ffs_entry **e, struct ffs_hdr **r);
 
 int ffs_hdr_add_side(struct ffs_hdr *hdr);
 
 int ffs_entry_new(const char *name, uint32_t base, uint32_t size, struct ffs_entry **r);
 
+struct ffs_entry *ffs_entry_put(struct ffs_entry *ent);
+
 int ffs_entry_user_set(struct ffs_entry *ent, struct ffs_entry_user *user);
 
-int ffs_entry_add(struct ffs_hdr *hdr, struct ffs_entry *entry, unsigned int side);
+int ffs_entry_set_act_size(struct ffs_entry *ent, uint32_t actual_size);
 
-int ffs_hdr_create_backup(struct ffs_hdr *hdr);
+
+struct ffs_entry_user ffs_entry_user_get(struct ffs_entry *ent);
+
+int ffs_entry_add(struct ffs_hdr *hdr, struct ffs_entry *entry);
 
 int ffs_hdr_finalise(struct blocklevel_device *bl, struct ffs_hdr *hdr);
 
-int ffs_hdr_free(struct ffs_hdr *hdr);
+void ffs_hdr_free(struct ffs_hdr *hdr);
 #endif /* __LIBFFS_H */

@@ -76,6 +76,9 @@ enum ffs_type {
 #define FFS_MISCFLAGS_READONLY 0x40
 #define FFS_MISCFLAGS_BACKUP 0x20
 #define FFS_MISCFLAGS_REPROVISION 0x10
+#define FFS_MISCFLAGS_VOLATILE 0x08
+#define FFS_MISCFLAGS_CLEARECC 0x04
+#define FFS_MISCFLAGS_GOLDEN 0x01
 
 /**
  * struct __ffs_entry_user - On flash user data entries
@@ -148,6 +151,7 @@ struct __ffs_entry {
  * @type:	Describe type of partition
  * @flags:	Partition attributes (optional)
  * @user:	User data (optional)
+ * @ref:	Refcount
  */
 struct ffs_entry {
 	char name[FFS_PART_NAME_MAX + 1];
@@ -158,7 +162,7 @@ struct ffs_entry {
 	enum ffs_type type;
 	uint32_t flags;
 	struct ffs_entry_user user;
-	struct list_node list;
+	unsigned int ref;
 };
 
 
@@ -203,20 +207,18 @@ struct __ffs_hdr {
  * @size:		Size of partition table (in bytes)
  * @block_size:		Size of block on device (in bytes)
  * @block_count:	Number of blocks on device.
- * @backup		The backup partition
- * @side		The ffs header for the other side
- * @entries:		List of partition entries
+ * @count:		Count of the number of entires
+ * @entries:		Array of partition entries.
  */
 struct ffs_hdr {
 	uint32_t version;
-	uint32_t base;
 	uint32_t size;
 	uint32_t block_size;
 	uint32_t block_count;
+	uint32_t count;
 	struct ffs_entry *part;
-	struct ffs_entry *backup;
-	struct ffs_hdr *side;
-	struct list_head entries;
+	struct ffs_entry **entries;
+	unsigned int entries_size;
 };
 
 #endif /* __FFS_H__ */

@@ -23,6 +23,7 @@
 #include "qapi/qmp/qlist.h"
 #include "qapi/qmp/qpointer.h"
 #include "qapi/qapi-types-oshandler.h"
+#include "plugin/qemu-memory.h"
 
 static int os_to_flags_breakpoint_type(int bp_type)
 {
@@ -384,4 +385,96 @@ int qemu_remove_anonymous_breakpoint_on_cpu(int cpu_idx, uint64_t addr, uint64_t
     int bp_flags = os_to_flags_breakpoint_type(bp_type);
 
     return remove_target_breakpoint(cpu, addr, length, bp_flags);
+}
+
+bool qemu_process_get_memory(int cpu_idx, OSPid pid, uint64_t address, uint8_t size, uint8_t **data)
+{
+    struct GetProcessMemoryArgs{
+        int cpu_id;
+        uint64_t address;
+        uint8_t size;
+        uint8_t **data;
+    };
+
+    struct GetProcessMemoryArgs gpm_args = {
+        cpu_idx,
+        address,
+        size,
+        data
+    };
+
+    void *get_process_memory(ProcessInfo *pi, void *args)
+    {
+        struct GetProcessMemoryArgs *gpm = (struct GetProcessMemoryArgs*)args;
+
+        if(!qemu_get_virtual_memory(gpm->cpu_id, gpm->address, gpm->size, gpm->data)){
+            return COROUTINE_FAILED;
+        }
+
+        return COROUTINE_SUCCESS;
+    }
+
+    if(!is_oshandler_active()) {
+        return false;
+    }
+
+    OSHandler *os_handler = oshandler_get_instance();
+    OSHandlerClass *os_cc = OSHANDLER_GET_CLASS(os_handler);
+
+    ProcessInfo *pi = os_cc->get_processinfo_by_ospid(os_handler, pid);
+    if(!pi){
+        return false;
+    }
+
+    if(os_cc->do_process_coroutine(os_handler, pi, get_process_memory, &gpm_args) == COROUTINE_FAILED){
+        return false;
+    }
+
+    return true;
+}
+
+bool qemu_process_set_memory(int cpu_idx, OSPid pid, uint64_t address, uint8_t size, uint8_t *data)
+{
+    struct SetProcessMemoryArgs{
+        int cpu_id;
+        uint64_t address;
+        uint8_t size;
+        uint8_t *data;
+    };
+
+    struct SetProcessMemoryArgs spm_args = {
+        cpu_idx,
+        address,
+        size,
+        data
+    };
+
+    void *set_process_memory(ProcessInfo *pi, void *args)
+    {
+        struct SetProcessMemoryArgs *spm = (struct SetProcessMemoryArgs*)args;
+
+        if(!qemu_set_virtual_memory(spm->cpu_id, spm->address, spm->size, spm->data)){
+            return COROUTINE_FAILED;
+        }
+
+        return COROUTINE_SUCCESS;
+    }
+
+    if(!is_oshandler_active()) {
+        return false;
+    }
+
+    OSHandler *os_handler = oshandler_get_instance();
+    OSHandlerClass *os_cc = OSHANDLER_GET_CLASS(os_handler);
+
+    ProcessInfo *pi = os_cc->get_processinfo_by_ospid(os_handler, pid);
+    if(!pi){
+        return false;
+    }
+
+    if(os_cc->do_process_coroutine(os_handler, pi, set_process_memory, &spm_args) == COROUTINE_FAILED){
+        return false;
+    }
+
+    return true;
 }

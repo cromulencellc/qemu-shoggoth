@@ -16,7 +16,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
+#include <stdint.h>
 
+#include <compiler.h>
 #include "../../ccan/list/list.c"
 
 void _prlog(int log_level __attribute__((unused)), const char* fmt, ...) __attribute__((format (printf, 2, 3)));
@@ -39,6 +42,50 @@ void _prlog(int log_level __attribute__((unused)), const char* fmt, ...)
 static void stub_function(void)
 {
 	abort();
+}
+
+struct cpu_thread;
+
+struct cpu_job *__cpu_queue_job(struct cpu_thread *cpu,
+				const char *name,
+				void (*func)(void *data), void *data,
+				bool no_return);
+
+void cpu_wait_job(struct cpu_job *job, bool free_it);
+void cpu_process_local_jobs(void);
+struct cpu_job *cpu_queue_job_on_node(uint32_t chip_id,
+				       const char *name,
+				       void (*func)(void *data), void *data);
+
+struct cpu_job *cpu_queue_job_on_node(uint32_t chip_id,
+				       const char *name,
+				       void (*func)(void *data), void *data)
+{
+	(void)chip_id;
+	return __cpu_queue_job(NULL, name, func, data, false);
+}
+
+struct cpu_job *__cpu_queue_job(struct cpu_thread *cpu,
+				const char *name,
+				void (*func)(void *data), void *data,
+				bool no_return)
+{
+	(void)cpu;
+	(void)name;
+	(func)(data);
+	(void)no_return;
+	return NULL;
+}
+
+void __attrconst cpu_wait_job(struct cpu_job *job, bool free_it)
+{
+	(void)job;
+	(void)free_it;
+	return;
+}
+
+void __attrconst cpu_process_local_jobs(void)
+{
 }
 
 #define STUB(fnname) \

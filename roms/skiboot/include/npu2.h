@@ -17,19 +17,34 @@
 #ifndef __NPU2_H
 #define __NPU2_H
 
+#include <pci.h>
 #include <phys-map.h>
+#include <npu2-regs.h>
 
 /* Debugging options */
 #define NPU2DBG(p, fmt, a...)	prlog(PR_DEBUG, "NPU%d: " fmt, \
-				      (p)->phb.opal_id, ##a)
+				      (p)->phb_nvlink.opal_id, ##a)
 #define NPU2INF(p, fmt, a...)	prlog(PR_INFO,  "NPU%d: " fmt, \
-				      (p)->phb.opal_id, ##a)
+				      (p)->phb_nvlink.opal_id, ##a)
 #define NPU2ERR(p, fmt, a...)	prlog(PR_ERR,   "NPU%d: " fmt, \
-				      (p)->phb.opal_id, ##a)
+				      (p)->phb_nvlink.opal_id, ##a)
 
-#define NPU2DEVDBG(p, fmt, a...)	NPU2DBG((p)->npu, fmt, ##a)
-#define NPU2DEVINF(p, fmt, a...)	NPU2INF((p)->npu, fmt, ##a)
-#define NPU2DEVERR(p, fmt, a...)	NPU2ERR((p)->npu, fmt, ##a)
+#define NPU2DEVLOG(l, p, fmt, a...)	prlog(l, "NPU%d:%d:%d.%d " fmt, \
+					      (p)->npu->phb_nvlink.opal_id, \
+					      ((p)->bdfn >> 8) & 0xff, \
+					      ((p)->bdfn >> 3) & 0x1f, \
+					      (p)->bdfn & 0x7, ##a)
+#define NPU2DEVDBG(p, fmt, a...)	NPU2DEVLOG(PR_DEBUG, p, fmt, ##a)
+#define NPU2DEVINF(p, fmt, a...)	NPU2DEVLOG(PR_INFO, p, fmt, ##a)
+#define NPU2DEVERR(p, fmt, a...)	NPU2DEVLOG(PR_ERR, p, fmt, ##a)
+
+#define OCAPIDBG(dev, fmt, a...)    prlog(PR_DEBUG, "OCAPI[%d:%d]: " fmt, \
+					  dev->npu->chip_id, dev->brick_index, ## a)
+#define OCAPIINF(dev, fmt, a...)    prlog(PR_INFO, "OCAPI[%d:%d]: " fmt, \
+					  dev->npu->chip_id, dev->brick_index, ## a)
+#define OCAPIERR(dev, fmt, a...)    prlog(PR_ERR, "OCAPI[%d:%d]: " fmt, \
+					  dev->npu->chip_id, dev->brick_index, ## a)
+
 
 /* Number of PEs supported */
 #define NPU2_MAX_PE_NUM		16
@@ -42,10 +57,10 @@
 #define NPU2_DEV_DL_RESET	0x2
 
 /* Return the stack (0-2) of a device */
-#define NPU2DEV_STACK(ndev) ((ndev)->index / 2)
+#define NPU2DEV_STACK(ndev) ((ndev)->brick_index / 2)
 
 /* Return the brick number (0-1) within a stack */
-#define NPU2DEV_BRICK(ndev) ((ndev)->index % 2)
+#define NPU2DEV_BRICK(ndev) ((ndev)->brick_index % 2)
 
 /* This represents the state of the actual hardware BARs not the
  * emulated PCIe BARs. The is a subtle difference between the two as
@@ -75,21 +90,19 @@ struct npu2_pcie_bar {
 	struct npu2_bar		npu2_bar;
 };
 
-struct npu2;
-struct npu2_dev {
-	uint32_t		index;
-	uint32_t                flags;
-	uint64_t                xscom;
-	uint64_t		pl_xscom_base;
-	void			*regs;
-	struct dt_node		*dt_node;
-	struct npu2_pcie_bar	bars[2];
-	struct npu2		*npu;
+enum npu2_dev_type {
+	NPU2_DEV_TYPE_UNKNOWN,
+	NPU2_DEV_TYPE_NVLINK,
+	NPU2_DEV_TYPE_OPENCAPI,
+};
 
-	/* Device and function numbers are allocated based on GPU
-	 * association. Links to connected to the same GPU will be
-	 * exposed as different functions of the same bus/device. */
-	uint32_t		bdfn;
+struct npu2;
+
+struct npu2_dev_nvlink {
+	/* For NVLink, device and function numbers are allocated based
+	 * on GPU association. Links to connected to the same GPU will
+	 * be exposed as different functions of the same
+	 * bus/device. */
 	uint32_t		gpu_bdfn;
 
 	/* PCI virtual device and the associated GPU device */
@@ -99,39 +112,56 @@ struct npu2_dev {
 
 	uint8_t			link_flags;
 
-	/* Vendor specific capability */
-	uint32_t		vendor_cap;
-
-	/* Which PHY lanes this device is associated with */
-	uint32_t		lane_mask;
-
-	/* Track currently running procedure and step number */
-	uint16_t		procedure_number;
-	uint16_t		procedure_step;
-	uint64_t		procedure_data;
-	unsigned long		procedure_tb;
-	uint32_t		procedure_status;
-
 	/* Used to associate the NPU device with GPU PCI devices */
 	const char		*slot_label;
 };
 
+struct npu2_dev {
+	enum npu2_dev_type	type;
+	uint32_t		link_index;
+	uint32_t		brick_index;
+	uint64_t		pl_xscom_base;
+	struct dt_node		*dt_node;
+	struct npu2_pcie_bar	bars[2];
+	struct npu2		*npu;
+
+	uint32_t		bdfn;
+
+	/* Which PHY lanes this device is associated with */
+	uint32_t		lane_mask;
+	uint64_t		link_speed; /* not used for NVLink */
+
+	/* Track currently running procedure and step number */
+	uint16_t		procedure_number;
+	uint16_t		procedure_step;
+	unsigned long		procedure_tb;
+	uint32_t		procedure_status;
+
+	/* NVLink */
+	struct npu2_dev_nvlink	nvlink;
+
+	/* OpenCAPI */
+	struct phb		phb_ocapi;
+	bool			train_need_fence;
+	bool			train_fenced;
+};
+
 struct npu2 {
 	uint32_t	index;
-	uint32_t	flags;
+	struct dt_node	*dt_node;
 	uint32_t	chip_id;
 	uint64_t	xscom_base;
-	uint64_t	at_xscom;
 	void		*regs;
 	uint64_t	mm_base;
 	uint64_t	mm_size;
 	uint32_t	base_lsi;
+	uint32_t	irq_base;
 	uint32_t	total_devices;
 	struct npu2_dev	*devices;
+	enum phys_map_type gpu_map_type;
+	int		ctx_ref[NPU2_XTS_BDF_MAP_SIZE];
 
 	/* IODA cache */
-	uint64_t	lxive_cache[8];
-	uint64_t	bdf2pe_cache[36];
 	uint64_t	tve_cache[16];
 	bool		tx_zcal_complete[2];
 
@@ -139,24 +169,63 @@ struct npu2 {
 	 * tables. */
 	struct lock	lock;
 
-	struct phb	phb;
+	/* NVLink */
+	struct phb	phb_nvlink;
+	uint32_t	phb_index;
+
+	uint64_t	i2c_port_id_ocapi;
 };
 
-static inline struct npu2 *phb_to_npu2(struct phb *phb)
+static inline struct npu2 *phb_to_npu2_nvlink(struct phb *phb)
 {
-	return container_of(phb, struct npu2, phb);
+	assert(phb->phb_type == phb_type_npu_v2);
+	return container_of(phb, struct npu2, phb_nvlink);
 }
+
+static inline struct npu2_dev *phb_to_npu2_dev_ocapi(struct phb *phb)
+{
+	assert(phb->phb_type == phb_type_npu_v2_opencapi);
+	return container_of(phb, struct npu2_dev, phb_ocapi);
+}
+
+static inline struct phb *npu2_dev_to_phb(struct npu2_dev *ndev)
+{
+	switch (ndev->type) {
+	case NPU2_DEV_TYPE_NVLINK:
+		return &ndev->npu->phb_nvlink;
+	case NPU2_DEV_TYPE_OPENCAPI:
+		return &ndev->phb_ocapi;
+	default:
+		assert(false);
+	}
+}
+
+void npu2_i2c_presence_detect(struct npu2 *npu);
+int npu2_opencapi_init_npu(struct npu2 *npu);
+int npu2_nvlink_init_npu(struct npu2 *npu);
+void npu2_nvlink_create_phb(struct npu2 *npu, struct dt_node *dn);
 
 void npu2_write_4b(struct npu2 *p, uint64_t reg, uint32_t val);
 uint32_t npu2_read_4b(struct npu2 *p, uint64_t reg);
 void npu2_write(struct npu2 *p, uint64_t reg, uint64_t val);
 uint64_t npu2_read(struct npu2 *p, uint64_t reg);
 void npu2_write_mask(struct npu2 *p, uint64_t reg, uint64_t val, uint64_t mask);
+void npu2_write_mask_4b(struct npu2 *p, uint64_t reg, uint32_t val, uint32_t mask);
 int64_t npu2_dev_procedure(void *dev, struct pci_cfg_reg_filter *pcrf,
 			   uint32_t offset, uint32_t len, uint32_t *data,
 			   bool write);
 void npu2_dev_procedure_reset(struct npu2_dev *dev);
+
 void npu2_set_link_flag(struct npu2_dev *ndev, uint8_t flag);
 void npu2_clear_link_flag(struct npu2_dev *ndev, uint8_t flag);
+uint32_t reset_ntl(struct npu2_dev *ndev);
 extern int nv_zcal_nominal;
+void npu2_opencapi_phy_setup(struct npu2_dev *dev);
+void npu2_opencapi_phy_prbs31(struct npu2_dev *dev);
+void npu2_opencapi_bump_ui_lane(struct npu2_dev *dev);
+int64_t npu2_freeze_status(struct phb *phb __unused,
+			   uint64_t pe_number __unused,
+			   uint8_t *freeze_state,
+			   uint16_t *pci_error_type __unused,
+			   uint16_t *severity __unused);
 #endif /* __NPU2_H */

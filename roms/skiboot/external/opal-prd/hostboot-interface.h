@@ -59,6 +59,7 @@ enum MemoryError_t
  * Previous implementations may have incorrectly ignored failures.
  */
 #define HBRT_CAPS_OPAL_HAS_XSCOM_RC   (1ul << 0)
+#define HBRT_CAPS_OPAL_HAS_WAKEUP_SUPPORT (1ul << 1)
 
 /**
  *  Load types for the load_pm_complex() interface
@@ -683,6 +684,19 @@ struct runtime_interfaces {
 	 */
 	void (*firmware_notify)(uint64_t len, void *data);
 
+        /**
+         *  @brief Prepare for HBRT concurrent code update
+         *
+         *  @details  This call allows the Host to inform HBRT that a concurrent
+         *  code update has been initiated.  HBRT then prepares updated targeting
+         *  data for use by the updated HBRT code.
+         *
+         *  @return        0 on success else return code
+         *  @platform FSP
+         */
+        int (*prepare_hbrt_update)( void );
+
+
 	/* Reserve some space for future growth. */
-	void (*reserved[22])(void);
+	void (*reserved[21])(void);
 };

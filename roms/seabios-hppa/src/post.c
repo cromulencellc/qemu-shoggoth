@@ -23,7 +23,6 @@
 #include "string.h" // memset
 #include "util.h" // kbd_init
 #include "tcgbios.h" // tpm_*
-#include "stacks.h" // wait_threads
 
 
 /****************************************************************
@@ -120,7 +119,7 @@ interface_init(void)
     pmm_init();
     pnp_init();
     kbd_init();
-    // mouse_init();
+    mouse_init();
 }
 
 // Initialize hardware devices
@@ -171,7 +170,7 @@ prepareboot(void)
     cdrom_prepboot();
     pmm_prepboot();
     malloc_prepboot();
-    // e820_prepboot();
+    e820_prepboot();
 
     HaveRunPost = 2;
 

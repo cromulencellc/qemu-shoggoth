@@ -32,5 +32,8 @@ void ram_rapid_postcopy_chunk_hostpages_pass(MigrationState *ms, bool unsent_pas
                                           RAMBlock *block, PostcopyDiscardState *pds);
 void ram_rapid_get_ram_blocks(MemoryList *mem_list);
 void ram_rapid_get_ram_blocks_deltas(MemoryList *mem_list);
+void ram_rapid_update_dirty_pages(RAMBlock *rb, size_t start, size_t npages);
+uint64_t ram_rapid_get_total_transferred_pages(void);
+void ram_rapid_precopy_enable_free_page_optimization(void);
 
 #endif

@@ -302,7 +302,7 @@ static void sungem_send_packet(SunGEMState *s, const uint8_t *buf,
     NetClientState *nc = qemu_get_queue(s->nic);
 
     if (s->macregs[MAC_XIFCFG >> 2] & MAC_XIFCFG_LBCK) {
-        nc->info->receive(nc, (uint8_t*)buf, size);
+        nc->info->receive(nc, buf, size);
     } else {
         qemu_send_packet(nc, buf, size);
     }
@@ -539,7 +539,7 @@ static int sungem_check_rx_mac(SunGEMState *s, const uint8_t *mac, uint32_t crc)
     return rx_no_match;
 }
 
-static ssize_t sungem_receive(NetClientState *nc, uint8_t *buf,
+static ssize_t sungem_receive(NetClientState *nc, const uint8_t *buf,
                               size_t size)
 {
     SunGEMState *s = qemu_get_nic_opaque(nc);

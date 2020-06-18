@@ -18,7 +18,14 @@ int cbvga_set_dacformat(struct vgamode_s *vmode_g, int val);
 int cbvga_save_restore(int cmd, u16 seg, void *data);
 int cbvga_set_mode(struct vgamode_s *vmode_g, int flags);
 int cbvga_get_linesize(struct vgamode_s *vmode_g);
+void cbvga_setup_modes(u64 addr, u8 bpp, u32 xlines, u32 ylines, u32 linelength);
 int cbvga_setup(void);
+
+// bochsdisplay.c
+int bochs_display_setup(void);
+
+// ramfb.c
+int ramfb_setup(void);
 
 // clext.c
 struct vgamode_s *clext_find_mode(int mode);
@@ -88,6 +95,7 @@ extern u8 vgafont16alt[];
 // vgainit.c
 extern int VgaBDF;
 extern int HaveRunInit;
+u32 allocate_pmm(u32 size, int highmem, int aligned);
 
 // vgaversion.c
 extern const char VERSION[], BUILDINFO[];

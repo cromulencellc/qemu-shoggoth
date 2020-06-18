@@ -109,13 +109,13 @@ u64 _vp_read(struct vp_cap *cap, u32 offset, u8 size)
         }
     }
     }
-    dprintf(1, "vp read   %x (%d) -> 0x%llx\n", cap->ioaddr + offset, size, var);
+    dprintf(9, "vp read   %x (%d) -> 0x%llx\n", cap->ioaddr + offset, size, var);
     return var;
 }
 
 void _vp_write(struct vp_cap *cap, u32 offset, u8 size, u64 var)
 {
-    dprintf(1, "vp write  %x (%d) <- 0x%llx   mode=%d\n", cap->ioaddr + offset, size, var, cap->mode);
+    dprintf(9, "vp write  %x (%d) <- 0x%llx   mode=%d\n", cap->ioaddr + offset, size, var, cap->mode);
 
     switch (cap->mode) {
     case VP_ACCESS_IO:

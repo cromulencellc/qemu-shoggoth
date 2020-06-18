@@ -27,7 +27,7 @@
 #include <interrupts.h>
 #include <bitutils.h>
 
-#include <valgrind/memcheck.h>
+#include <skiboot-valgrind.h>
 
 #include "../../libfdt/fdt.c"
 #include "../../libfdt/fdt_ro.c"
@@ -69,12 +69,14 @@ unsigned long tb_hz = 512000000;
 #define PVR_TYPE_P8	0x004d
 #define PVR_TYPE_P8NVL	0x004c
 #define PVR_TYPE_P9	0x004e
+#define PVR_TYPE_P9P	0x004f
 #define PVR_P7		0x003f0201
 #define PVR_P7P		0x004a0201
 #define PVR_P8E		0x004b0201
 #define PVR_P8		0x004d0200
 #define PVR_P8NVL	0x004c0100
 #define PVR_P9		0x004e0200
+#define PVR_P9P		0x004f0100
 
 #define SPR_PVR		0x11f	/* RO: Processor version register */
 
@@ -83,6 +85,22 @@ struct cpu_thread {
 	uint32_t			pir;
 	uint32_t			chip_id;
 };
+struct cpu_job *__cpu_queue_job(struct cpu_thread *cpu,
+				const char *name,
+				void (*func)(void *data), void *data,
+				bool no_return);
+void cpu_wait_job(struct cpu_job *job, bool free_it);
+void cpu_process_local_jobs(void);
+struct cpu_job *cpu_queue_job_on_node(uint32_t chip_id,
+				       const char *name,
+				       void (*func)(void *data), void *data);
+static inline struct cpu_job *cpu_queue_job(struct cpu_thread *cpu,
+					    const char *name,
+					    void (*func)(void *data),
+					    void *data)
+{
+	return __cpu_queue_job(cpu, name, func, data, false);
+}
 
 struct cpu_thread __boot_cpu, *boot_cpu = &__boot_cpu;
 static unsigned long fake_pvr = PVR_P7;
@@ -139,6 +157,7 @@ static bool spira_check_ptr(const void *ptr, const char *file, unsigned int line
 #include "../slca.c"
 #include "../hostservices.c"
 #include "../i2c.c"
+#include "../tpmrel.c"
 #include "../../core/vpd.c"
 #include "../../core/device.c"
 #include "../../core/chip.c"
@@ -192,7 +211,7 @@ static u32 hash_prop(const struct dt_property *p)
 
 	/* a stupid checksum */
 	for (i = 0; i < p->len; i++)
-		hash += ((p->prop[i] & ~0x10) + 1) * i;
+		hash += (((signed char)p->prop[i] & ~0x10) + 1) * i;
 
 	return hash;
 }
@@ -234,7 +253,22 @@ static void squash_blobs(struct dt_node *root)
 
 static void dump_hdata_fdt(struct dt_node *root)
 {
+	struct dt_node *n;
 	void *fdt_blob;
+
+	/* delete some properties that hardcode pointers */
+	dt_for_each_node(dt_root, n) {
+		struct dt_property *base;
+
+		/*
+		 * sml-base is a raw pointer into the HDAT area so it changes
+		 * on each execution of hdata_to_dt. Work around this by
+		 * zeroing it.
+		 */
+		base = __dt_find_property(n, "linux,sml-base");
+		if (base)
+			memset(base->prop, 0, base->len);
+	}
 
 	fdt_blob = create_dtb(root, false);
 
@@ -280,6 +314,10 @@ int main(int argc, char *argv[])
 			opt_count++;
 		} else if (strcmp(argv[i], "-9") == 0) {
 			fake_pvr = PVR_P9;
+			proc_gen = proc_gen_p9;
+			opt_count++;
+		} else if (strcmp(argv[i], "-9P") == 0) {
+			fake_pvr = PVR_P9P;
 			proc_gen = proc_gen_p9;
 			opt_count++;
 		}

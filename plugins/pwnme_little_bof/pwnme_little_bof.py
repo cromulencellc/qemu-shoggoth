@@ -112,10 +112,6 @@ def on_ra_idle():
 def get_ra_report_type():
    return JOB_REPORT_IDS["report_processor"] | JOB_REPORT_IDS["report_exception"]
 
-#def on_breakpoint_hit(cpu_id, pc, bp_id):
-#    print("Python: Breakpoint hit")
-#    continue_vm()
-
 def on_exception(exception):
    global done, sinput
    if exception == EXCP00_DIVZ:
@@ -185,7 +181,7 @@ def on_exception(exception):
 #    print("Python: On Memory Write " + hex(paddr) + " value " + hex(pval))
 #    print(binascii.hexlify(CPU.getPhysicalMemory(paddr, len(pbytes))))
 
-#def on_memory_read(paddr, pval, pbytes):
+#def on_memory_read(paddr, vaddr, pval, pbytes):
 #    print("Python: On Memory Read " + hex(paddr) + " value " + hex(pval))
 #    print(binascii.hexlify(CPU.getPhysicalMemory(paddr, len(pbytes))))
 

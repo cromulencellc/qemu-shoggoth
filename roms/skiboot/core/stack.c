@@ -21,18 +21,20 @@
 #include <stack.h>
 #include <mem_region.h>
 #include <unistd.h>
+#include <lock.h>
 
 #define STACK_BUF_ENTRIES	60
 static struct bt_entry bt_buf[STACK_BUF_ENTRIES];
 
-extern uint32_t _stext, _etext;
-
 /* Dumps backtrace to buffer */
-void __nomcount __backtrace(struct bt_entry *entries, unsigned int *count)
+void __nomcount ___backtrace(struct bt_entry *entries, unsigned int *count,
+				unsigned long r1,
+				unsigned long *token, unsigned long *r1_caller)
 {
 	unsigned int room = *count;
-	unsigned long *fp = __builtin_frame_address(0);
+	unsigned long *fp = (unsigned long *)r1;
 	unsigned long top_adj = top_of_ram;
+	struct stack_frame *eframe = (struct stack_frame *)fp;
 
 	/* Assume one stack for early backtraces */
 	if (top_of_ram == SKIBOOT_BASE + SKIBOOT_SIZE)
@@ -43,23 +45,31 @@ void __nomcount __backtrace(struct bt_entry *entries, unsigned int *count)
 		fp = (unsigned long *)fp[0];
 		if (!fp || (unsigned long)fp > top_adj)
 			break;
+		eframe = (struct stack_frame *)fp;
 		entries->sp = (unsigned long)fp;
 		entries->pc = fp[2];
 		entries++;
 		*count = (*count) + 1;
 		room--;
 	}
+
+	*r1_caller = eframe->gpr[1];
+
+	if (fp)
+		*token = eframe->gpr[0];
+	else
+		*token = -1UL;
 }
 
-void __print_backtrace(unsigned int pir,
-		       struct bt_entry *entries, unsigned int count,
-		       char *out_buf, unsigned int *len, bool symbols)
+void ___print_backtrace(unsigned int pir, struct bt_entry *entries,
+			      unsigned int count, unsigned long token,
+			      unsigned long r1_caller, char *out_buf,
+			      unsigned int *len, bool symbols)
 {
 	static char bt_text_buf[4096];
 	int i, l = 0, max;
 	char *buf = out_buf;
-	unsigned long bottom, top, tbot, ttop, saddr = 0;
-	char *sym = NULL, *sym_end = NULL;
+	unsigned long bottom, top, normal_top, tbot, ttop;
 	char mark;
 
 	if (!out_buf) {
@@ -69,7 +79,8 @@ void __print_backtrace(unsigned int pir,
 		max = *len - 1;
 
 	bottom = cpu_stack_bottom(pir);
-	top = cpu_stack_top(pir);
+	normal_top = cpu_stack_top(pir);
+	top = cpu_emergency_stack_top(pir);
 	tbot = SKIBOOT_BASE;
 	ttop = (unsigned long)&_etext;
 
@@ -77,26 +88,24 @@ void __print_backtrace(unsigned int pir,
 	for (i = 0; i < count && l < max; i++) {
 		if (entries->sp < bottom || entries->sp > top)
 			mark = '!';
+		else if (entries->sp > normal_top)
+			mark = 'E';
 		else if (entries->pc < tbot || entries->pc > ttop)
 			mark = '*';
 		else
 			mark = ' ';
-		if (symbols)
-			saddr = get_symbol(entries->pc, &sym, &sym_end);
-		else
-			saddr = 0;
 		l += snprintf(buf + l, max - l,
 			      " S: %016lx R: %016lx %c ",
 			      entries->sp, entries->pc, mark);
-		while(saddr && sym < sym_end && l < max)
-			buf[l++] = *(sym++);
-		if (sym && l < max)
-			l += snprintf(buf + l, max - l, "+0x%lx\n",
-				      entries->pc - saddr);
-		else
-			l += snprintf(buf + l, max - l, "\n");
+		if (symbols)
+			l += snprintf_symbol(buf + l, max - l, entries->pc);
+		l += snprintf(buf + l, max - l, "\n");
 		entries++;
 	}
+	if (token <= OPAL_LAST)
+		l += snprintf(buf + l, max - l, " --- OPAL call token: 0x%lx caller R1: 0x%016lx ---\n", token, r1_caller);
+	else if (token == -1UL)
+		l += snprintf(buf + l, max - l, " --- OPAL boot ---\n");
 	if (!out_buf)
 		write(stdout->fd, bt_text_buf, l);
 	buf[l++] = 0;
@@ -115,11 +124,14 @@ struct lock bt_lock = LOCK_UNLOCKED;
 void backtrace(void)
 {
 	unsigned int ents = STACK_BUF_ENTRIES;
+	unsigned long token, r1_caller;
 
 	lock(&bt_lock);
 
-	__backtrace(bt_buf, &ents);
-	__print_backtrace(mfspr(SPR_PIR), bt_buf, ents, NULL, NULL, true);
+	___backtrace(bt_buf, &ents, (unsigned long)__builtin_frame_address(0),
+			&token, &r1_caller);
+	___print_backtrace(mfspr(SPR_PIR), bt_buf, ents, token, r1_caller,
+			NULL, NULL, true);
 
 	unlock(&bt_lock);
 }
@@ -149,6 +161,12 @@ void __nomcount __mcount_stack_check(uint64_t sp, uint64_t lr)
 	uint64_t bot = base + sizeof(struct cpu_thread);
 	int64_t mark = sp - bot;
 	uint64_t top = base + NORMAL_STACK_SIZE;
+
+	/*
+	 * Don't check the emergency stack just yet.
+	 */
+	if (c->in_opal_call > 1)
+		return;
 
 	/*
 	 * Don't re-enter on this CPU or don't enter at all if somebody

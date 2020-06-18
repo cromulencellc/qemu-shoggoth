@@ -46,10 +46,14 @@
 #include <xive.h>
 #include <nvram.h>
 #include <vas.h>
-#include <libstb/stb.h>
-#include <libstb/container.h>
+#include <libstb/secureboot.h>
+#include <libstb/trustedboot.h>
 #include <phys-map.h>
 #include <imc.h>
+#include <dts.h>
+#include <sbe-p9.h>
+#include <debug_descriptor.h>
+#include <occ.h>
 
 enum proc_gen proc_gen;
 unsigned int pcie_max_link_speed;
@@ -59,7 +63,7 @@ static size_t kernel_size;
 static bool kernel_32bit;
 
 /* We backup the previous vectors here before copying our own */
-static uint8_t old_vectors[0x2000];
+static uint8_t old_vectors[EXCEPTION_VECTORS_END];
 
 #ifdef SKIBOOT_GCOV
 void skiboot_gcov_done(void);
@@ -74,7 +78,7 @@ struct debug_descriptor debug_descriptor = {
 	/* console log level:
 	 *   high 4 bits in memory, low 4 bits driver (e.g. uart). */
 #ifdef DEBUG
-	.console_log_levels = (PR_DEBUG << 4) | PR_DEBUG,
+	.console_log_levels = (PR_TRACE << 4) | PR_DEBUG,
 #else
 	.console_log_levels = (PR_DEBUG << 4) | PR_NOTICE,
 #endif
@@ -342,10 +346,9 @@ bool start_preload_kernel(void)
 
 static bool load_kernel(void)
 {
-	void* stb_container = NULL;
+	void *stb_container = NULL;
 	struct elf_hdr *kh;
 	int loaded;
-	bool do_stb = false;
 
 	prlog(PR_NOTICE, "INIT: Waiting for kernel...\n");
 
@@ -368,7 +371,6 @@ static bool load_kernel(void)
 			printf("Using built-in kernel\n");
 			memmove(KERNEL_LOAD_BASE, (void*)builtin_base,
 				kernel_size);
-			do_stb = true;
 		}
 	}
 
@@ -381,26 +383,25 @@ static bool load_kernel(void)
 		 * If the kernel is at 0, restore it as it was overwritten
 		 * by our vectors.
 		 */
-		if (kernel_entry < 0x2000) {
+		if (kernel_entry < EXCEPTION_VECTORS_END) {
 			cpu_set_sreset_enable(false);
-			memcpy(NULL, old_vectors, 0x2000);
+			memcpy(NULL, old_vectors, EXCEPTION_VECTORS_END);
 			sync_icache();
 		}
-		do_stb = true;
-		stb_container = kh; /* probably incorrect */
 	} else {
 		if (!kernel_size) {
 			printf("INIT: Assuming kernel at %p\n",
 			       KERNEL_LOAD_BASE);
 			/* Hack for STB in Mambo, assume at least 4kb in mem */
 			kernel_size = SECURE_BOOT_HEADERS_SIZE;
-			do_stb = true;
+			kernel_entry = (uint64_t)KERNEL_LOAD_BASE;
 		}
-		kh = (struct elf_hdr *) (KERNEL_LOAD_BASE);
 		if (stb_is_container(KERNEL_LOAD_BASE, kernel_size)) {
-			stb_container = kh;
+			stb_container = KERNEL_LOAD_BASE;
 			kh = (struct elf_hdr *) (KERNEL_LOAD_BASE + SECURE_BOOT_HEADERS_SIZE);
-		}
+		} else
+			kh = (struct elf_hdr *) (KERNEL_LOAD_BASE);
+
 	}
 
 	prlog(PR_DEBUG,
@@ -423,25 +424,22 @@ static bool load_kernel(void)
 		return false;
 	}
 
-	if (do_stb)
-	{
-		sb_verify(RESOURCE_ID_KERNEL, stb_container,
-			  kernel_size + SECURE_BOOT_HEADERS_SIZE);
-		tb_measure(RESOURCE_ID_KERNEL, stb_container,
-			   kernel_size + SECURE_BOOT_HEADERS_SIZE);
+	if (chip_quirk(QUIRK_MAMBO_CALLOUTS)) {
+		secureboot_verify(RESOURCE_ID_KERNEL,
+				  stb_container,
+				  SECURE_BOOT_HEADERS_SIZE + kernel_size);
+		trustedboot_measure(RESOURCE_ID_KERNEL,
+				    stb_container,
+				    SECURE_BOOT_HEADERS_SIZE + kernel_size);
 	}
-
-	/*
-	 * Verify and measure the retrieved PNOR partition as part of the
-	 * secure boot and trusted boot requirements
-	 */
-	stb_final();
 
 	return true;
 }
 
 static void load_initramfs(void)
 {
+	uint64_t *initramfs_start;
+	void *stb_container = NULL;
 	int loaded;
 
 	loaded = wait_for_resource_loaded(RESOURCE_ID_INITRAMFS,
@@ -450,18 +448,66 @@ static void load_initramfs(void)
 	if (loaded != OPAL_SUCCESS || !initramfs_size)
 		return;
 
+	if (stb_is_container(INITRAMFS_LOAD_BASE, initramfs_size)) {
+		stb_container = INITRAMFS_LOAD_BASE;
+		initramfs_start = INITRAMFS_LOAD_BASE + SECURE_BOOT_HEADERS_SIZE;
+	} else {
+		initramfs_start = INITRAMFS_LOAD_BASE;
+	}
+
 	dt_check_del_prop(dt_chosen, "linux,initrd-start");
 	dt_check_del_prop(dt_chosen, "linux,initrd-end");
 
 	printf("INIT: Initramfs loaded, size: %zu bytes\n", initramfs_size);
 
 	dt_add_property_u64(dt_chosen, "linux,initrd-start",
-			(uint64_t)INITRAMFS_LOAD_BASE);
+			(uint64_t)initramfs_start);
 	dt_add_property_u64(dt_chosen, "linux,initrd-end",
-			(uint64_t)INITRAMFS_LOAD_BASE + initramfs_size);
+			(uint64_t)initramfs_start + initramfs_size);
+
+	if (chip_quirk(QUIRK_MAMBO_CALLOUTS)) {
+		secureboot_verify(RESOURCE_ID_INITRAMFS,
+				  stb_container,
+				  SECURE_BOOT_HEADERS_SIZE + initramfs_size);
+		trustedboot_measure(RESOURCE_ID_INITRAMFS,
+				    stb_container,
+				    SECURE_BOOT_HEADERS_SIZE + initramfs_size);
+	}
 }
 
-int64_t mem_dump_free(void);
+static void cpu_disable_ME_RI_one(void *param __unused)
+{
+	disable_machine_check();
+	mtmsrd(0, 1);
+}
+
+static int64_t cpu_disable_ME_RI_all(void)
+{
+	struct cpu_thread *cpu;
+	struct cpu_job **jobs;
+
+	jobs = zalloc(sizeof(struct cpu_job *) * (cpu_max_pir + 1));
+	assert(jobs);
+
+	for_each_available_cpu(cpu) {
+		if (cpu == this_cpu())
+			continue;
+		jobs[cpu->pir] = cpu_queue_job(cpu, "cpu_disable_ME_RI",
+						cpu_disable_ME_RI_one, NULL);
+	}
+
+	/* this cpu */
+	cpu_disable_ME_RI_one(NULL);
+
+	for_each_available_cpu(cpu) {
+		if (jobs[cpu->pir])
+			cpu_wait_job(jobs[cpu->pir], true);
+	}
+
+	free(jobs);
+
+	return OPAL_SUCCESS;
+}
 
 void *fdt;
 
@@ -491,27 +537,38 @@ void __noreturn load_and_boot_kernel(bool is_reboot)
 
 	load_initramfs();
 
+	trustedboot_exit_boot_services();
+
 	ipmi_set_fw_progress_sensor(IPMI_FW_OS_BOOT);
+
+	if (fsp_present())
+		occ_pstates_init();
 
 	if (!is_reboot) {
 		/* We wait for the nvram read to complete here so we can
 		 * grab stuff from there such as the kernel arguments
 		 */
-		fsp_nvram_wait_open();
+		nvram_wait_for_load();
 
 		/* Wait for FW VPD data read to complete */
 		fsp_code_update_wait_vpd(true);
-	} else
+
+		/*
+		 * OCC takes few secs to boot.  Call this as late as
+		 * as possible to avoid delay.
+		 */
+		if (!occ_sensors_init())
+			dts_sensor_create_nodes(sensor_node);
+
+	} else {
+		/* fdt will be rebuilt */
+		free(fdt);
+		fdt = NULL;
+
 		nvram_reinit();
+	}
 
 	fsp_console_select_stdout();
-
-	/*
-	 * OCC takes few secs to boot.  Call this as late as
-	 * as possible to avoid delay.
-	 */
-	occ_pstates_init();
-	occ_sensors_init();
 
 	/* Use nvram bootargs over device tree */
 	cmdline = nvram_query("bootargs");
@@ -523,6 +580,8 @@ void __noreturn load_and_boot_kernel(bool is_reboot)
 	}
 
 	op_display(OP_LOG, OP_MOD_INIT, 0x000B);
+
+	add_fast_reboot_dt_entries();
 
 	/* Create the device tree blob to boot OS. */
 	fdt = create_dtb(dt_root, false);
@@ -540,25 +599,34 @@ void __noreturn load_and_boot_kernel(bool is_reboot)
 	/* Clear SRCs on the op-panel when Linux starts */
 	op_panel_clear_src();
 
-	cpu_give_self_os();
-
 	mem_dump_free();
-
-	/* Take processours out of nap */
-	cpu_set_sreset_enable(false);
-	cpu_set_ipi_enable(false);
 
 	/* Dump the selected console */
 	stdoutp = dt_prop_get_def(dt_chosen, "linux,stdout-path", NULL);
 	prlog(PR_DEBUG, "INIT: stdout-path: %s\n", stdoutp ? stdoutp : "");
 
+	fdt_set_boot_cpuid_phys(fdt, this_cpu()->pir);
 
-	printf("INIT: Starting kernel at 0x%llx, fdt at %p %u bytes)\n",
+	/* Check there is something there before we branch to it */
+	if (*(uint32_t *)kernel_entry == 0) {
+		prlog(PR_EMERG, "FATAL: Kernel is zeros, can't execute!\n");
+		assert(0);
+	}
+
+	/* Take processors out of nap */
+	cpu_set_sreset_enable(false);
+	cpu_set_ipi_enable(false);
+
+	printf("INIT: Starting kernel at 0x%llx, fdt at %p %u bytes\n",
 	       kernel_entry, fdt, fdt_totalsize(fdt));
+
+	/* Disable machine checks on all */
+	cpu_disable_ME_RI_all();
 
 	debug_descriptor.state_flags |= OPAL_BOOT_COMPLETE;
 
-	fdt_set_boot_cpuid_phys(fdt, this_cpu()->pir);
+	cpu_give_self_os();
+
 	if (kernel_32bit)
 		start_kernel32(kernel_entry, fdt, mem_top);
 	start_kernel(kernel_entry, fdt, mem_top);
@@ -716,7 +784,7 @@ static void setup_branch_null_catcher(void)
 }
 #endif
 
-void setup_reset_vector(void)
+void copy_sreset_vector(void)
 {
 	uint32_t *src, *dst;
 
@@ -726,7 +794,18 @@ void setup_reset_vector(void)
 	while(src < &reset_patch_end)
 		*(dst++) = *(src++);
 	sync_icache();
-	cpu_set_sreset_enable(true);
+}
+
+void copy_sreset_vector_fast_reboot(void)
+{
+	uint32_t *src, *dst;
+
+	/* Copy the reset code over the entry point. */
+	src = &reset_fast_reboot_patch_start;
+	dst = (uint32_t *)0x100;
+	while(src < &reset_fast_reboot_patch_end)
+		*(dst++) = *(src++);
+	sync_icache();
 }
 
 void copy_exception_vectors(void)
@@ -734,14 +813,16 @@ void copy_exception_vectors(void)
 	/* Backup previous vectors as this could contain a kernel
 	 * image.
 	 */
-	memcpy(old_vectors, NULL, 0x2000);
+	memcpy(old_vectors, NULL, EXCEPTION_VECTORS_END);
 
-	/* Copy from 0x100 to 0x2000, avoid below 0x100 as this is
-	 * the boot flag used by CPUs still potentially entering
+	/* Copy from 0x100 to EXCEPTION_VECTORS_END, avoid below 0x100 as
+	 * this is the boot flag used by CPUs still potentially entering
 	 * skiboot.
 	 */
-	BUILD_ASSERT((&reset_patch_end - &reset_patch_start) < 0x1f00);
-	memcpy((void *)0x100, (void *)(SKIBOOT_BASE + 0x100), 0x1f00);
+	BUILD_ASSERT((&reset_patch_end - &reset_patch_start) <
+			EXCEPTION_VECTORS_END - 0x100);
+	memcpy((void *)0x100, (void *)(SKIBOOT_BASE + 0x100),
+			EXCEPTION_VECTORS_END - 0x100);
 	sync_icache();
 }
 
@@ -783,6 +864,51 @@ static void pci_nvram_init(void)
 	}
 }
 
+static uint32_t mem_csum(void *_p, void *_e)
+{
+	size_t len = _e - _p;
+	uint32_t *p = _p;
+	uint32_t v1 = 0, v2 = 0;
+	uint32_t csum;
+	unsigned int i;
+
+	for (i = 0; i < len; i += 4) {
+		uint32_t v = *p++;
+		v1 += v;
+		v2 += v1;
+	}
+
+	csum = v1 ^ v2;
+
+	return csum;
+}
+
+static uint32_t romem_csum;
+
+static void checksum_romem(void)
+{
+	uint32_t csum;
+
+	romem_csum = 0;
+
+	csum = mem_csum(_start, _romem_end);
+	romem_csum ^= csum;
+	csum = mem_csum(__builtin_kernel_start, __builtin_kernel_end);
+	romem_csum ^= csum;
+}
+
+bool verify_romem(void)
+{
+	uint32_t old = romem_csum;
+	checksum_romem();
+	if (old != romem_csum) {
+		romem_csum = old;
+		prlog(PR_NOTICE, "OPAL checksums did not match\n");
+		return false;
+	}
+	return true;
+}
+
 /* Called from head.S, thus no prototype. */
 void main_cpu_entry(const void *fdt);
 
@@ -809,8 +935,24 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	 */
 	clear_console();
 
+	/*
+	 * Some boot firmwares enter OPAL with MSR[ME]=1, as they presumably
+	 * handle machine checks until we take over. As we overwrite the
+	 * previous exception vectors with our own handlers, disable MSR[ME].
+	 * This could be done atomically by patching in a branch then patching
+	 * it out last, but that's a lot of effort.
+	 */
+	disable_machine_check();
+
 	/* Copy all vectors down to 0 */
 	copy_exception_vectors();
+
+	/*
+	 * Enable MSR[ME] bit so we can take MCEs. We don't currently
+	 * recover, but we print some useful information.
+	 */
+	enable_machine_check();
+	mtmsrd(MSR_RI, 1);
 
 	/* Setup a NULL catcher to catch accidental NULL ptr calls */
 	setup_branch_null_catcher();
@@ -818,11 +960,17 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	/* Call library constructors */
 	do_ctors();
 
-	prlog(PR_NOTICE, "OPAL %s starting...\n", version);
+	prlog(PR_NOTICE, "OPAL %s%s starting...\n", version,
+#ifdef DEBUG
+	"-debug"
+#else
+	""
+#endif
+	);
 	prlog(PR_DEBUG, "initial console log level: memory %d, driver %d\n",
 	       (debug_descriptor.console_log_levels >> 4),
 	       (debug_descriptor.console_log_levels & 0x0f));
-	prlog(PR_TRACE, "You will not see this\n");
+	prlog(PR_TRACE, "OPAL is Powered By Linked-List Technology.\n");
 
 #ifdef SKIBOOT_GCOV
 	skiboot_gcov_done();
@@ -861,6 +1009,7 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	} else {
 		dt_expand(fdt);
 	}
+	dt_add_cpufeatures(dt_root);
 
 	/* Now that we have a full devicetree, verify that we aren't on fire. */
 	per_thread_sanity_checks();
@@ -904,6 +1053,12 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	lpc_init();
 
 	/*
+	 * This should be done before mem_region_init, so the stack
+	 * region length can be set according to the maximum PIR.
+	 */
+	init_cpu_max_pir();
+
+	/*
 	 * Now, we init our memory map from the device-tree, and immediately
 	 * reserve areas which we know might contain data coming from
 	 * HostBoot. We need to do these things before we start doing
@@ -915,6 +1070,11 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	/* Reserve HOMER and OCC area */
 	homer_init();
 
+	/* Initialize the rest of the cpu thread structs */
+	init_all_cpus();
+	if (proc_gen == proc_gen_p9)
+		cpu_set_ipi_enable(true);
+
 	/* Add the /opal node to the device-tree */
 	add_opal_node();
 
@@ -925,11 +1085,6 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	 * Note: Timebases still not synchronized.
 	 */
 	probe_platform();
-
-	/* Initialize the rest of the cpu thread structs */
-	init_all_cpus();
-	if (proc_gen == proc_gen_p9)
-		cpu_set_ipi_enable(true);
 
 	/* Allocate our split trace buffers now. Depends add_opal_node() */
 	init_trace_buffers();
@@ -960,17 +1115,25 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	/* We can now overwrite the 0x100 vector as we are no longer being
 	 * entered there.
 	 */
-	setup_reset_vector();
+	copy_sreset_vector();
 
 	/* We can now do NAP mode */
 	cpu_set_sreset_enable(true);
 
 	/*
-	 * Synchronize time bases. Thi resets all the TB values to a small
-	 * value (so they appear to go backward at this point), and synchronize
-	 * all core timebases to the global ChipTOD network
+	 * Synchronize time bases. Prior to chiptod_init() the timebase
+	 * is free-running at a frequency based on the core clock rather
+	 * than being synchronised to the ChipTOD network. This means
+	 * that the timestamps in early boot might be a little off compared
+	 * to wall clock time.
 	 */
 	chiptod_init();
+
+	/*
+	 * SBE uses TB value for scheduling timer. Hence init after
+	 * chiptod init
+	 */
+	p9_sbe_init();
 
 	/* Initialize i2c */
 	p8_i2c_init();
@@ -996,14 +1159,22 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	/* Read in NVRAM and set it up */
 	nvram_init();
 
-	/* preload the IMC catalog dtb */
-	imc_catalog_preload();
-
 	/* Set the console level */
 	console_log_level();
 
 	/* Secure/Trusted Boot init. We look for /ibm,secureboot in DT */
-	stb_init();
+	secureboot_init();
+	trustedboot_init();
+
+	/*
+	 * BMC platforms load version information from flash after
+	 * secure/trustedboot init.
+	 */
+	if (platform.bmc)
+		flash_fw_version_preload();
+
+        /* preload the IMC catalog dtb */
+        imc_catalog_preload();
 
 	/* Install the OPAL Console handlers */
 	init_opal_console();
@@ -1013,11 +1184,25 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 
 	op_display(OP_LOG, OP_MOD_INIT, 0x0002);
 
+	/*
+	 * On some POWER9 BMC systems, we need to initialise the OCC
+	 * before the NPU to facilitate NVLink/OpenCAPI presence
+	 * detection, so we set it up as early as possible. On FSP
+	 * systems, Hostboot starts booting the OCC later, so we delay
+	 * OCC initialisation as late as possible to give it the
+	 * maximum time to boot up.
+	 */
+	if (!fsp_present())
+		occ_pstates_init();
+
 	pci_nvram_init();
 
 	preload_io_vpd();
 	preload_capp_ucode();
 	start_preload_kernel();
+
+	/* Catalog decompression routine */
+	imc_decompress_catalog();
 
 	/* Virtual Accelerator Switchboard */
 	vas_init();
@@ -1047,6 +1232,12 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	/* Add OPAL timer related properties */
 	late_init_timers();
 
+	/* Setup ibm,firmware-versions if able */
+	if (platform.bmc) {
+		flash_dt_add_fw_version();
+		ipmi_dt_add_bmc_info();
+	}
+
 	ipmi_set_fw_progress_sensor(IPMI_FW_PCI_INIT);
 
 	/*
@@ -1071,10 +1262,19 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	/* ... and add remaining reservations to the DT */
 	mem_region_add_dt_reserved();
 
+	/*
+	 * Update /ibm,secureboot/ibm,cvc/memory-region to point to
+	 * /reserved-memory/secure-crypt-algo-code instead of
+	 * /ibm,hostboot/reserved-memory/secure-crypt-algo-code.
+	 */
+	cvc_update_reserved_memory_phandle();
+
 	prd_register_reserved_memory();
 
 	/* On P9, switch to radix mode by default */
 	cpu_set_radix_mode();
+
+	checksum_romem();
 
 	load_and_boot_kernel(false);
 }
@@ -1085,6 +1285,9 @@ void __noreturn __secondary_cpu_entry(void)
 
 	/* Secondary CPU called in */
 	cpu_callin(cpu);
+
+	enable_machine_check();
+	mtmsrd(MSR_RI, 1);
 
 	/* Some XIVE setup */
 	xive_cpu_callin(cpu);

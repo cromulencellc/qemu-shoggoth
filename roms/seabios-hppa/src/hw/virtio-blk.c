@@ -83,7 +83,6 @@ virtio_blk_process_op(struct disk_op_s *op)
 {
     if (! CONFIG_VIRTIO_BLK)
         return 0;
-    dprintf(1, "%s: command = %d\n", __FUNCTION__, op->command);
     switch (op->command) {
     case CMD_READ:
         return virtio_blk_op(op, 0);

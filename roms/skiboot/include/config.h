@@ -39,8 +39,8 @@
 /* Enable lock debugging */
 #define DEBUG_LOCKS		1
 
-/* Enable malloc debugging */
-#define DEBUG_MALLOC		1
+/* Enable lock dependency checker */
+#define DEADLOCK_CHECKER	1
 
 /* Enable OPAL entry point tracing */
 //#define OPAL_TRACE_ENTRY	1
@@ -71,9 +71,6 @@
  * driver for it.
  */
 //#define FORCE_DUMMY_CONSOLE 1
-
-/* Enable this to make fast reboot clear memory */
-//#define FAST_REBOOT_CLEARS_MEMORY	1
 
 /* Enable this to disable setting of the output pending event when
  * sending things on the console. The FSP is very slow to consume

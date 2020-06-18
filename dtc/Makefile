@@ -10,7 +10,7 @@
 #
 VERSION = 1
 PATCHLEVEL = 4
-SUBLEVEL = 6
+SUBLEVEL = 7
 EXTRAVERSION =
 LOCAL_VERSION =
 CONFIG_LOCALVERSION =
@@ -26,6 +26,10 @@ SWIG = swig
 PKG_CONFIG ?= pkg-config
 
 INSTALL = /usr/bin/install
+INSTALL_PROGRAM = $(INSTALL)
+INSTALL_LIB = $(INSTALL)
+INSTALL_DATA = $(INSTALL) -m 644
+INSTALL_SCRIPT = $(INSTALL)
 DESTDIR =
 PREFIX = $(HOME)
 BINDIR = $(PREFIX)/bin
@@ -126,19 +130,23 @@ SCRIPTS = dtdiff
 
 all: $(BIN) libfdt
 
-# We need both Python and swig to build pylibfdt.
-.PHONY: maybe_pylibfdt
-maybe_pylibfdt: FORCE
+# We need both Python and swig to build/install pylibfdt.
+# This builds the given make ${target} if those deps are found.
+check_python_deps = \
 	if $(PKG_CONFIG) --cflags python2 >/dev/null 2>&1; then \
 		if which swig >/dev/null 2>&1; then \
 			can_build=yes; \
 		fi; \
 	fi; \
-	if [ "$$can_build" = "yes" ]; then \
-		$(MAKE) pylibfdt; \
+	if [ "$${can_build}" = "yes" ]; then \
+		$(MAKE) $${target}; \
 	else \
-		echo "## Skipping pylibfdt (install python dev and swig to build)"; \
-	fi
+		echo "\#\# Skipping pylibfdt (install python dev and swig to build)"; \
+	fi ;
+
+.PHONY: maybe_pylibfdt
+maybe_pylibfdt: FORCE
+	target=pylibfdt; $(check_python_deps)
 
 ifeq ($(NO_PYTHON),)
 all: maybe_pylibfdt
@@ -191,25 +199,30 @@ endif
 install-bin: all $(SCRIPTS)
 	@$(VECHO) INSTALL-BIN
 	$(INSTALL) -d $(DESTDIR)$(BINDIR)
-	$(INSTALL) $(BIN) $(SCRIPTS) $(DESTDIR)$(BINDIR)
+	$(INSTALL_PROGRAM) $(BIN) $(DESTDIR)$(BINDIR)
+	$(INSTALL_SCRIPT) $(SCRIPTS) $(DESTDIR)$(BINDIR)
 
 install-lib: all
 	@$(VECHO) INSTALL-LIB
 	$(INSTALL) -d $(DESTDIR)$(LIBDIR)
-	$(INSTALL) $(LIBFDT_lib) $(DESTDIR)$(LIBDIR)
+	$(INSTALL_LIB) $(LIBFDT_lib) $(DESTDIR)$(LIBDIR)
 	ln -sf $(notdir $(LIBFDT_lib)) $(DESTDIR)$(LIBDIR)/$(LIBFDT_soname)
 	ln -sf $(LIBFDT_soname) $(DESTDIR)$(LIBDIR)/libfdt.$(SHAREDLIB_EXT)
-	$(INSTALL) -m 644 $(LIBFDT_archive) $(DESTDIR)$(LIBDIR)
+	$(INSTALL_DATA) $(LIBFDT_archive) $(DESTDIR)$(LIBDIR)
 
 install-includes:
 	@$(VECHO) INSTALL-INC
 	$(INSTALL) -d $(DESTDIR)$(INCLUDEDIR)
-	$(INSTALL) -m 644 $(LIBFDT_include) $(DESTDIR)$(INCLUDEDIR)
+	$(INSTALL_DATA) $(LIBFDT_include) $(DESTDIR)$(INCLUDEDIR)
 
 install: install-bin install-lib install-includes
 
+.PHONY: maybe_install_pylibfdt
+maybe_install_pylibfdt: FORCE
+	target=install_pylibfdt; $(check_python_deps)
+
 ifeq ($(NO_PYTHON),)
-install: install_pylibfdt
+install: maybe_install_pylibfdt
 endif
 
 $(VERSION_FILE): Makefile FORCE

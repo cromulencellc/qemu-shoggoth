@@ -106,6 +106,8 @@ void ob_intr(int intr);
 /* arch/sparc32/boot.c */
 extern uint32_t kernel_image;
 extern uint32_t kernel_size;
+extern uint32_t initrd_image;
+extern uint32_t initrd_size;
 extern uint32_t qemu_cmdline;
 extern uint32_t cmdline_size;
 extern char boot_device;
@@ -138,6 +140,11 @@ void serial_cls(void);
 int keyboard_dataready(void);
 unsigned char keyboard_readdata(void);
 #endif
+#endif
+#ifdef CONFIG_DRIVER_VIRTIO_BLK
+void ob_virtio_init(const char *path, const char *dev_name, uint64_t common_cfg,
+                    uint64_t device_cfg, uint64_t notify_base, uint32_t notify_mult,
+                    int idx);
 #endif
 int macio_get_nvram_size(void);
 void macio_nvram_put(char *buf);

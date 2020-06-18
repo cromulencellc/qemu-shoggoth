@@ -395,6 +395,16 @@ boot_add_hd(struct drive_s *drive, const char *desc, int prio)
 void
 boot_add_cd(struct drive_s *drive, const char *desc, int prio)
 {
+    if (GET_GLOBAL(PlatformRunningOn) & PF_QEMU) {
+        // We want short boot times.  But on physical hardware even
+        // the test unit ready can take several seconds.  So do media
+        // access on qemu only, where we know it will be fast.
+        char *extra = cdrom_media_info(drive);
+        if (extra) {
+            desc = znprintf(MAXDESCSIZE, "%s (%s)", desc, extra);
+            free(extra);
+        }
+    }
     bootentry_add(IPL_TYPE_CDROM, defPrio(prio, DefaultCDPrio)
                   , (u32)drive, desc);
 }
@@ -531,6 +541,18 @@ interactive_bootmenu(void)
 }
 
 #if CONFIG_PARISC
+void find_initial_parisc_boot_drives(struct drive_s **harddisc,
+            struct drive_s **cdrom)
+{
+    struct bootentry_s *pos;
+    hlist_for_each_entry(pos, &BootList, node) {
+	if ((pos->type == IPL_TYPE_CDROM) && (*cdrom == NULL))
+            *cdrom = pos->drive;
+	if ((pos->type == IPL_TYPE_HARDDISK) && (*harddisc == NULL))
+            *harddisc = pos->drive;
+    }
+}
+
 struct drive_s *select_parisc_boot_drive(char bootdrive)
 {
     printf("Available boot devices:\n");
@@ -547,7 +569,6 @@ struct drive_s *select_parisc_boot_drive(char bootdrive)
 
     /* try each boot device */
     hlist_for_each_entry(pos, &BootList, node) {
-	// if (pos->type == IPL_TYPE_CDROM) { //IPL_TYPE_HARDDISK) // IPL_TYPE_CDROM)
 	if (((bootdrive == 'd') && (pos->type == IPL_TYPE_CDROM)) ||
 	    ((bootdrive != 'd') && (pos->type == IPL_TYPE_HARDDISK))) {
                 printf("\nBooting from %s\n",pos->description);

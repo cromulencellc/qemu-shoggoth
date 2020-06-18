@@ -24,6 +24,7 @@
 #include <errorlog.h>
 #include <opal-api.h>
 #include <timebase.h>
+#include <nvram.h>
 
 /* Mask of bits to clear in HMER before an access */
 #define HMER_CLR_MASK	(~(SPR_HMER_XSCOM_FAIL | \
@@ -92,10 +93,11 @@ static uint64_t xscom_wait_done(void)
 	return mfspr(SPR_HMER);
 }
 
-static void xscom_reset(uint32_t gcid)
+static void xscom_reset(uint32_t gcid, bool need_delay)
 {
 	u64 hmer;
 	uint32_t recv_status_reg, log_reg, err_reg;
+	struct timespec ts;
 
 	/* Clear errors in HMER */
 	mtspr(SPR_HMER, HMER_CLR_MASK);
@@ -126,6 +128,21 @@ static void xscom_reset(uint32_t gcid)
 	hmer = xscom_wait_done();
 	if (hmer & SPR_HMER_XSCOM_FAIL)
 		goto fail;
+
+	if (need_delay) {
+		/*
+		 * Its observed that sometimes immediate retry of
+		 * XSCOM operation returns wrong data. Adding a
+		 * delay for XSCOM reset to be effective. Delay of
+		 * 10 ms is found to be working fine experimentally.
+		 * FIXME: Replace 10ms delay by exact delay needed
+		 * or other alternate method to confirm XSCOM reset
+		 * completion, after checking from HW folks.
+		 */
+		ts.tv_sec = 0;
+		ts.tv_nsec = 10 * 1000;
+		nanosleep_nopoll(&ts, NULL);
+	}
 	return;
  fail:
 	/* Fatal error resetting XSCOM */
@@ -137,10 +154,70 @@ static void xscom_reset(uint32_t gcid)
 	 */
 }
 
-static int64_t xscom_handle_error(uint64_t hmer, uint32_t gcid, uint32_t pcb_addr,
-			      bool is_write, int64_t retries)
+static int xscom_clear_error(uint32_t gcid, uint32_t pcb_addr)
 {
-	struct timespec ts;
+	u64 hmer;
+	uint32_t base_xscom_addr;
+	uint32_t xscom_clear_reg = 0x20010800;
+
+	/* only in case of p9 */
+	if (proc_gen != proc_gen_p9)
+		return 0;
+
+	/*
+	 * Due to a hardware issue where core responding to scom was delayed
+	 * due to thread reconfiguration, leaves the scom logic in a state
+	 * where the subsequent scom to that core can get errors. This is
+	 * affected for Core PC scom registers in the range of
+	 * 20010A80-20010ABF.
+	 *
+	 * The solution is if a xscom timeout occurs to one of Core PC scom
+	 * registers in the range of 20010A80-20010ABF, a clearing scom
+	 * write is done to 0x20010800 with data of '0x00000000' which will
+	 * also get a timeout but clears the scom logic errors. After the
+	 * clearing write is done the original scom operation can be retried.
+	 *
+	 * The scom timeout is reported as status 0x4 (Invalid address)
+	 * in HMER[21-23].
+	 */
+
+	base_xscom_addr = pcb_addr & XSCOM_CLEAR_RANGE_MASK;
+	if (!((base_xscom_addr >= XSCOM_CLEAR_RANGE_START) &&
+				(base_xscom_addr <= XSCOM_CLEAR_RANGE_END)))
+		return 0;
+
+	/*
+	 * Reset the XSCOM or next scom operation will fail.
+	 * We also need a small delay before we go ahead with clearing write.
+	 * We have observed that without a delay the clearing write has reported
+	 * a wrong status.
+	 */
+	xscom_reset(gcid, true);
+
+	/* Clear errors in HMER */
+	mtspr(SPR_HMER, HMER_CLR_MASK);
+
+	/* Write 0 to clear the xscom logic errors on target chip */
+	out_be64(xscom_addr(gcid, xscom_clear_reg), 0);
+	hmer = xscom_wait_done();
+
+	/*
+	 * Above clearing xscom write will timeout and error out with
+	 * invalid access as there is no register at that address. This
+	 * xscom operation just helps to clear the xscom logic error.
+	 *
+	 * On failure, reset the XSCOM or we'll hang on the next access
+	 */
+	if (hmer & SPR_HMER_XSCOM_FAIL)
+		xscom_reset(gcid, true);
+
+	return 1;
+}
+
+static int64_t xscom_handle_error(uint64_t hmer, uint32_t gcid, uint32_t pcb_addr,
+			      bool is_write, int64_t retries,
+			      int64_t *xscom_clear_retries)
+{
 	unsigned int stat = GETFIELD(SPR_HMER_XSCOM_STATUS, hmer);
 	int64_t rc = OPAL_HARDWARE;
 
@@ -158,20 +235,8 @@ static int64_t xscom_handle_error(uint64_t hmer, uint32_t gcid, uint32_t pcb_add
 			prlog(PR_NOTICE, "XSCOM: Busy even after %d retries, "
 				"resetting XSCOM now. Total retries  = %lld\n",
 				XSCOM_BUSY_RESET_THRESHOLD, retries);
-			xscom_reset(gcid);
+			xscom_reset(gcid, true);
 
-			/*
-			 * Its observed that sometimes immediate retry of
-			 * XSCOM operation returns wrong data. Adding a
-			 * delay for XSCOM reset to be effective. Delay of
-			 * 10 ms is found to be working fine experimentally.
-			 * FIXME: Replace 10ms delay by exact delay needed
-			 * or other alternate method to confirm XSCOM reset
-			 * completion, after checking from HW folks.
-			 */
-			ts.tv_sec = 0;
-			ts.tv_nsec = 10 * 1000;
-			nanosleep_nopoll(&ts, NULL);
 		}
 
 		/* Log error if we have retried enough and its still busy */
@@ -183,13 +248,22 @@ static int64_t xscom_handle_error(uint64_t hmer, uint32_t gcid, uint32_t pcb_add
 		return OPAL_XSCOM_BUSY;
 
 	case 2: /* CPU is asleep, reset XSCOM engine and return */
-		xscom_reset(gcid);
+		xscom_reset(gcid, false);
 		return OPAL_XSCOM_CHIPLET_OFF;
 	case 3: /* Partial good */
 		rc = OPAL_XSCOM_PARTIAL_GOOD;
 		break;
 	case 4: /* Invalid address / address error */
 		rc = OPAL_XSCOM_ADDR_ERROR;
+		if (xscom_clear_error(gcid, pcb_addr)) {
+			/* return busy if retries still pending. */
+			if ((*xscom_clear_retries)--)
+				return OPAL_XSCOM_BUSY;
+
+			prlog(PR_DEBUG, "XSCOM: error recovery failed for "
+				"gcid=0x%x pcb_addr=0x%x\n", gcid, pcb_addr);
+
+		}
 		break;
 	case 5: /* Clock error */
 		rc = OPAL_XSCOM_CLOCK_ERROR;
@@ -208,7 +282,7 @@ static int64_t xscom_handle_error(uint64_t hmer, uint32_t gcid, uint32_t pcb_add
 		is_write ? "write" : "read", gcid, pcb_addr, stat);
 
 	/* We need to reset the XSCOM or we'll hang on the next access */
-	xscom_reset(gcid);
+	xscom_reset(gcid, false);
 
 	/* Non recovered ... just fail */
 	return rc;
@@ -252,6 +326,7 @@ static int __xscom_read(uint32_t gcid, uint32_t pcb_addr, uint64_t *val)
 {
 	uint64_t hmer;
 	int64_t ret, retries;
+	int64_t xscom_clear_retries = XSCOM_CLEAR_MAX_RETRIES;
 
 	if (!xscom_gcid_ok(gcid)) {
 		prerror("%s: invalid XSCOM gcid 0x%x\n", __func__, gcid);
@@ -275,7 +350,8 @@ static int __xscom_read(uint32_t gcid, uint32_t pcb_addr, uint64_t *val)
 			return OPAL_SUCCESS;
 
 		/* Handle error and possibly eventually retry */
-		ret = xscom_handle_error(hmer, gcid, pcb_addr, false, retries);
+		ret = xscom_handle_error(hmer, gcid, pcb_addr, false, retries,
+				&xscom_clear_retries);
 		if (ret != OPAL_BUSY)
 			break;
 	}
@@ -302,6 +378,7 @@ static int __xscom_write(uint32_t gcid, uint32_t pcb_addr, uint64_t val)
 {
 	uint64_t hmer;
 	int64_t ret, retries = 0;
+	int64_t xscom_clear_retries = XSCOM_CLEAR_MAX_RETRIES;
 
 	if (!xscom_gcid_ok(gcid)) {
 		prerror("%s: invalid XSCOM gcid 0x%x\n", __func__, gcid);
@@ -325,7 +402,8 @@ static int __xscom_write(uint32_t gcid, uint32_t pcb_addr, uint64_t val)
 			return OPAL_SUCCESS;
 
 		/* Handle error and possibly eventually retry */
-		ret = xscom_handle_error(hmer, gcid, pcb_addr, true, retries);
+		ret = xscom_handle_error(hmer, gcid, pcb_addr, true, retries,
+				&xscom_clear_retries);
 		if (ret != OPAL_BUSY)
 			break;
 	}
@@ -465,8 +543,8 @@ static int xscom_indirect_write_form1(uint32_t gcid, uint64_t pcb_addr,
 		return OPAL_PARAMETER;
 
 	/* Mangle address and data for form1 */
-	addr = (pcb_addr & 0x000ffffffff);
-	data = (pcb_addr & 0xfff00000000) << 20;
+	addr = (pcb_addr & 0x000ffffffffUL);
+	data = (pcb_addr & 0xfff00000000UL) << 20;
 	data |= val;
 	return __xscom_write(gcid, addr, data);
 }
@@ -701,6 +779,10 @@ static void xscom_init_chip_info(struct proc_chip *chip)
 		chip->type = PROC_CHIP_P9_CUMULUS;
 		assert(proc_gen == proc_gen_p9);
 		break;
+	case 0xd9:
+		chip->type = PROC_CHIP_P9P;
+		assert(proc_gen == proc_gen_p9);
+		break;
 	default:
 		printf("CHIP: Unknown chip type 0x%02x !!!\n",
 		       (unsigned char)(val & 0xff));
@@ -736,7 +818,7 @@ static void xscom_init_chip_info(struct proc_chip *chip)
 		default:
 			rev = 0;
 		}
-		printf("P9 DD%i.%i%d detected\n", 0xf & (chip->ec_level >> 4),
+		prlog(PR_INFO,"P9 DD%i.%i%d detected\n", 0xf & (chip->ec_level >> 4),
 		       chip->ec_level & 0xf, rev);
 		chip->ec_rev = rev;
 	}
@@ -749,6 +831,37 @@ static void xscom_init_chip_info(struct proc_chip *chip)
 int64_t xscom_trigger_xstop(void)
 {
 	int rc = OPAL_UNSUPPORTED;
+	bool xstop_disabled = false;
+
+	/*
+	 * Workaround until we iron out all checkstop issues at present.
+	 *
+	 * For p9:
+	 * By default do not trigger sw checkstop unless explicitly enabled
+	 * through nvram option 'opal-sw-xstop=enable'.
+	 *
+	 * For p8:
+	 * Keep it enabled by default unless explicitly disabled.
+	 *
+	 * NOTE: Once all checkstop issues are resolved/stabilized reverse
+	 * the logic to enable sw checkstop by default on p9.
+	 */
+	switch (proc_gen) {
+	case proc_gen_p8:
+		if (nvram_query_eq("opal-sw-xstop", "disable"))
+			xstop_disabled = true;
+		break;
+	case proc_gen_p9:
+	default:
+		if (!nvram_query_eq("opal-sw-xstop", "enable"))
+			xstop_disabled = true;
+		break;
+	}
+
+	if (xstop_disabled) {
+		prlog(PR_NOTICE, "Software initiated checkstop disabled.\n");
+		return rc;
+	}
 
 	if (xstop_xscom.addr)
 		rc = xscom_writeme(xstop_xscom.addr,
@@ -791,9 +904,9 @@ void xscom_init(void)
 			chip_name = chip_names[chip->type];
 
 		/* We keep a "CHIP" prefix to make the log more user-friendly */
-		prlog(PR_NOTICE, "CHIP: Chip ID %04x type: %s DD%x.%x\n",
+		prlog(PR_NOTICE, "CHIP: Chip ID %04x type: %s DD%x.%x%d\n",
 		      gcid, chip_name, chip->ec_level >> 4,
-		      chip->ec_level & 0xf);
+		      chip->ec_level & 0xf, chip->ec_rev);
 		prlog(PR_DEBUG, "XSCOM: Base address: 0x%llx\n", chip->xscom_base);
 	}
 

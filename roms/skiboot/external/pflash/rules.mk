@@ -10,7 +10,9 @@ CCAN_SRC	:= $(addprefix ccan/list/,$(CCAN_FILES))
 PFLASH_OBJS	:= pflash.o progress.o version.o common-arch_flash.o
 OBJS		:= $(PFLASH_OBJS) $(LIBFLASH_OBJS) $(CCAN_OBJS)
 EXE     	:= pflash
-sbindir		?= /usr/sbin
+sbindir		= $(prefix)/sbin
+datadir		= $(prefix)/share
+mandir		= $(datadir)/man
 
 PFLASH_VERSION	?= $(shell ../../make_version.sh $(EXE))
 LINKAGE		?= static
@@ -22,7 +24,7 @@ OBJS		:= $(PFLASH_OBJS) $(SHARED)
 INSTALLDEPS	+= install-shared
 
 install-shared:
-	$(MAKE) -C ../shared install PREFIX=$(PREFIX)
+	$(MAKE) -C ../shared install prefix=$(prefix)
 
 $(SHARED):
 	$(MAKE) -C ../shared
@@ -35,19 +37,20 @@ version.c: .version
 	echo "const char version[] = \"$(PFLASH_VERSION)\";" ;\
 	fi) > $@
 
-%.o : %.c
+%.o : %.c | links
 	$(Q_CC)$(CC) $(CFLAGS) -c $< -o $@
 
 $(LIBFLASH_SRC): | links
 
 $(CCAN_SRC): | links
 
-$(LIBFLASH_OBJS): libflash-%.o : libflash/%.c
+$(LIBFLASH_OBJS): libflash-%.o : libflash/%.c | links
 	$(Q_CC)$(CC) $(CFLAGS) -c $< -o $@
 
-$(CCAN_OBJS): ccan-list-%.o: ccan/list/%.c
+$(CCAN_OBJS): ccan-list-%.o: ccan/list/%.c | links
 	$(Q_CC)$(CC) $(CFLAGS) -c $< -o $@
 
+$(EXE): CFLAGS += -Wframe-larger-than=2048
 $(EXE): $(OBJS)
 	$(Q_CC)$(CC) $(LDFLAGS) $(CFLAGS) $^ -lrt -o $@
 

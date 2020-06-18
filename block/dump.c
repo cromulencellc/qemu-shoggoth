@@ -19,6 +19,7 @@
 #include "qemu/osdep.h"
 #include "trace.h"
 #include "qapi/error.h"
+#include "qemu/job.h"
 #include "block/block.h"
 #include "block/block_int.h"
 #include "block/blockjob_int.h"
@@ -40,29 +41,31 @@ static void dump_complete(Job *job, void *opaque)
 {
     DumpCompleteData *data = opaque;
 
-    job_completed(job, data->ret, NULL);
+    job_completed(job);
+    data->ret = job->ret;
     g_free(data);
 }
 
-static void coroutine_fn dump_run(void *opaque)
+static int coroutine_fn dump_run(Job *job, Error **errp)
 {
-    int ret = 0;
-    DumpBlockJob *job = opaque;
-    BlockDriverState *bs = blk_bs(job->common.blk);
+    DumpBlockJob *s = container_of(job, DumpBlockJob, common.job);
+    BlockDriverState *bs = blk_bs(s->common.blk);
     DumpCompleteData *data;
+    int ret = 0;
 
     if (bs)
     {
         BlockDriver *drv = bs->drv;
         if (drv && drv->bdrv_dump_state)
         {
-            ret = drv->bdrv_dump_state(bs, job->target, job->hash);
+            ret = drv->bdrv_dump_state(bs, s->target, s->hash);
         }
     }
 
     data = g_malloc(sizeof(*data));
     data->ret = ret;
-    job_defer_to_main_loop(&job->common.job, dump_complete, data);
+    job_defer_to_main_loop(job, dump_complete, data);
+    return 0;
 }
 
 static void dump_commit(Job *job)
@@ -97,7 +100,7 @@ static const BlockJobDriver dump_job_driver = {
         .free                   = block_job_free,
         .user_resume            = block_job_user_resume,
         .drain                  = block_job_drain,
-        .start                  = dump_run,
+        .run                    = dump_run,
         .commit                 = dump_commit,
         .abort                  = dump_abort,
         .clean                  = dump_clean,

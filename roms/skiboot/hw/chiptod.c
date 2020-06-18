@@ -120,9 +120,6 @@
 #define LOCAL_CORE_FIR		0x0104000C
 #define LFIR_SWITCH_COMPLETE	PPC_BIT(18)
 
-/* Magic TB value. One step cycle ahead of sync */
-#define INIT_TB	0x000000000001ff0
-
 /* Number of iterations for the various timeouts */
 #define TIMEOUT_LOOPS		20000000
 
@@ -230,6 +227,7 @@ static uint64_t base_tfmr;
  * take all of them for RAS cases.
  */
 static struct lock chiptod_lock = LOCK_UNLOCKED;
+static bool chiptod_unrecoverable;
 
 static void _chiptod_cache_tod_regs(int32_t chip_id)
 {
@@ -775,6 +773,7 @@ static void chiptod_reset_tod_errors(void)
 
 static void chiptod_sync_master(void *data)
 {
+	uint64_t initial_tb_value;
 	bool *result = data;
 
 	prlog(PR_DEBUG, "Master sync on CPU PIR 0x%04x...\n",
@@ -824,8 +823,17 @@ static void chiptod_sync_master(void *data)
 		goto error;
 	}
 
+	/*
+	 * Load the master's current timebase value into the Chip TOD
+	 * network. This is so we have sane timestamps across the whole
+	 * IPL process. The Chip TOD documentation says that the loaded
+	 * value needs to be one STEP before a SYNC. In other words,
+	 * set the low bits to 0x1ff0.
+	 */
+	initial_tb_value = (mftb() & ~0x1fff) | 0x1ff0;
+
 	/* Chip TOD load initial value */
-	if (xscom_writeme(TOD_CHIPTOD_LOAD_TB, INIT_TB)) {
+	if (xscom_writeme(TOD_CHIPTOD_LOAD_TB, initial_tb_value)) {
 		prerror("XSCOM error setting init TB\n");
 		goto error;
 	}
@@ -963,11 +971,11 @@ bool chiptod_wakeup_resync(void)
 	return false;
 }
 
-static int chiptod_recover_tod_errors(void)
+static int __chiptod_recover_tod_errors(void)
 {
 	uint64_t terr;
 	uint64_t treset = 0;
-	int i;
+	int i, rc = -1;
 	int32_t chip_id = this_cpu()->chip_id;
 
 	/* Read TOD error register */
@@ -983,6 +991,7 @@ static int chiptod_recover_tod_errors(void)
 		(terr & TOD_ERR_DELAY_COMPL_PARITY) ||
 		(terr & TOD_ERR_TOD_REGISTER_PARITY)) {
 		chiptod_reset_tod_errors();
+		rc = 1;
 	}
 
 	/*
@@ -1016,7 +1025,19 @@ static int chiptod_recover_tod_errors(void)
 		return 0;
 	}
 	/* We have handled all the TOD errors routed to hypervisor */
-	return 1;
+	if (treset)
+		rc = 1;
+	return rc;
+}
+
+int chiptod_recover_tod_errors(void)
+{
+	int rc;
+
+	lock(&chiptod_lock);
+	rc = __chiptod_recover_tod_errors();
+	unlock(&chiptod_lock);
+	return rc;
 }
 
 static int32_t chiptod_get_active_master(void)
@@ -1214,7 +1235,6 @@ static void chiptod_topology_switch_complete(void)
 static int chiptod_start_tod(void)
 {
 	struct proc_chip *chip = NULL;
-	int rc = 1;
 
 	/*  Do a topology switch if required. */
 	if (is_topology_switch_required()) {
@@ -1237,14 +1257,14 @@ static int chiptod_start_tod(void)
 		if (!chiptod_backup_valid()) {
 			prerror("Backup master is not enabled. "
 				"Can not do a topology switch.\n");
-			return 0;
+			goto error_out;
 		}
 
 		chiptod_stop_slave_tods();
 
 		if (xscom_write(mchip, TOD_TTYPE_1, PPC_BIT(0))) {
 			prerror("XSCOM error switching primary/secondary\n");
-			return 0;
+			goto error_out;
 		}
 
 		/* Update topology info. */
@@ -1258,7 +1278,7 @@ static int chiptod_start_tod(void)
 		 */
 		if (!chiptod_master_running()) {
 			prerror("TOD is not running on new master.\n");
-			return 0;
+			goto error_out;
 		}
 
 		/*
@@ -1269,7 +1289,7 @@ static int chiptod_start_tod(void)
 		 */
 		if (xscom_writeme(TOD_TTYPE_2, PPC_BIT(0))) {
 			prerror("XSCOM error enabling steppers\n");
-			return 0;
+			goto error_out;
 		}
 
 		chiptod_topology_switch_complete();
@@ -1294,7 +1314,7 @@ static int chiptod_start_tod(void)
 	/* Switch local chiptod to "Not Set" state */
 	if (xscom_writeme(TOD_LOAD_TOD_MOD, PPC_BIT(0))) {
 		prerror("XSCOM error sending LOAD_TOD_MOD\n");
-		return 0;
+		goto error_out;
 	}
 
 	/*
@@ -1303,16 +1323,20 @@ static int chiptod_start_tod(void)
 	 */
 	if (xscom_writeme(TOD_TTYPE_3, PPC_BIT(0))) {
 		prerror("XSCOM error sending TTYPE_3\n");
-		return 0;
+		goto error_out;
 	}
 
 	/* Check if chip TOD is running. */
 	if (!chiptod_poll_running())
-		rc = 0;
+		goto error_out;
 
 	/* Restore the ttype4_mode. */
 	chiptod_set_ttype4_mode(chip, false);
-	return rc;
+	return 1;
+
+error_out:
+	chiptod_unrecoverable = true;
+	return 0;
 }
 
 static bool tfmr_recover_tb_errors(uint64_t tfmr)
@@ -1363,16 +1387,9 @@ static bool tfmr_recover_tb_errors(uint64_t tfmr)
 	return true;
 }
 
-static bool tfmr_recover_non_tb_errors(uint64_t tfmr)
+bool tfmr_recover_local_errors(uint64_t tfmr)
 {
 	uint64_t tfmr_reset_errors = 0;
-
-	/*
-	 * write 1 to bit 26 to clear TFMR HDEC parity error.
-	 * HDEC register has already been reset to zero as part pre-recovery.
-	 */
-	if (tfmr & SPR_TFMR_HDEC_PARITY_ERROR)
-		tfmr_reset_errors |= SPR_TFMR_HDEC_PARITY_ERROR;
 
 	if (tfmr & SPR_TFMR_DEC_PARITY_ERR) {
 		/* Set DEC with all ones */
@@ -1383,11 +1400,11 @@ static bool tfmr_recover_non_tb_errors(uint64_t tfmr)
 	}
 
 	/*
-	 * Reset PURR/SPURR to recover. We also need help from KVM
-	 * layer to handle this change in PURR/SPURR. That needs
-	 * to be handled in kernel KVM layer. For now, to recover just
-	 * reset it.
-	 */
+	* Reset PURR/SPURR to recover. We also need help from KVM
+	* layer to handle this change in PURR/SPURR. That needs
+	* to be handled in kernel KVM layer. For now, to recover just
+	* reset it.
+	*/
 	if (tfmr & SPR_TFMR_PURR_PARITY_ERR) {
 		/* set PURR register with sane value or reset it. */
 		mtspr(SPR_PURR, 0);
@@ -1425,7 +1442,7 @@ static bool tfmr_recover_non_tb_errors(uint64_t tfmr)
  *	MT(TFMR) bits 11 and 60 are b’1’
  *	MT(HMER) all bits 1 except for bits 4,5
  */
-static bool chiptod_recover_tfmr_error(void)
+bool recover_corrupt_tfmr(void)
 {
 	uint64_t tfmr;
 
@@ -1461,6 +1478,40 @@ static bool chiptod_recover_tfmr_error(void)
 	return true;
 }
 
+void tfmr_cleanup_core_errors(uint64_t tfmr)
+{
+	/* If HDEC is bad, clean it on all threads before we clear the
+	 * error condition.
+	 */
+	if (tfmr & SPR_TFMR_HDEC_PARITY_ERROR)
+		mtspr(SPR_HDEC, 0);
+
+	/* If TB is invalid, clean it on all threads as well, it will be
+	 * restored after the next rendez-vous
+	 */
+	if (!(tfmr & SPR_TFMR_TB_VALID)) {
+		mtspr(SPR_TBWU, 0);
+		mtspr(SPR_TBWU, 0);
+	}
+}
+
+int tfmr_clear_core_errors(uint64_t tfmr)
+{
+	uint64_t tfmr_reset_errors = 0;
+
+	/* return -1 if there is nothing to be fixed. */
+	if (!(tfmr & SPR_TFMR_HDEC_PARITY_ERROR))
+		return -1;
+
+	tfmr_reset_errors |= SPR_TFMR_HDEC_PARITY_ERROR;
+
+	/* Write TFMR twice to clear the error */
+	mtspr(SPR_TFMR, base_tfmr | tfmr_reset_errors);
+	mtspr(SPR_TFMR, base_tfmr | tfmr_reset_errors);
+
+	return 1;
+}
+
 /*
  * Recover from TB and TOD errors.
  * Timebase register is per core and first thread that gets chance to
@@ -1474,45 +1525,29 @@ static bool chiptod_recover_tfmr_error(void)
  *	1	<= Successfully recovered from errors
  *	-1	<= No errors found. Errors are already been fixed.
  */
-int chiptod_recover_tb_errors(void)
+int chiptod_recover_tb_errors(bool *out_resynced)
 {
 	uint64_t tfmr;
 	int rc = -1;
-	int thread_id;
+
+	*out_resynced = false;
 
 	if (chiptod_primary < 0)
 		return 0;
 
 	lock(&chiptod_lock);
 
-	/* Get fresh copy of TFMR */
-	tfmr = mfspr(SPR_TFMR);
-
 	/*
-	 * Check for TFMR parity error and recover from it.
-	 * We can not trust any other bits in TFMR If it is corrupt. Fix this
-	 * before we do anything.
+	 * Return if TOD is unrecoverable.
+	 * The previous attempt to recover TOD has been failed.
 	 */
-	if (tfmr & SPR_TFMR_TFMR_CORRUPT) {
-		if (!chiptod_recover_tfmr_error()) {
-			rc = 0;
-			goto error_out;
-		}
+	if (chiptod_unrecoverable) {
+		rc = 0;
+		goto error_out;
 	}
 
 	/* Get fresh copy of TFMR */
 	tfmr = mfspr(SPR_TFMR);
-
-	/*
-	 * Workaround for HW logic bug in Power9
-	 * Even after clearing TB residue error by one thread it does not
-	 * get reflected to other threads on same core.
-	 * Check if TB is already valid and skip the checking of TB errors.
-	 */
-
-	if ((proc_gen == proc_gen_p9) && (tfmr & SPR_TFMR_TB_RESIDUE_ERR)
-						&& (tfmr & SPR_TFMR_TB_VALID))
-		goto skip_tb_error_clear;
 
 	/*
 	 * Check for TB errors.
@@ -1537,7 +1572,6 @@ int chiptod_recover_tb_errors(void)
 		}
 	}
 
-skip_tb_error_clear:
 	/*
 	 * Check for TOD sync check error.
 	 * On TOD errors, bit 51 of TFMR is set. If this bit is on then we
@@ -1545,7 +1579,7 @@ skip_tb_error_clear:
 	 * Bit 33 of TOD error register indicates sync check error.
 	 */
 	if (tfmr & SPR_TFMR_CHIP_TOD_INTERRUPT)
-		rc = chiptod_recover_tod_errors();
+		rc = __chiptod_recover_tod_errors();
 
 	/* Check if TB is running. If not then we need to get it running. */
 	if (!(tfmr & SPR_TFMR_TB_VALID)) {
@@ -1567,35 +1601,9 @@ skip_tb_error_clear:
 		if (!chiptod_to_tb())
 			goto error_out;
 
+		*out_resynced = true;
+
 		/* We have successfully able to get TB running. */
-		rc = 1;
-	}
-
-	/*
-	 * Workaround for HW logic bug in power9.
-	 * In idea case (without the HW bug) only one thread from the core
-	 * would have fallen through tfmr_recover_non_tb_errors() to clear
-	 * HDEC parity error on TFMR.
-	 *
-	 * Hence to achieve same behavior, allow only thread 0 to clear the
-	 * HDEC parity error. And for rest of the threads just reset the bit
-	 * to avoid other threads to fall through tfmr_recover_non_tb_errors().
-	 */
-	thread_id = cpu_get_thread_index(this_cpu());
-	if ((proc_gen == proc_gen_p9) && thread_id)
-		tfmr &= ~SPR_TFMR_HDEC_PARITY_ERROR;
-
-	/*
-	 * Now that TB is running, check for TFMR non-TB errors.
-	 */
-	if ((tfmr & SPR_TFMR_HDEC_PARITY_ERROR) ||
-		(tfmr & SPR_TFMR_PURR_PARITY_ERR) ||
-		(tfmr & SPR_TFMR_SPURR_PARITY_ERR) ||
-		(tfmr & SPR_TFMR_DEC_PARITY_ERR)) {
-		if (!tfmr_recover_non_tb_errors(tfmr)) {
-			rc = 0;
-			goto error_out;
-		}
 		rc = 1;
 	}
 
@@ -1606,6 +1614,10 @@ error_out:
 
 static int64_t opal_resync_timebase(void)
 {
+	/* Mambo and qemu doesn't simulate the chiptod */
+	if (chip_quirk(QUIRK_NO_CHIPTOD))
+		return OPAL_SUCCESS;
+
 	if (!chiptod_wakeup_resync()) {
 		prerror("OPAL: Resync timebase failed on CPU 0x%04x\n",
 			this_cpu()->pir);

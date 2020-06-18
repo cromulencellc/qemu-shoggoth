@@ -21,7 +21,7 @@
 #include "qemu/range.h"
 #include "qemu/error-report.h"
 #include "qemu/memfd.h"
-#include <linux/vhost.h>
+#include "standard-headers/linux/vhost_types.h"
 #include "exec/address-spaces.h"
 #include "hw/virtio/virtio-bus.h"
 #include "hw/virtio/virtio-access.h"
@@ -131,6 +131,11 @@ static int vhost_sync_dirty_bitmap(struct vhost_dev *dev,
     }
     for (i = 0; i < dev->nvqs; ++i) {
         struct vhost_virtqueue *vq = dev->vqs + i;
+
+        if (!vq->used_phys && !vq->used_size) {
+            continue;
+        }
+
         vhost_dev_sync_region(dev, section, start_addr, end_addr, vq->used_phys,
                               range_get_last(vq->used_phys, vq->used_size));
     }
@@ -168,6 +173,11 @@ static uint64_t vhost_get_log_size(struct vhost_dev *dev)
     }
     for (i = 0; i < dev->nvqs; ++i) {
         struct vhost_virtqueue *vq = dev->vqs + i;
+
+        if (!vq->used_phys && !vq->used_size) {
+            continue;
+        }
+
         uint64_t last = vq->used_phys + vq->used_size - 1;
         log_size = MAX(log_size, last / VHOST_LOG_CHUNK + 1);
     }
@@ -1073,10 +1083,8 @@ static void vhost_virtqueue_stop(struct vhost_dev *dev,
         .index = vhost_vq_index,
     };
     int r;
-    int a;
 
-    a = virtio_queue_get_desc_addr(vdev, idx);
-    if (a == 0) {
+    if (virtio_queue_get_desc_addr(vdev, idx) == 0) {
         /* Don't stop the virtqueue which might have not been started */
         return;
     }
@@ -1481,6 +1489,102 @@ void vhost_dev_set_config_notifier(struct vhost_dev *hdev,
                                    const VhostDevConfigOps *ops)
 {
     hdev->config_ops = ops;
+}
+
+void vhost_dev_free_inflight(struct vhost_inflight *inflight)
+{
+    if (inflight->addr) {
+        qemu_memfd_free(inflight->addr, inflight->size, inflight->fd);
+        inflight->addr = NULL;
+        inflight->fd = -1;
+    }
+}
+
+static int vhost_dev_resize_inflight(struct vhost_inflight *inflight,
+                                     uint64_t new_size)
+{
+    Error *err = NULL;
+    int fd = -1;
+    void *addr = qemu_memfd_alloc("vhost-inflight", new_size,
+                                  F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL,
+                                  &fd, &err);
+
+    if (err) {
+        error_report_err(err);
+        return -1;
+    }
+
+    vhost_dev_free_inflight(inflight);
+    inflight->offset = 0;
+    inflight->addr = addr;
+    inflight->fd = fd;
+    inflight->size = new_size;
+
+    return 0;
+}
+
+void vhost_dev_save_inflight(struct vhost_inflight *inflight, QEMUFile *f)
+{
+    if (inflight->addr) {
+        qemu_put_be64(f, inflight->size);
+        qemu_put_be16(f, inflight->queue_size);
+        qemu_put_buffer(f, inflight->addr, inflight->size);
+    } else {
+        qemu_put_be64(f, 0);
+    }
+}
+
+int vhost_dev_load_inflight(struct vhost_inflight *inflight, QEMUFile *f)
+{
+    uint64_t size;
+
+    size = qemu_get_be64(f);
+    if (!size) {
+        return 0;
+    }
+
+    if (inflight->size != size) {
+        if (vhost_dev_resize_inflight(inflight, size)) {
+            return -1;
+        }
+    }
+    inflight->queue_size = qemu_get_be16(f);
+
+    qemu_get_buffer(f, inflight->addr, size);
+
+    return 0;
+}
+
+int vhost_dev_set_inflight(struct vhost_dev *dev,
+                           struct vhost_inflight *inflight)
+{
+    int r;
+
+    if (dev->vhost_ops->vhost_set_inflight_fd && inflight->addr) {
+        r = dev->vhost_ops->vhost_set_inflight_fd(dev, inflight);
+        if (r) {
+            VHOST_OPS_DEBUG("vhost_set_inflight_fd failed");
+            return -errno;
+        }
+    }
+
+    return 0;
+}
+
+int vhost_dev_get_inflight(struct vhost_dev *dev, uint16_t queue_size,
+                           struct vhost_inflight *inflight)
+{
+    int r;
+
+    if (dev->vhost_ops->vhost_get_inflight_fd) {
+        r = dev->vhost_ops->vhost_get_inflight_fd(dev, queue_size, inflight);
+        if (r) {
+            VHOST_OPS_DEBUG("vhost_get_inflight_fd failed");
+            return -errno;
+        }
+    }
+
+    return 0;
 }
 
 /* Host notifiers must be enabled at this point. */

@@ -54,7 +54,7 @@ def on_plugin_load(*args):
 #    print("Python: On Memory Write " + hex(paddr) + " value " + hex(pval))
 #    print(binascii.hexlify(CPU.getPhysicalMemory(paddr, len(pbytes))))
 
-#def on_memory_read(paddr, pval, pbytes):
+#def on_memory_read(paddr, vaddr, pval, pbytes):
 #    print("Python: On Memory Read " + hex(paddr) + " value " + hex(pval))
 #    print(binascii.hexlify(CPU.getPhysicalMemory(paddr, len(pbytes))))
 

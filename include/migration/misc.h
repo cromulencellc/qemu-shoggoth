@@ -14,15 +14,36 @@
 #ifndef MIGRATION_MISC_H
 #define MIGRATION_MISC_H
 
+#include "exec/cpu-common.h"
 #include "qemu/notify.h"
+#include "qapi/qapi-types-net.h"
 #include "racomms/racomms-types.h"
 
 /* migration/ram.c */
 
-void ram_mig_init(void);
-void ram_mig_destroy(void);
+typedef enum PrecopyNotifyReason {
+    PRECOPY_NOTIFY_SETUP = 0,
+    PRECOPY_NOTIFY_BEFORE_BITMAP_SYNC = 1,
+    PRECOPY_NOTIFY_AFTER_BITMAP_SYNC = 2,
+    PRECOPY_NOTIFY_COMPLETE = 3,
+    PRECOPY_NOTIFY_CLEANUP = 4,
+    PRECOPY_NOTIFY_MAX = 5,
+} PrecopyNotifyReason;
 
-/* migration/ram_rapid.c */
+typedef struct PrecopyNotifyData {
+    enum PrecopyNotifyReason reason;
+    Error **errp;
+} PrecopyNotifyData;
+
+void precopy_infrastructure_init(void);
+void precopy_add_notifier(NotifierWithReturn *n);
+void precopy_remove_notifier(NotifierWithReturn *n);
+int precopy_notify(PrecopyNotifyReason reason, Error **errp);
+void precopy_enable_free_page_optimization(void);
+
+void ram_mig_init(void);
+void qemu_guest_free_page_hint(void *addr, size_t len);
+void ram_mig_destroy(void);
 
 void ram_rapid_init(Error **errp);
 void ram_rapid_delta_init(QemuOpts *ra_opts, SHA1_HASH_TYPE *root_hash, Error **errp);
@@ -36,23 +57,14 @@ void blk_mig_init(void);
 static inline void blk_mig_init(void) {}
 #endif
 
-#define SELF_ANNOUNCE_ROUNDS 5
-
-static inline
-int64_t self_announce_delay(int round)
-{
-    assert(round < SELF_ANNOUNCE_ROUNDS && round > 0);
-    /* delay 50ms, 150ms, 250ms, ... */
-    return 50 + (SELF_ANNOUNCE_ROUNDS - round - 1) * 100;
-}
-
+AnnounceParameters *migrate_announce_params(void);
 /* migration/savevm.c */
 
 void dump_vmstate_json_to_file(FILE *out_fp);
 
 /* migration/migration.c */
 void migration_object_init(void);
-void migration_object_finalize(void);
+void migration_shutdown(void);
 void qemu_start_incoming_migration(const char *uri, Error **errp);
 bool migration_is_idle(void);
 void add_migration_state_change_notifier(Notifier *notify);

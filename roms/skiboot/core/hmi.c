@@ -1,4 +1,4 @@
-/* Copyright 2013-2014 IBM Corp.
+/* Copyright 2013-2018 IBM Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,18 +13,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#define pr_fmt(fmt)	"HMI: " fmt
+
 #include <skiboot.h>
 #include <opal.h>
 #include <opal-msg.h>
 #include <processor.h>
 #include <chiptod.h>
 #include <xscom.h>
+#include <xscom-p9-regs.h>
 #include <pci.h>
 #include <cpu.h>
 #include <chip.h>
 #include <npu-regs.h>
+#include <npu2-regs.h>
+#include <npu2.h>
 #include <npu.h>
 #include <capp.h>
+#include <nvram.h>
+#include <cpu.h>
 
 /*
  * HMER register layout:
@@ -158,6 +166,9 @@
 #define P8_CORE_FIR		0x10013100
 #define P9_CORE_FIR		0x20010A40
 
+/* And core WOF (Whose On First) */
+#define P9_CORE_WOF		0x20010A48
+
 /* xscom addresses for pMisc Receive Malfunction Alert Register */
 #define P8_MALFUNC_ALERT	0x02020011
 #define P9_MALFUNC_ALERT	0x00090022
@@ -176,8 +187,12 @@
  */
 #define NX_HMI_ACTIVE		PPC_BIT(54)
 
-/* Number of iterations for the various timeouts */
-#define TIMEOUT_LOOPS		20000000
+/*
+ * Number of iterations for the various timeouts. We can't use the timebase
+ * as it might be broken. We measured experimentally that 40 millions loops
+ * of cpu_relax() gives us more than 1s. The margin is comfortable enough.
+ */
+#define TIMEOUT_LOOPS		40000000
 
 /* TFMR other errors. (other than bit 26 and 45) */
 #define SPR_TFMR_OTHER_ERRORS	\
@@ -186,6 +201,18 @@
 	 SPR_TFMR_PURR_PARITY_ERR | SPR_TFMR_SPURR_PARITY_ERR |	\
 	 SPR_TFMR_DEC_PARITY_ERR | SPR_TFMR_TFMR_CORRUPT |	\
 	 SPR_TFMR_CHIP_TOD_INTERRUPT)
+
+/* TFMR "all core" errors (sent to all threads) */
+#define SPR_TFMR_CORE_ERRORS	\
+	(SPR_TFMR_TBST_CORRUPT | SPR_TFMR_TB_MISSING_SYNC |	\
+	 SPR_TFMR_TB_MISSING_STEP | SPR_TFMR_FW_CONTROL_ERR |	\
+	 SPR_TFMR_TFMR_CORRUPT | SPR_TFMR_TB_RESIDUE_ERR |	\
+	 SPR_TFMR_HDEC_PARITY_ERROR)
+
+/* TFMR "thread" errors  */
+#define SPR_TFMR_THREAD_ERRORS \
+	(SPR_TFMR_PURR_PARITY_ERR | SPR_TFMR_SPURR_PARITY_ERR |	\
+	 SPR_TFMR_DEC_PARITY_ERR)
 
 static const struct core_xstop_bit_info {
 	uint8_t bit;		/* CORE FIR bit number */
@@ -206,8 +233,30 @@ static const struct core_xstop_bit_info {
 	{ 48, CORE_CHECKSTOP_PC_HYP_RESOURCE },
 	{ 52, CORE_CHECKSTOP_PC_HANG_RECOV_FAILED },
 	{ 54, CORE_CHECKSTOP_PC_AMBI_HANG_DETECTED },
-	{ 60, CORE_CHECKSTOP_PC_DEBUG_TRIG_ERR_INJ },
 	{ 63, CORE_CHECKSTOP_PC_SPRD_HYP_ERR_INJ },
+};
+
+static const struct core_recoverable_bit_info {
+	uint8_t bit;		/* CORE FIR bit number */
+	const char *reason;
+} recoverable_bits[] = {
+	{ 0, "IFU - SRAM (ICACHE parity, etc)" },
+	{ 2, "IFU - RegFile" },
+	{ 4, "IFU - Logic" },
+	{ 9, "ISU - RegFile" },
+	{ 11, "ISU - Logic" },
+	{ 13, "ISU - Recoverable due to not in MT window" },
+	{ 24, "VSU - Logic" },
+	{ 27, "VSU - DFU logic" },
+	{ 29, "LSU - SRAM (DCACHE parity, etc)" },
+	{ 31, "LSU - RegFile" },
+	/* The following 3 bits may be set by SRAM errors. */
+	{ 33, "LSU - TLB multi hit" },
+	{ 34, "LSU - SLB multi hit" },
+	{ 35, "LSU - ERAT multi hit" },
+	{ 37, "LSU - Logic" },
+	{ 39, "LSU - Recoverable due to not in MT window" },
+	{ 43, "PC - Thread hang recovery" },
 };
 
 static const struct nx_xstop_bit_info {
@@ -255,13 +304,13 @@ static int setup_scom_addresses(void)
 		nx_pbi_fir = P9_NX_PBI_FIR;
 		return 1;
 	default:
-		prerror("HMI: %s: Unknown CPU type\n", __func__);
+		prerror("%s: Unknown CPU type\n", __func__);
 		break;
 	}
 	return 0;
 }
 
-static int queue_hmi_event(struct OpalHMIEvent *hmi_evt, int recover)
+static int queue_hmi_event(struct OpalHMIEvent *hmi_evt, int recover, uint64_t *out_flags)
 {
 	size_t num_params;
 
@@ -283,6 +332,8 @@ static int queue_hmi_event(struct OpalHMIEvent *hmi_evt, int recover)
 	 * num_params value.
 	 */
 	num_params = ALIGN_UP(sizeof(*hmi_evt), sizeof(u64)) / sizeof(u64);
+
+	*out_flags |= OPAL_HMI_FLAGS_NEW_EVENT;
 
 	/* queue up for delivery to host. */
 	return _opal_queue_msg(OPAL_MSG_HMI_EVT, NULL, NULL,
@@ -308,14 +359,30 @@ static int read_core_fir(uint32_t chip_id, uint32_t core_id, uint64_t *core_fir)
 	return rc;
 }
 
+static int read_core_wof(uint32_t chip_id, uint32_t core_id, uint64_t *core_wof)
+{
+	int rc;
+
+	switch (proc_gen) {
+	case proc_gen_p9:
+		rc = xscom_read(chip_id,
+			XSCOM_ADDR_P9_EC(core_id, P9_CORE_WOF), core_wof);
+		break;
+	default:
+		rc = OPAL_HARDWARE;
+	}
+	return rc;
+}
+
 static bool decode_core_fir(struct cpu_thread *cpu,
 				struct OpalHMIEvent *hmi_evt)
 {
 	uint64_t core_fir;
 	uint32_t core_id;
-	int i;
+	int i, swkup_rc;
 	bool found = false;
 	int64_t ret;
+	const char *loc;
 
 	/* Sanity check */
 	if (!cpu || !hmi_evt)
@@ -323,14 +390,19 @@ static bool decode_core_fir(struct cpu_thread *cpu,
 
 	core_id = pir_to_core_id(cpu->pir);
 
+	/* Force the core to wakeup, otherwise reading core_fir is unrealiable
+	 * if stop-state 5 is enabled.
+	 */
+	swkup_rc = dctl_set_special_wakeup(cpu);
+
 	/* Get CORE FIR register value. */
 	ret = read_core_fir(cpu->chip_id, core_id, &core_fir);
 
-	if (ret == OPAL_HARDWARE) {
-		prerror("HMI: XSCOM error reading CORE FIR\n");
-		/* If the FIR can't be read, we should checkstop. */
-		return true;
-	} else if (ret == OPAL_WRONG_STATE) {
+	if (!swkup_rc)
+		dctl_clear_special_wakeup(cpu);
+
+
+	if (ret == OPAL_WRONG_STATE) {
 		/*
 		 * CPU is asleep, so it probably didn't cause the checkstop.
 		 * If no other HMI cause is found a "catchall" checkstop
@@ -338,12 +410,21 @@ static bool decode_core_fir(struct cpu_thread *cpu,
 		 * error will be handled appropriately.
 		 */
 		prlog(PR_DEBUG,
-		      "HMI: FIR read failed, chip %d core %d asleep\n",
+		      "FIR read failed, chip %d core %d asleep\n",
 		      cpu->chip_id, core_id);
 		return false;
+	} else if (ret != OPAL_SUCCESS) {
+		prerror("XSCOM error reading CORE FIR\n");
+		/* If the FIR can't be read, we should checkstop. */
+		return true;
 	}
 
-	prlog(PR_INFO, "HMI: CHIP ID: %x, CORE ID: %x, FIR: %016llx\n",
+	if (!core_fir)
+		return false;
+
+	loc = chip_loc_code(cpu->chip_id);
+	prlog(PR_INFO, "[Loc: %s]: CHIP ID: %x, CORE ID: %x, FIR: %016llx\n",
+			loc ? loc : "Not Available",
 			cpu->chip_id, core_id, core_fir);
 
 	/* Check CORE FIR bits and populate HMI event with error info. */
@@ -358,7 +439,7 @@ static bool decode_core_fir(struct cpu_thread *cpu,
 }
 
 static void find_core_checkstop_reason(struct OpalHMIEvent *hmi_evt,
-				       bool *event_generated)
+				       uint64_t *out_flags)
 {
 	struct cpu_thread *cpu;
 
@@ -384,16 +465,14 @@ static void find_core_checkstop_reason(struct OpalHMIEvent *hmi_evt,
 		hmi_evt->u.xstop_error.xstop_reason = 0;
 		hmi_evt->u.xstop_error.u.pir = cpu->pir;
 
-		if (decode_core_fir(cpu, hmi_evt)) {
-			queue_hmi_event(hmi_evt, 0);
-			*event_generated = 1;
-		}
+		if (decode_core_fir(cpu, hmi_evt))
+			queue_hmi_event(hmi_evt, 0, out_flags);
 	}
 }
 
 static void find_capp_checkstop_reason(int flat_chip_id,
 				       struct OpalHMIEvent *hmi_evt,
-				       bool *event_generated)
+				       uint64_t *out_flags)
 {
 	struct capp_info info;
 	struct phb *phb;
@@ -426,10 +505,10 @@ static void find_capp_checkstop_reason(int flat_chip_id,
 		if (!(capp_fir & ~capp_fir_mask))
 			continue;
 
-		prlog(PR_DEBUG, "HMI: CAPP#%d (PHB:#%x): FIR 0x%016llx mask 0x%016llx\n",
+		prlog(PR_DEBUG, "CAPP#%d (PHB:#%x): FIR 0x%016llx mask 0x%016llx\n",
 		      info.capp_index, info.phb_index, capp_fir,
 		      capp_fir_mask);
-		prlog(PR_DEBUG, "HMI: CAPP#%d (PHB:#%x): ACTION0 0x%016llx, ACTION1 0x%016llx\n",
+		prlog(PR_DEBUG, "CAPP#%d (PHB:#%x): ACTION0 0x%016llx, ACTION1 0x%016llx\n",
 		      info.capp_index, info.phb_index, capp_fir_action0,
 		      capp_fir_action1);
 
@@ -445,8 +524,7 @@ static void find_capp_checkstop_reason(int flat_chip_id,
 
 			hmi_evt->severity = OpalHMI_SEV_NO_ERROR;
 			hmi_evt->type = OpalHMI_ERROR_CAPP_RECOVERY;
-			queue_hmi_event(hmi_evt, 1);
-			*event_generated = true;
+			queue_hmi_event(hmi_evt, 1, out_flags);
 
 			return;
 		}
@@ -455,7 +533,7 @@ static void find_capp_checkstop_reason(int flat_chip_id,
 
 static void find_nx_checkstop_reason(int flat_chip_id,
 				     struct OpalHMIEvent *hmi_evt,
-				     bool *event_generated)
+				     uint64_t *out_flags)
 {
 	uint64_t nx_status;
 	uint64_t nx_dma_fir;
@@ -464,7 +542,7 @@ static void find_nx_checkstop_reason(int flat_chip_id,
 
 	/* Get NX status register value. */
 	if (xscom_read(flat_chip_id, nx_status_reg, &nx_status) != 0) {
-		prerror("HMI: XSCOM error reading NX_STATUS_REG\n");
+		prerror("XSCOM error reading NX_STATUS_REG\n");
 		return;
 	}
 
@@ -480,13 +558,13 @@ static void find_nx_checkstop_reason(int flat_chip_id,
 
 	/* Get DMA & Engine FIR data register value. */
 	if (xscom_read(flat_chip_id, nx_dma_engine_fir, &nx_dma_fir) != 0) {
-		prerror("HMI: XSCOM error reading NX_DMA_ENGINE_FIR\n");
+		prerror("XSCOM error reading NX_DMA_ENGINE_FIR\n");
 		return;
 	}
 
 	/* Get PowerBus Interface FIR data register value. */
 	if (xscom_read(flat_chip_id, nx_pbi_fir, &nx_pbi_fir_val) != 0) {
-		prerror("HMI: XSCOM error reading NX_PBI_FIR\n");
+		prerror("XSCOM error reading NX_PBI_FIR\n");
 		return;
 	}
 
@@ -513,13 +591,171 @@ static void find_nx_checkstop_reason(int flat_chip_id,
 	xscom_write(flat_chip_id, nx_dma_engine_fir, PPC_BIT(38));
 
 	/* Send an HMI event. */
-	queue_hmi_event(hmi_evt, 0);
-	*event_generated = true;
+	queue_hmi_event(hmi_evt, 0, out_flags);
+}
+
+/*
+ * If the year is 2018 and you still see all these hardcoded, you
+ * should really replace this with the neat macros that's in the
+ * NPU2 code rather than this horrible listing of every single
+ * NPU2 register hardcoded for a specific chip.
+ *
+ * I feel dirty having even written it.
+ */
+static uint32_t npu2_scom_dump[] = {
+	0x5011017, 0x5011047, 0x5011077, 0x50110A7,
+	0x5011217, 0x5011247, 0x5011277, 0x50112A7,
+	0x5011417, 0x5011447, 0x5011477, 0x50114A7,
+	0x50110DA, 0x50112DA, 0x50114DA,
+	0x50110DB, 0x50112DB, 0x50114DB,
+	0x5011011, 0x5011041, 0x5011071, 0x50110A1,
+	0x5011211, 0x5011241, 0x5011271, 0x50112A1,
+	0x5011411, 0x5011441, 0x5011471, 0x50114A1,
+	0x5011018, 0x5011048, 0x5011078, 0x50110A8,
+	0x5011218, 0x5011248, 0x5011278, 0x50112A8,
+	0x5011418, 0x5011448, 0x5011478, 0x50114A8,
+	0x5011640,
+	0x5011114, 0x5011134, 0x5011314, 0x5011334,
+	0x5011514, 0x5011534, 0x5011118, 0x5011138,
+	0x5011318, 0x5011338, 0x5011518, 0x5011538,
+	0x50110D8, 0x50112D8, 0x50114D8,
+	0x50110D9, 0x50112D9, 0x50114D9,
+	0x5011019, 0x5011049, 0x5011079, 0x50110A9,
+	0x5011219, 0x5011249, 0x5011279, 0x50112A9,
+	0x5011419, 0x5011449, 0x5011479, 0x50114A9,
+	0x50110F4, 0x50112F4, 0x50114F4,
+	0x50110F5, 0x50112F5, 0x50114F5,
+	0x50110F6, 0x50112F6, 0x50114F6,
+	0x50110FD, 0x50112FD, 0x50114FD,
+	0x50110FE, 0x50112FE, 0x50114FE,
+	0x00
+};
+
+static void dump_scoms(int flat_chip_id, const char *unit, uint32_t *scoms,
+			const char *loc)
+{
+	uint64_t value;
+	int r;
+
+	while (*scoms != 0) {
+		value = 0;
+		r = _xscom_read(flat_chip_id, *scoms, &value, false);
+		if (r != OPAL_SUCCESS)
+			continue;
+		prlog(PR_ERR, "%s: [Loc: %s] P:%d 0x%08x=0x%016llx\n",
+		      unit, loc, flat_chip_id, *scoms, value);
+		scoms++;
+	}
+}
+
+static bool phb_is_npu2(struct dt_node *dn)
+{
+	return (dt_node_is_compatible(dn, "ibm,power9-npu-pciex") ||
+		dt_node_is_compatible(dn, "ibm,power9-npu-opencapi-pciex"));
+}
+
+static void find_npu2_checkstop_reason(int flat_chip_id,
+				      struct OpalHMIEvent *hmi_evt,
+				      uint64_t *out_flags)
+{
+	struct phb *phb;
+	int i;
+	bool npu2_hmi_verbose = false, found = false;
+	uint64_t npu2_fir;
+	uint64_t npu2_fir_mask;
+	uint64_t npu2_fir_action0;
+	uint64_t npu2_fir_action1;
+	uint64_t npu2_fir_addr;
+	uint64_t npu2_fir_mask_addr;
+	uint64_t npu2_fir_action0_addr;
+	uint64_t npu2_fir_action1_addr;
+	uint64_t fatal_errors;
+	int total_errors = 0;
+	const char *loc;
+
+	/* Find the NPU on the chip associated with the HMI. */
+	for_each_phb(phb) {
+		/* NOTE: if a chip ever has >1 NPU this will need adjusting */
+		if (phb_is_npu2(phb->dt_node) &&
+		    (dt_get_chip_id(phb->dt_node) == flat_chip_id)) {
+			found = true;
+			break;
+		}
+	}
+
+	/* If we didn't find a NPU on the chip, it's not our checkstop. */
+	if (!found)
+		return;
+
+	npu2_fir_addr = NPU2_FIR_REGISTER_0;
+	npu2_fir_mask_addr = NPU2_FIR_REGISTER_0 + NPU2_FIR_MASK_OFFSET;
+	npu2_fir_action0_addr = NPU2_FIR_REGISTER_0 + NPU2_FIR_ACTION0_OFFSET;
+	npu2_fir_action1_addr = NPU2_FIR_REGISTER_0 + NPU2_FIR_ACTION1_OFFSET;
+
+	for (i = 0; i < NPU2_TOTAL_FIR_REGISTERS; i++) {
+		/* Read all the registers necessary to find a checkstop condition. */
+		if (xscom_read(flat_chip_id, npu2_fir_addr, &npu2_fir) ||
+			xscom_read(flat_chip_id, npu2_fir_mask_addr, &npu2_fir_mask) ||
+			xscom_read(flat_chip_id, npu2_fir_action0_addr, &npu2_fir_action0) ||
+			xscom_read(flat_chip_id, npu2_fir_action1_addr, &npu2_fir_action1)) {
+			prerror("HMI: Couldn't read NPU FIR register%d with XSCOM\n", i);
+			continue;
+		}
+
+		fatal_errors = npu2_fir & ~npu2_fir_mask & npu2_fir_action0 & npu2_fir_action1;
+
+		if (fatal_errors) {
+			loc = chip_loc_code(flat_chip_id);
+			if (!loc)
+				loc = "Not Available";
+			prlog(PR_ERR, "NPU: [Loc: %s] P:%d FIR#%d FIR 0x%016llx mask 0x%016llx\n",
+					loc, flat_chip_id, i, npu2_fir, npu2_fir_mask);
+			prlog(PR_ERR, "NPU: [Loc: %s] P:%d ACTION0 0x%016llx, ACTION1 0x%016llx\n",
+					loc, flat_chip_id, npu2_fir_action0, npu2_fir_action1);
+			total_errors++;
+		}
+
+		/* Can't do a fence yet, we are just logging fir information for now */
+		npu2_fir_addr += NPU2_FIR_OFFSET;
+		npu2_fir_mask_addr += NPU2_FIR_OFFSET;
+		npu2_fir_action0_addr += NPU2_FIR_OFFSET;
+		npu2_fir_action1_addr += NPU2_FIR_OFFSET;
+
+	}
+
+	if (!total_errors)
+		return;
+
+	npu2_hmi_verbose = nvram_query_eq("npu2-hmi-verbose", "true");
+	/* Force this for now until we sort out something better */
+	npu2_hmi_verbose = true;
+
+	if (npu2_hmi_verbose) {
+		_xscom_lock();
+		dump_scoms(flat_chip_id, "NPU", npu2_scom_dump, loc);
+		_xscom_unlock();
+		prlog(PR_ERR, " _________________________ \n");
+		prlog(PR_ERR, "< It's Driver Debug time! >\n");
+		prlog(PR_ERR, " ------------------------- \n");
+		prlog(PR_ERR, "       \\   ,__,            \n");
+		prlog(PR_ERR, "        \\  (oo)____        \n");
+		prlog(PR_ERR, "           (__)    )\\      \n");
+		prlog(PR_ERR, "              ||--|| *     \n");
+	}
+
+	/* Set up the HMI event */
+	hmi_evt->severity = OpalHMI_SEV_WARNING;
+	hmi_evt->type = OpalHMI_ERROR_MALFUNC_ALERT;
+	hmi_evt->u.xstop_error.xstop_type = CHECKSTOP_TYPE_NPU;
+	hmi_evt->u.xstop_error.u.chip_id = flat_chip_id;
+
+	/* Marking the event as recoverable so that we don't crash */
+	queue_hmi_event(hmi_evt, 1, out_flags);
 }
 
 static void find_npu_checkstop_reason(int flat_chip_id,
 				      struct OpalHMIEvent *hmi_evt,
-				      bool *event_generated)
+				      uint64_t *out_flags)
 {
 	struct phb *phb;
 	struct npu *p = NULL;
@@ -532,7 +768,7 @@ static void find_npu_checkstop_reason(int flat_chip_id,
 
 	/* Only check for NPU errors if the chip has a NPU */
 	if (PVR_TYPE(mfspr(SPR_PVR)) != PVR_TYPE_P8NVL)
-		return;
+		return find_npu2_checkstop_reason(flat_chip_id, hmi_evt, out_flags);
 
 	/* Find the NPU on the chip associated with the HMI. */
 	for_each_phb(phb) {
@@ -557,7 +793,7 @@ static void find_npu_checkstop_reason(int flat_chip_id,
 		       p->at_xscom + NX_FIR_ACTION0, &npu_fir_action0) ||
 	    xscom_read(flat_chip_id,
 		       p->at_xscom + NX_FIR_ACTION1, &npu_fir_action1)) {
-		prerror("HMI: Couldn't read NPU registers with XSCOM\n");
+		prerror("Couldn't read NPU registers with XSCOM\n");
 		return;
 	}
 
@@ -582,22 +818,22 @@ static void find_npu_checkstop_reason(int flat_chip_id,
 	hmi_evt->u.xstop_error.u.chip_id = flat_chip_id;
 
 	/* The HMI is "recoverable" because it shouldn't crash the system */
-	queue_hmi_event(hmi_evt, 1);
-	*event_generated = true;
+	queue_hmi_event(hmi_evt, 1, out_flags);
 }
 
-static void decode_malfunction(struct OpalHMIEvent *hmi_evt)
+static void decode_malfunction(struct OpalHMIEvent *hmi_evt, uint64_t *out_flags)
 {
 	int i;
-	uint64_t malf_alert;
-	bool event_generated = false;
+	uint64_t malf_alert, flags;
+
+	flags = 0;
 
 	if (!setup_scom_addresses()) {
-		prerror("HMI: Failed to setup scom addresses\n");
+		prerror("Failed to setup scom addresses\n");
 		/* Send an unknown HMI event. */
 		hmi_evt->u.xstop_error.xstop_type = CHECKSTOP_TYPE_UNKNOWN;
 		hmi_evt->u.xstop_error.xstop_reason = 0;
-		queue_hmi_event(hmi_evt, false);
+		queue_hmi_event(hmi_evt, false, out_flags);
 		return;
 	}
 
@@ -610,323 +846,413 @@ static void decode_malfunction(struct OpalHMIEvent *hmi_evt)
 		if (malf_alert & PPC_BIT(i)) {
 			xscom_write(this_cpu()->chip_id, malf_alert_scom,
 								~PPC_BIT(i));
-			find_capp_checkstop_reason(i, hmi_evt, &event_generated);
-			find_nx_checkstop_reason(i, hmi_evt, &event_generated);
-			find_npu_checkstop_reason(i, hmi_evt, &event_generated);
+			find_capp_checkstop_reason(i, hmi_evt, &flags);
+			find_nx_checkstop_reason(i, hmi_evt, &flags);
+			find_npu_checkstop_reason(i, hmi_evt, &flags);
 		}
 	}
 
-	find_core_checkstop_reason(hmi_evt, &event_generated);
+	find_core_checkstop_reason(hmi_evt, &flags);
 
 	/*
 	 * If we fail to find checkstop reason, send an unknown HMI event.
 	 */
-	if (!event_generated) {
+	if (!(flags & OPAL_HMI_FLAGS_NEW_EVENT)) {
 		hmi_evt->u.xstop_error.xstop_type = CHECKSTOP_TYPE_UNKNOWN;
 		hmi_evt->u.xstop_error.xstop_reason = 0;
-		queue_hmi_event(hmi_evt, false);
+		queue_hmi_event(hmi_evt, false, &flags);
 	}
-}
-
-static void wait_for_cleanup_complete(void)
-{
-	uint64_t timeout = 0;
-
-	smt_lowest();
-	while (!(*(this_cpu()->core_hmi_state_ptr) & HMI_STATE_CLEANUP_DONE)) {
-		/*
-		 * We use a fixed number of TIMEOUT_LOOPS rather
-		 * than using the timebase to do a pseudo-wall time
-		 * timeout due to the fact that timebase may not actually
-		 * work at this point in time.
-		 */
-		if (++timeout >= (TIMEOUT_LOOPS*3)) {
-			/*
-			 * Break out the loop here and fall through
-			 * recovery code. If recovery fails, kernel will get
-			 * informed about the failure. This way we can avoid
-			 * looping here if other threads are stuck.
-			 */
-			prlog(PR_DEBUG, "HMI: TB pre-recovery timeout\n");
-			break;
-		}
-		barrier();
-	}
-	smt_medium();
+	*out_flags |= flags;
 }
 
 /*
- * For successful recovery of TB residue error, remove dirty data
- * from TB/HDEC register in each active partition (subcore). Writing
- * zero's to TB/HDEC will achieve the same.
+ * This will "rendez-vous" all threads on the core to the rendez-vous
+ * id "sig". You need to make sure that "sig" is different from the
+ * previous rendez vous. The sig value must be between 0 and 7 with
+ * boot time being set to 0.
+ *
+ * Note: in theory, we could just use a flip flop "sig" in the thread
+ * structure (binary rendez-vous with no argument). This is a bit more
+ * debuggable and better at handling timeouts (arguably).
+ *
+ * This should be called with the no lock held
  */
-static void timer_facility_do_cleanup(uint64_t tfmr)
+static void hmi_rendez_vous(uint32_t sig)
 {
-	/*
-	 * Workaround for HW logic bug in Power9. Do not reset the
-	 * TB register if TB is valid and running.
-	 */
-	if ((tfmr & SPR_TFMR_TB_RESIDUE_ERR) && !(tfmr & SPR_TFMR_TB_VALID)) {
+	struct cpu_thread *t = this_cpu();
+	uint32_t my_id = cpu_get_thread_index(t);
+	uint32_t my_shift = my_id << 2;
+	uint32_t *sptr = t->core_hmi_state_ptr;
+	uint32_t val, prev, shift, i;
+	uint64_t timeout;
 
-		/* Reset the TB register to clear the dirty data. */
-		mtspr(SPR_TBWU, 0);
-		mtspr(SPR_TBWL, 0);
+	assert(sig <= 0x7);
+
+	/*
+	 * Mark ourselves as having reached the rendez vous point with
+	 * the exit bit cleared
+	 */
+	do {
+		val = prev = *sptr;
+		val &= ~(0xfu << my_shift);
+		val |= sig << my_shift;
+	} while (cmpxchg32(sptr, prev, val) != prev);
+
+	/*
+	 * Wait for everybody else to reach that point, ignore the
+	 * exit bit as another thread could have already set it.
+	 */
+	for (i = 0; i < cpu_thread_count; i++) {
+		shift = i << 2;
+
+		timeout = TIMEOUT_LOOPS;
+		while (((*sptr >> shift) & 0x7) != sig && --timeout)
+			cpu_relax();
+		if (!timeout)
+			prlog(PR_ERR, "Rendez-vous stage 1 timeout, CPU 0x%x"
+			      " waiting for thread %d (sptr=%08x)\n",
+						      t->pir, i, *sptr);
 	}
 
-	if (tfmr & SPR_TFMR_HDEC_PARITY_ERROR) {
-		/* Reset HDEC register */
-		mtspr(SPR_HDEC, 0);
+	/* Set the exit bit */
+	do {
+		val = prev = *sptr;
+		val &= ~(0xfu << my_shift);
+		val |= (sig | 8) << my_shift;
+	} while (cmpxchg32(sptr, prev, val) != prev);
+
+	/* At this point, we need to wait for everybody else to have a value
+	 * that is *not* sig. IE. they either have set the exit bit *or* they
+	 * have changed the rendez-vous (meaning they have moved on to another
+	 * rendez vous point).
+	 */
+	for (i = 0; i < cpu_thread_count; i++) {
+		shift = i << 2;
+
+		timeout = TIMEOUT_LOOPS;
+		while (((*sptr >> shift) & 0xf) == sig && --timeout)
+			cpu_relax();
+		if (!timeout)
+			prlog(PR_ERR, "Rendez-vous stage 2 timeout, CPU 0x%x"
+			      " waiting for thread %d (sptr=%08x)\n",
+						      t->pir, i, *sptr);
 	}
 }
 
-static int get_split_core_mode(void)
+static void hmi_print_debug(const uint8_t *msg, uint64_t hmer)
 {
-	uint64_t hid0;
+	const char *loc;
+	uint32_t core_id, thread_index;
 
-	hid0 = mfspr(SPR_HID0);
-	if (hid0 & SPR_HID0_POWER8_2LPARMODE)
-		return 2;
-	else if (hid0 & SPR_HID0_POWER8_4LPARMODE)
-		return 4;
+	core_id = pir_to_core_id(this_cpu()->pir);
+	thread_index = cpu_get_thread_index(this_cpu());
 
-	return 1;
+	loc = chip_loc_code(this_cpu()->chip_id);
+	if (!loc)
+		loc = "Not Available";
+
+	if (hmer & (SPR_HMER_TFAC_ERROR | SPR_HMER_TFMR_PARITY_ERROR)) {
+		prlog(PR_DEBUG, "[Loc: %s]: P:%d C:%d T:%d: TFMR(%016lx) %s\n",
+			loc, this_cpu()->chip_id, core_id, thread_index,
+			mfspr(SPR_TFMR), msg);
+	} else {
+		prlog(PR_DEBUG, "[Loc: %s]: P:%d C:%d T:%d: %s\n",
+			loc, this_cpu()->chip_id, core_id, thread_index,
+			msg);
+	}
 }
 
-
-/*
- * Certain TB/HDEC errors leaves dirty data in timebase and hdec register
- * which need to cleared before we initiate clear_tb_errors through TFMR[24].
- * The cleanup has to be done by once by any one thread from core or subcore.
- *
- * In split core mode, it is required to clear the dirty data from TB/HDEC
- * register by all subcores (active partitions) before we clear tb errors
- * through TFMR[24]. The HMI recovery would fail even if one subcore do
- * not cleanup the respective TB/HDEC register.
- *
- * For un-split core, any one thread can do the cleanup.
- * For split core, any one thread from each subcore can do the cleanup.
- *
- * Errors that required pre-recovery cleanup:
- *	- SPR_TFMR_TB_RESIDUE_ERR
- *	- SPR_TFMR_HDEC_PARITY_ERROR
- */
-static void pre_recovery_cleanup_p8(void)
-{
-	uint64_t hmer;
-	uint64_t tfmr;
-	uint32_t sibling_thread_mask;
-	int split_core_mode, subcore_id, thread_id, threads_per_core;
-	int i;
-
-	hmer = mfspr(SPR_HMER);
-
-	/* exit if it is not Time facility error. */
-	if (!(hmer & SPR_HMER_TFAC_ERROR))
-		return;
-
-	/*
-	 * Exit if it is not the error that leaves dirty data in timebase
-	 * or HDEC register. OR this may be the thread which came in very
-	 * late and recovery is been already done.
-	 *
-	 * TFMR is per [sub]core register. If any one thread on the [sub]core
-	 * does the recovery it reflects in TFMR register and applicable to
-	 * all threads in that [sub]core. Hence take a lock before checking
-	 * TFMR errors. Once a thread from a [sub]core completes the
-	 * recovery, all other threads on that [sub]core will return from
-	 * here.
-	 *
-	 * If TFMR does not show error that we are looking for, return
-	 * from here. We would just fall through recovery code which would
-	 * check for other errors on TFMR and fix them.
-	 */
-	lock(&hmi_lock);
-	tfmr = mfspr(SPR_TFMR);
-	if (!(tfmr & (SPR_TFMR_TB_RESIDUE_ERR | SPR_TFMR_HDEC_PARITY_ERROR))) {
-		unlock(&hmi_lock);
-		return;
-	}
-
-	/* Gather split core information. */
-	split_core_mode = get_split_core_mode();
-	threads_per_core = cpu_thread_count / split_core_mode;
-
-	/* Prepare core/subcore sibling mask */
-	thread_id = cpu_get_thread_index(this_cpu());
-	subcore_id = thread_id / threads_per_core;
-	sibling_thread_mask = SUBCORE_THREAD_MASK(subcore_id, threads_per_core);
-
-	/*
-	 * First thread on the core ?
-	 * if yes, setup the hmi cleanup state to !DONE
-	 */
-	if ((*(this_cpu()->core_hmi_state_ptr) & CORE_THREAD_MASK) == 0)
-		*(this_cpu()->core_hmi_state_ptr) &= ~HMI_STATE_CLEANUP_DONE;
-
-	/*
-	 * First thread on subcore ?
-	 * if yes, do cleanup.
-	 *
-	 * Clear TB and wait for other threads (one from each subcore) to
-	 * finish its cleanup work.
-	 */
-
-	if ((*(this_cpu()->core_hmi_state_ptr) & sibling_thread_mask) == 0)
-		timer_facility_do_cleanup(tfmr);
-
-	/*
-	 * Mark this thread bit. This bit will stay on until this thread
-	 * exit from handle_hmi_exception().
-	 */
-	*(this_cpu()->core_hmi_state_ptr) |= this_cpu()->thread_mask;
-
-	/*
-	 * Check if each subcore has completed the cleanup work.
-	 * if yes, then notify all the threads that we are done with cleanup.
-	 */
-	for (i = 0; i < split_core_mode; i++) {
-		uint32_t subcore_thread_mask =
-				SUBCORE_THREAD_MASK(i, threads_per_core);
-		if (!(*(this_cpu()->core_hmi_state_ptr) & subcore_thread_mask))
-			break;
-	}
-
-	if (i == split_core_mode)
-		*(this_cpu()->core_hmi_state_ptr) |= HMI_STATE_CLEANUP_DONE;
-
-	unlock(&hmi_lock);
-
-	/* Wait for other subcore to complete the cleanup. */
-	wait_for_cleanup_complete();
-}
-
-/*
- * Certain TB/HDEC errors leaves dirty data in timebase and hdec register
- * which need to cleared before we initiate clear_tb_errors through TFMR[24].
- * The cleanup has to be done by all the threads from core in p9.
- *
- * On TB/HDEC errors, all 4 threads on the affected receives HMI. On power9,
- * every thread on the core has its own copy of TB and hence every thread
- * has to clear the dirty data from its own TB register before we clear tb
- * errors through TFMR[24]. The HMI recovery would fail even if one thread
- * do not cleanup the respective TB/HDEC register.
- *
- * There is no split core mode in power9.
- *
- * Errors that required pre-recovery cleanup:
- *	- SPR_TFMR_TB_RESIDUE_ERR
- *	- SPR_TFMR_HDEC_PARITY_ERROR
- */
-static void pre_recovery_cleanup_p9(void)
-{
-	uint64_t hmer;
-	uint64_t tfmr;
-	int threads_per_core = cpu_thread_count;
-	int i;
-
-	hmer = mfspr(SPR_HMER);
-
-	/* exit if it is not Time facility error. */
-	if (!(hmer & SPR_HMER_TFAC_ERROR))
-		return;
-
-	/*
-	 * Exit if it is not the error that leaves dirty data in timebase
-	 * or HDEC register. OR this may be the thread which came in very
-	 * late and recovery is been already done.
-	 *
-	 * TFMR is per core register. Ideally if any one thread on the core
-	 * does the recovery it should reflect in TFMR register and
-	 * applicable to all threads in that core. Hence take a lock before
-	 * checking TFMR errors. Once a thread from a core completes the
-	 * recovery, all other threads on that core will return from
-	 * here.
-	 *
-	 * If TFMR does not show error that we are looking for, return
-	 * from here. We would just fall through recovery code which would
-	 * check for other errors on TFMR and fix them.
-	 */
-	lock(&hmi_lock);
-	tfmr = mfspr(SPR_TFMR);
-	if (!(tfmr & (SPR_TFMR_TB_RESIDUE_ERR | SPR_TFMR_HDEC_PARITY_ERROR))) {
-		unlock(&hmi_lock);
-		return;
-	}
-
-	/*
-	 * Due to a HW logic bug in p9, TFMR bit 26 and 45 always set
-	 * once TB residue or HDEC errors occurs at first time. Hence for HMI
-	 * on subsequent TB errors add additional check as workaround to
-	 * identify validity of the errors and decide whether pre-recovery
-	 * is required or not. Exit pre-recovery if there are other TB
-	 * errors also present on TFMR.
-	 */
-	if (tfmr & SPR_TFMR_OTHER_ERRORS) {
-		unlock(&hmi_lock);
-		return;
-	}
-
-	/*
-	 * First thread on the core ?
-	 * if yes, setup the hmi cleanup state to !DONE
-	 */
-	if ((*(this_cpu()->core_hmi_state_ptr) & CORE_THREAD_MASK) == 0)
-		*(this_cpu()->core_hmi_state_ptr) &= ~HMI_STATE_CLEANUP_DONE;
-
-	/*
-	 * Clear TB and wait for other threads to finish its cleanup work.
-	 */
-	timer_facility_do_cleanup(tfmr);
-
-	/*
-	 * Mark this thread bit. This bit will stay on until this thread
-	 * exit from handle_hmi_exception().
-	 */
-	*(this_cpu()->core_hmi_state_ptr) |= this_cpu()->thread_mask;
-
-	/*
-	 * Check if each thread has completed the cleanup work.
-	 * if yes, then notify all the threads that we are done with cleanup.
-	 */
-	for (i = 0; i < threads_per_core; i++) {
-		uint32_t thread_mask = SINGLE_THREAD_MASK(i);
-		if (!(*(this_cpu()->core_hmi_state_ptr) & thread_mask))
-			break;
-	}
-
-	if (i == threads_per_core)
-		*(this_cpu()->core_hmi_state_ptr) |= HMI_STATE_CLEANUP_DONE;
-
-	unlock(&hmi_lock);
-
-	/* Wait for other threads to complete the cleanup. */
-	wait_for_cleanup_complete();
-}
-
-static void pre_recovery_cleanup(void)
-{
-	if (proc_gen == proc_gen_p9)
-		return pre_recovery_cleanup_p9();
-	else
-		return pre_recovery_cleanup_p8();
-}
-
-static void hmi_exit(void)
-{
-	/* unconditionally unset the thread bit */
-	*(this_cpu()->core_hmi_state_ptr) &= ~(this_cpu()->thread_mask);
-}
-
-int handle_hmi_exception(uint64_t hmer, struct OpalHMIEvent *hmi_evt)
+static int handle_thread_tfac_error(uint64_t tfmr, uint64_t *out_flags)
 {
 	int recover = 1;
-	uint64_t tfmr;
 
-	/*
-	 * In case of split core, some of the Timer facility errors need
-	 * cleanup to be done before we proceed with the error recovery.
+	if (tfmr & SPR_TFMR_DEC_PARITY_ERR)
+		*out_flags |= OPAL_HMI_FLAGS_DEC_LOST;
+	if (!tfmr_recover_local_errors(tfmr))
+		recover = 0;
+	tfmr &= ~(SPR_TFMR_PURR_PARITY_ERR |
+		  SPR_TFMR_SPURR_PARITY_ERR |
+		  SPR_TFMR_DEC_PARITY_ERR);
+	return recover;
+}
+
+static int64_t opal_handle_hmi(void);
+
+static void opal_handle_hmi_job(void *data __unused)
+{
+	opal_handle_hmi();
+}
+
+/*
+ * Queue hmi handling job If secondaries are still in OPAL
+ * This function is called by thread 0.
+ */
+static struct cpu_job **hmi_kick_secondaries(void)
+{
+	struct cpu_thread *ts = this_cpu();
+	struct cpu_job **hmi_jobs = NULL;
+	int job_sz = sizeof(struct cpu_job *) * cpu_thread_count;
+	int i;
+
+	for (i = 1; i < cpu_thread_count; i++) {
+		ts = next_cpu(ts);
+
+		/* Is this thread still in OPAL ? */
+		if (ts->state == cpu_state_active) {
+			if (!hmi_jobs) {
+				hmi_jobs = zalloc(job_sz);
+				assert(hmi_jobs);
+			}
+
+			prlog(PR_DEBUG, "Sending hmi job to thread %d\n", i);
+			hmi_jobs[i] = cpu_queue_job(ts, "handle_hmi_job",
+					opal_handle_hmi_job, NULL);
+		}
+	}
+	return hmi_jobs;
+}
+
+static int handle_all_core_tfac_error(uint64_t tfmr, uint64_t *out_flags)
+{
+	struct cpu_thread *t, *t0;
+	int recover = -1;
+	struct cpu_job **hmi_jobs = NULL;
+
+	t = this_cpu();
+	t0 = find_cpu_by_pir(cpu_get_thread0(t));
+
+	if (t == t0 && t0->state == cpu_state_os)
+		hmi_jobs = hmi_kick_secondaries();
+
+	/* Rendez vous all threads */
+	hmi_rendez_vous(1);
+
+	/* We use a lock here as some of the TFMR bits are shared and I
+	 * prefer avoiding doing the cleanup simultaneously.
 	 */
-	pre_recovery_cleanup();
+	lock(&hmi_lock);
+
+	/* First handle corrupt TFMR otherwise we can't trust anything.
+	 * We'll use a lock here so that the threads don't try to do it at
+	 * the same time
+	 */
+	if (tfmr & SPR_TFMR_TFMR_CORRUPT) {
+		/* Check if it's still in error state */
+		if (mfspr(SPR_TFMR) & SPR_TFMR_TFMR_CORRUPT)
+			if (!recover_corrupt_tfmr()) {
+				unlock(&hmi_lock);
+				recover = 0;
+				goto error_out;
+			}
+
+		tfmr = mfspr(SPR_TFMR);
+
+		/* We could have got new thread errors in the meantime */
+		if (tfmr & SPR_TFMR_THREAD_ERRORS) {
+			recover = handle_thread_tfac_error(tfmr, out_flags);
+			tfmr &= ~SPR_TFMR_THREAD_ERRORS;
+		}
+		if (!recover) {
+			unlock(&hmi_lock);
+			goto error_out;
+		}
+	}
+
+	/* Tell the OS ... */
+	if (tfmr & SPR_TFMR_HDEC_PARITY_ERROR)
+		*out_flags |= OPAL_HMI_FLAGS_HDEC_LOST;
+
+	/* Cleanup bad HDEC or TB on all threads or subcures before we clear
+	 * the error conditions
+	 */
+	tfmr_cleanup_core_errors(tfmr);
+
+	/* Unlock before next rendez-vous */
+	unlock(&hmi_lock);
+
+	/* Second rendez vous, ensure the above cleanups are all done before
+	 * we proceed further
+	 */
+	hmi_rendez_vous(2);
+
+	/* We can now clear the error conditions in the core. */
+	recover = tfmr_clear_core_errors(tfmr);
+	if (recover == 0)
+		goto error_out;
+
+	/* Third rendez-vous. We could in theory do the timebase resync as
+	 * part of the previous one, but I prefer having all the error
+	 * conditions cleared before we start trying.
+	 */
+	hmi_rendez_vous(3);
+
+	/* Now perform the actual TB recovery on thread 0 */
+	if (t == t0)
+		recover = chiptod_recover_tb_errors(&this_cpu()->tb_resynced);
+
+error_out:
+	/* Last rendez-vous */
+	hmi_rendez_vous(4);
+
+	/* Now all threads have gone past rendez-vous 3 and not yet past another
+	 * rendez-vous 1, so the value of tb_resynced of thread 0 of the core
+	 * contains an accurate indication as to whether the timebase was lost.
+	 */
+	if (t0->tb_resynced)
+		*out_flags |= OPAL_HMI_FLAGS_TB_RESYNC;
+
+	if (t == t0 && hmi_jobs) {
+		int i;
+		for (i = 1; i < cpu_thread_count; i++)
+			if (hmi_jobs[i])
+				cpu_wait_job(hmi_jobs[i], true);
+		free(hmi_jobs);
+	}
+
+	return recover;
+}
+
+static uint64_t read_tfmr_t0(void)
+{
+	uint64_t tfmr_t0;
+	uint32_t chip_id = this_cpu()->chip_id;
+	uint32_t core_id = pir_to_core_id(this_cpu()->pir);
+
+	lock(&hmi_lock);
+
+	xscom_write(chip_id, XSCOM_ADDR_P9_EC(core_id, P9_SCOM_SPRC),
+			SETFIELD(P9_SCOMC_SPR_SELECT, 0, P9_SCOMC_TFMR_T0));
+	xscom_read(chip_id, XSCOM_ADDR_P9_EC(core_id, P9_SCOM_SPRD),
+				&tfmr_t0);
+	unlock(&hmi_lock);
+	return tfmr_t0;
+}
+
+/* P9 errata: In theory, an HDEC error is sent to all threads. However,
+ * due to an errata on P9 where TFMR bit 26 (HDEC parity) cannot be
+ * cleared on thread 1..3, I am not confident we can do a rendez-vous
+ * in all cases.
+ *
+ * Our current approach is to ignore that error unless it is present
+ * on thread 0 TFMR. Also, ignore TB residue error due to a similar
+ * errata as above.
+ */
+static void validate_latched_errors(uint64_t *tfmr)
+{
+	if ((*tfmr & (SPR_TFMR_HDEC_PARITY_ERROR | SPR_TFMR_TB_RESIDUE_ERR))
+				&& this_cpu()->is_secondary) {
+		uint64_t tfmr_t0 = read_tfmr_t0();
+
+		if (!(tfmr_t0 & SPR_TFMR_HDEC_PARITY_ERROR))
+			*tfmr &= ~SPR_TFMR_HDEC_PARITY_ERROR;
+
+		if (!(tfmr_t0 & SPR_TFMR_TB_RESIDUE_ERR))
+			*tfmr &= ~SPR_TFMR_TB_RESIDUE_ERR;
+	}
+}
+
+static int handle_tfac_errors(struct OpalHMIEvent *hmi_evt, uint64_t *out_flags)
+{
+	int recover = -1;
+	uint64_t tfmr = mfspr(SPR_TFMR);
+
+	/* A TFMR parity/corrupt error makes us ignore all the local stuff.*/
+	if (tfmr & SPR_TFMR_TFMR_CORRUPT) {
+		/* Mark TB as invalid for now as we don't trust TFMR, we'll fix
+		 * it up later
+		 */
+		this_cpu()->tb_invalid = true;
+		goto bad_tfmr;
+	}
+
+	this_cpu()->tb_invalid = !(tfmr & SPR_TFMR_TB_VALID);
+
+	if (proc_gen == proc_gen_p9)
+		validate_latched_errors(&tfmr);
+
+	/* First, handle thread local errors */
+	if (tfmr & SPR_TFMR_THREAD_ERRORS) {
+		recover = handle_thread_tfac_error(tfmr, out_flags);
+		tfmr &= ~SPR_TFMR_THREAD_ERRORS;
+	}
+
+ bad_tfmr:
+
+	/* Let's see if we still have a all-core error to deal with, if
+	 * not, we just bail out
+	 */
+	if (tfmr & SPR_TFMR_CORE_ERRORS) {
+		int recover2;
+
+		/* Only update "recover" if it's not already 0 (non-recovered)
+		 */
+		recover2 = handle_all_core_tfac_error(tfmr, out_flags);
+		if (recover != 0)
+			recover = recover2;
+	} else if (tfmr & SPR_TFMR_CHIP_TOD_INTERRUPT) {
+		int recover2;
+
+		/*
+		 * There are some TOD errors which do not affect working of
+		 * TOD and TB. They stay in valid state. Hence we don't need
+		 * rendez vous.
+		 *
+		 * TOD errors that affects TOD/TB will report a global error
+		 * on TFMR alongwith bit 51, and they will go in rendez vous.
+		 */
+		recover2 = chiptod_recover_tod_errors();
+		if (recover != 0)
+			recover = recover2;
+	} else if (this_cpu()->tb_invalid) {
+		/* This shouldn't happen, TB is invalid and no global error
+		 * was reported. We just return for now assuming one will
+		 * be. We can't do a rendez vous without a core-global HMI.
+		 */
+		prlog(PR_ERR, "HMI: TB invalid without core error reported ! "
+			"CPU=%x, TFMR=0x%016lx\n", this_cpu()->pir,
+						mfspr(SPR_TFMR));
+	}
+
+	if (recover != -1 && hmi_evt) {
+		hmi_evt->severity = OpalHMI_SEV_ERROR_SYNC;
+		hmi_evt->type = OpalHMI_ERROR_TFAC;
+		hmi_evt->tfmr = tfmr;
+		queue_hmi_event(hmi_evt, recover, out_flags);
+	}
+
+	/* Set the TB state looking at TFMR register before we head out. */
+	this_cpu()->tb_invalid = !(mfspr(SPR_TFMR) & SPR_TFMR_TB_VALID);
+
+	if (this_cpu()->tb_invalid) {
+		*out_flags |= OPAL_HMI_FLAGS_TOD_TB_FAIL;
+		prlog(PR_WARNING, "Failed to get TB in running state! "
+			"CPU=%x, TFMR=%016lx\n", this_cpu()->pir,
+					mfspr(SPR_TFMR));
+	}
+
+	return recover;
+}
+
+static int handle_hmi_exception(uint64_t hmer, struct OpalHMIEvent *hmi_evt,
+				uint64_t *out_flags)
+{
+	struct cpu_thread *cpu = this_cpu();
+	int recover = 1;
+	uint64_t handled = 0;
+
+	prlog(PR_DEBUG, "Received HMI interrupt: HMER = 0x%016llx\n", hmer);
+	/* Initialize the hmi event with old value of HMER */
+	if (hmi_evt)
+		hmi_evt->hmer = hmer;
+
+	/* Handle Timer/TOD errors separately */
+	if (hmer & (SPR_HMER_TFAC_ERROR | SPR_HMER_TFMR_PARITY_ERROR)) {
+		hmi_print_debug("Timer Facility Error", hmer);
+		handled = hmer & (SPR_HMER_TFAC_ERROR | SPR_HMER_TFMR_PARITY_ERROR);
+		mtspr(SPR_HMER, ~handled);
+		recover = handle_tfac_errors(hmi_evt, out_flags);
+		handled = 0;
+	}
 
 	lock(&hmi_lock);
 	/*
@@ -934,81 +1260,79 @@ int handle_hmi_exception(uint64_t hmer, struct OpalHMIEvent *hmi_evt)
 	 * looking at TFMR register. TFMR will tell us correct state of
 	 * TB register.
 	 */
-	this_cpu()->tb_invalid = !(mfspr(SPR_TFMR) & SPR_TFMR_TB_VALID);
-	prlog(PR_DEBUG, "HMI: Received HMI interrupt: HMER = 0x%016llx\n", hmer);
-	if (hmi_evt)
-		hmi_evt->hmer = hmer;
 	if (hmer & SPR_HMER_PROC_RECV_DONE) {
-		hmer &= ~SPR_HMER_PROC_RECV_DONE;
-		if (hmi_evt) {
+		uint32_t chip_id = pir_to_chip_id(cpu->pir);
+		uint32_t core_id = pir_to_core_id(cpu->pir);
+		uint64_t core_wof;
+
+		hmi_print_debug("Processor recovery occurred.", hmer);
+		if (!read_core_wof(chip_id, core_id, &core_wof)) {
+			int i;
+
+			prlog(PR_DEBUG, "Core WOF = 0x%016llx recovered error:\n", core_wof);
+			for (i = 0; i < ARRAY_SIZE(recoverable_bits); i++) {
+				if (core_wof & PPC_BIT(recoverable_bits[i].bit))
+					prlog(PR_DEBUG, "%s\n",
+						recoverable_bits[i].reason);
+			}
+		}
+
+		handled |= SPR_HMER_PROC_RECV_DONE;
+		if (cpu_is_thread0(cpu) && hmi_evt) {
 			hmi_evt->severity = OpalHMI_SEV_NO_ERROR;
 			hmi_evt->type = OpalHMI_ERROR_PROC_RECOV_DONE;
-			queue_hmi_event(hmi_evt, recover);
+			queue_hmi_event(hmi_evt, recover, out_flags);
 		}
-		prlog(PR_DEBUG, "HMI: Processor recovery Done.\n");
 	}
 	if (hmer & SPR_HMER_PROC_RECV_ERROR_MASKED) {
-		hmer &= ~SPR_HMER_PROC_RECV_ERROR_MASKED;
-		if (hmi_evt) {
+		handled |= SPR_HMER_PROC_RECV_ERROR_MASKED;
+		if (cpu_is_thread0(cpu) && hmi_evt) {
 			hmi_evt->severity = OpalHMI_SEV_NO_ERROR;
 			hmi_evt->type = OpalHMI_ERROR_PROC_RECOV_MASKED;
-			queue_hmi_event(hmi_evt, recover);
+			queue_hmi_event(hmi_evt, recover, out_flags);
 		}
-		prlog(PR_DEBUG, "HMI: Processor recovery Done (masked).\n");
+		hmi_print_debug("Processor recovery Done (masked).", hmer);
 	}
 	if (hmer & SPR_HMER_PROC_RECV_AGAIN) {
-		hmer &= ~SPR_HMER_PROC_RECV_AGAIN;
-		if (hmi_evt) {
+		handled |= SPR_HMER_PROC_RECV_AGAIN;
+		if (cpu_is_thread0(cpu) && hmi_evt) {
 			hmi_evt->severity = OpalHMI_SEV_NO_ERROR;
 			hmi_evt->type = OpalHMI_ERROR_PROC_RECOV_DONE_AGAIN;
-			queue_hmi_event(hmi_evt, recover);
+			queue_hmi_event(hmi_evt, recover, out_flags);
 		}
-		prlog(PR_DEBUG, "HMI: Processor recovery occurred again before"
-			"bit2 was cleared\n");
+		hmi_print_debug("Processor recovery occurred again before"
+				"bit2 was cleared\n", hmer);
 	}
 	/* Assert if we see malfunction alert, we can not continue. */
 	if (hmer & SPR_HMER_MALFUNCTION_ALERT) {
-		hmer &= ~SPR_HMER_MALFUNCTION_ALERT;
+		handled |= SPR_HMER_MALFUNCTION_ALERT;
 
+		hmi_print_debug("Malfunction Alert", hmer);
 		if (hmi_evt)
-			decode_malfunction(hmi_evt);
+			decode_malfunction(hmi_evt, out_flags);
 	}
 
 	/* Assert if we see Hypervisor resource error, we can not continue. */
 	if (hmer & SPR_HMER_HYP_RESOURCE_ERR) {
-		hmer &= ~SPR_HMER_HYP_RESOURCE_ERR;
+		handled |= SPR_HMER_HYP_RESOURCE_ERR;
+
+		hmi_print_debug("Hypervisor resource error", hmer);
 		recover = 0;
 		if (hmi_evt) {
 			hmi_evt->severity = OpalHMI_SEV_FATAL;
 			hmi_evt->type = OpalHMI_ERROR_HYP_RESOURCE;
-			queue_hmi_event(hmi_evt, recover);
+			queue_hmi_event(hmi_evt, recover, out_flags);
 		}
 	}
+	if (hmer & SPR_HMER_TRIG_FIR_HMI) {
+		handled |= SPR_HMER_TRIG_FIR_HMI;
+		hmer &= ~SPR_HMER_TRIG_FIR_HMI;
 
-	/*
-	 * Assert for now for all TOD errors. In future we need to decode
-	 * TFMR and take corrective action wherever required.
-	 */
-	if (hmer & SPR_HMER_TFAC_ERROR) {
-		tfmr = mfspr(SPR_TFMR);		/* save original TFMR */
-		hmer &= ~SPR_HMER_TFAC_ERROR;
-		recover = chiptod_recover_tb_errors();
+		hmi_print_debug("Clearing unknown debug trigger", hmer);
 		if (hmi_evt) {
-			hmi_evt->severity = OpalHMI_SEV_ERROR_SYNC;
-			hmi_evt->type = OpalHMI_ERROR_TFAC;
-			hmi_evt->tfmr = tfmr;
-			queue_hmi_event(hmi_evt, recover);
-		}
-	}
-	if (hmer & SPR_HMER_TFMR_PARITY_ERROR) {
-		tfmr = mfspr(SPR_TFMR);		/* save original TFMR */
-		hmer &= ~SPR_HMER_TFMR_PARITY_ERROR;
-		recover = chiptod_recover_tb_errors();
-		if (hmi_evt) {
-			hmi_evt->severity = OpalHMI_SEV_FATAL;
-			hmi_evt->type = OpalHMI_ERROR_TFMR_PARITY;
-			hmi_evt->tfmr = tfmr;
-			queue_hmi_event(hmi_evt, recover);
+			hmi_evt->severity = OpalHMI_SEV_NO_ERROR;
+			hmi_evt->type = OpalHMI_ERROR_DEBUG_TRIG_FIR,
+				queue_hmi_event(hmi_evt, recover, out_flags);
 		}
 	}
 
@@ -1017,19 +1341,18 @@ int handle_hmi_exception(uint64_t hmer, struct OpalHMIEvent *hmi_evt)
 	/*
 	 * HMER bits are sticky, once set to 1 they remain set to 1 until
 	 * they are set to 0. Reset the error source bit to 0, otherwise
-	 * we keep getting HMI interrupt again and again.
+	 * we keep getting HMI interrupt again and again. Writing to HMER
+	 * acts as an AND, so we write mask of all 1's except for the bits
+	 * we want to clear.
 	 */
-	mtspr(SPR_HMER, hmer);
-	hmi_exit();
-	/* Set the TB state looking at TFMR register before we head out. */
-	this_cpu()->tb_invalid = !(mfspr(SPR_TFMR) & SPR_TFMR_TB_VALID);
+	mtspr(SPR_HMER, ~handled);
 	unlock(&hmi_lock);
 	return recover;
 }
 
 static int64_t opal_handle_hmi(void)
 {
-	uint64_t hmer;
+	uint64_t hmer, dummy_flags;
 	struct OpalHMIEvent hmi_evt;
 
 	/*
@@ -1042,8 +1365,30 @@ static int64_t opal_handle_hmi(void)
 	hmi_evt.version = OpalHMIEvt_V2;
 
 	hmer = mfspr(SPR_HMER);		/* Get HMER register value */
-	handle_hmi_exception(hmer, &hmi_evt);
+	handle_hmi_exception(hmer, &hmi_evt, &dummy_flags);
 
 	return OPAL_SUCCESS;
 }
 opal_call(OPAL_HANDLE_HMI, opal_handle_hmi, 0);
+
+static int64_t opal_handle_hmi2(__be64 *out_flags)
+{
+	uint64_t hmer, flags = 0;
+	struct OpalHMIEvent hmi_evt;
+
+	/*
+	 * Compiled time check to see size of OpalHMIEvent do not exceed
+	 * that of struct opal_msg.
+	 */
+	BUILD_ASSERT(sizeof(struct opal_msg) >= sizeof(struct OpalHMIEvent));
+
+	memset(&hmi_evt, 0, sizeof(struct OpalHMIEvent));
+	hmi_evt.version = OpalHMIEvt_V2;
+
+	hmer = mfspr(SPR_HMER);		/* Get HMER register value */
+	handle_hmi_exception(hmer, &hmi_evt, &flags);
+	*out_flags = cpu_to_be64(flags);
+
+	return OPAL_SUCCESS;
+}
+opal_call(OPAL_HANDLE_HMI2, opal_handle_hmi2, 1);

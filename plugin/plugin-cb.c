@@ -22,6 +22,7 @@
 #include "plugin/cpu_cb.h"
 #include "plugin/net_cb.h"
 #include "plugin/vm_cb.h"
+#include "plugin/display_cb.h"
 #include "plugin/cli_cb.h"
 #include "plugin/plugin_mgr.h"
 #include "migration/snapshot.h"
@@ -30,6 +31,9 @@
 #include "oshandler/oshandler.h"
 #include "qapi/qmp/qpointer.h"
 #include "sysemu/hw_accel.h"
+#include "ui/console.h"
+#include "ui/input.h"
+#include "sysemu/sysemu.h"
 
 
 void notify_ra_start(CommsWorkItem* work)
@@ -137,10 +141,14 @@ void notify_exec_instruction(CPUState *cs, uint64_t vaddr)
     }
 }
 
-void notify_read_memory(CPUState *cs, uint64_t paddr, uint8_t *value, int size)
+void notify_read_memory(CPUState *cs, uint64_t paddr, uint64_t vaddr, uint8_t *value, int size)
 {
-    // Get the pointer to executing code in host memory. Could fail...
-    void *ram_ptr = qemu_map_ram_ptr_nofault(NULL, paddr, NULL);
+    // Get the pointer to data in host memory. Could fail with RAM_ADDR_INVALID...
+    void *ram_ptr = NULL;
+    if(paddr != RAM_ADDR_INVALID){
+        ram_ptr = qemu_map_ram_ptr_nofault(NULL, paddr, NULL);
+    }
+
 
     PluginInstanceList *p = NULL;
     QLIST_FOREACH(p, &plugin_instance_list, next)
@@ -149,15 +157,18 @@ void notify_read_memory(CPUState *cs, uint64_t paddr, uint8_t *value, int size)
         if (p->instance->cb.on_memory_read)
         {
             // Call the plugin callback
-            p->instance->cb.on_memory_read(p->instance, paddr, value, ram_ptr, size);
+            p->instance->cb.on_memory_read(p->instance, paddr, vaddr, value, ram_ptr, size);
         }
     }
 }
 
-void notify_write_memory(CPUState *cs, uint64_t paddr, const uint8_t *value, int size)
+void notify_write_memory(CPUState *cs, uint64_t paddr, uint64_t vaddr, const uint8_t *value, int size)
 {
-   // Get the pointer to executing code in host memory. Could fail...
-   void *ram_ptr = qemu_map_ram_ptr_nofault(NULL, paddr, NULL);
+   // Get the pointer to data in host memory. Could fail with RAM_ADDR_INVALID...
+    void *ram_ptr = NULL;
+    if(paddr != RAM_ADDR_INVALID){
+        ram_ptr = qemu_map_ram_ptr_nofault(NULL, paddr, NULL);
+    }
 
    PluginInstanceList *p = NULL;
    QLIST_FOREACH(p, &plugin_instance_list, next)
@@ -166,7 +177,7 @@ void notify_write_memory(CPUState *cs, uint64_t paddr, const uint8_t *value, int
        if (p->instance->cb.on_memory_write)
        {
            // Call the plugin callback
-           p->instance->cb.on_memory_write(p->instance, paddr, value, ram_ptr, size);
+           p->instance->cb.on_memory_write(p->instance, paddr, vaddr, value, ram_ptr, size);
        }
    }
 }
@@ -323,6 +334,91 @@ void notify_vm_shutdown(void)
             p->instance->cb.on_vm_shutdown(p->instance);                
         }
     }
+}
+
+void display_request_shutdown(void)
+{
+    qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_UI);
+}
+
+void display_register(QemuDisplay *ui)
+{
+    qemu_display_register(ui);
+}
+
+void display_register_DisplayChangeListener(DisplayChangeListener *dcl)
+{
+    register_displaychangelistener(dcl);
+}
+
+void display_add_mouse_mode_change_notifier(Notifier *notify)
+{
+    qemu_add_mouse_mode_change_notifier(notify);
+}
+
+void *display_surface_get_image(DisplaySurface *s)
+{
+    return surface_data(s);
+}
+
+int display_surface_get_width(DisplaySurface *s)
+{
+    return surface_width(s);
+}
+
+int display_surface_get_height(DisplaySurface *s)
+{
+    return surface_height(s);
+}
+
+PixelFormat display_get_pixelformat(DisplaySurface *s)
+{
+    return qemu_pixelformat_from_pixman(s->format);
+}
+
+pixman_format_code_t display_get_display_format(DisplaySurface *s)
+{
+    return s->format;
+}
+
+QemuConsole *display_console_lookup_by_index(unsigned int index)
+{
+    return qemu_console_lookup_by_index(index);
+}
+
+void *display_get_display_plugin(void)
+{
+    return qemu_get_display_plugin();
+}
+
+void display_graphic_hw_update(QemuConsole *con)
+{
+    graphic_hw_update(con);
+}
+
+void display_console_set_window_id(QemuConsole *con, int window_id)
+{
+    qemu_console_set_window_id(con, window_id);
+}
+
+bool display_console_is_graphic(QemuConsole *con)
+{
+    return qemu_console_is_graphic(con);
+}
+
+void display_process_graphic_key_event(QemuConsole *con, int keycode, bool key_down)
+{
+    qemu_input_event_send_key_qcode(con, keycode, key_down);
+}
+
+const guint16 *display_get_xorg_input_map(int *maplen)
+{
+    if (maplen)
+    {
+       *maplen = qemu_input_map_xorgevdev_to_qcode_len;
+       return qemu_input_map_xorgevdev_to_qcode;
+    }
+    return NULL;
 }
 
 bool notify_command(const char *cmd, const char *args)

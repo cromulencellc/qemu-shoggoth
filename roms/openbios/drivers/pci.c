@@ -37,6 +37,9 @@
 #ifdef CONFIG_DRIVER_USB
 #include "drivers/usb.h"
 #endif
+#ifdef CONFIG_DRIVER_VIRTIO_BLK
+#include "virtio.h"
+#endif
 
 #if defined (CONFIG_DEBUG_PCI)
 # define PCI_DPRINTF(format, ...) printk(format, ## __VA_ARGS__)
@@ -770,6 +773,66 @@ int sungem_config_cb (const pci_config_t *config)
 	return 0;
 }
 
+int virtio_blk_config_cb(const pci_config_t *config)
+{
+#ifdef CONFIG_DRIVER_VIRTIO_BLK
+	pci_addr addr;
+	uint8_t idx, cap_idx, cap_vndr;
+	uint8_t cfg_type, bar;
+	uint16_t status;
+	uint32_t offset, notify_mult = 0;
+	uint64_t common_cfg = 0, device_cfg = 0, notify_base = 0;
+
+	addr = PCI_ADDR(
+		PCI_BUS(config->dev),
+		PCI_DEV(config->dev),
+		PCI_FN(config->dev));
+
+	idx = (uint8_t)(pci_config_read16(addr, PCI_DEVICE_ID) & 0xff) - 1;
+
+	/*  Check PCI capabilties: if they don't exist then we're certainly not
+		a 1.0 device */
+	status = pci_config_read16(addr, PCI_STATUS);
+	if (!(status & PCI_STATUS_CAP_LIST)) {
+		return 0;
+	}
+
+	/* Locate VIRTIO_PCI_CAP_COMMON_CFG and VIRTIO_PCI_CAP_DEVICE_CFG */
+	cap_idx = pci_config_read8(addr, PCI_CAPABILITY_LIST);
+	while ((cap_vndr = pci_config_read8(addr, cap_idx)) != 0) {
+		if (cap_vndr == PCI_CAP_ID_VNDR) {
+			cfg_type = pci_config_read8(addr, cap_idx + 0x3);
+			bar = pci_config_read8(addr, cap_idx + 0x4);
+			offset = pci_config_read32(addr, cap_idx + 0x8);
+
+			switch (cfg_type) {
+			case VIRTIO_PCI_CAP_COMMON_CFG:
+				common_cfg = arch->host_pci_base + (config->assigned[bar] & ~0x0000000F) + offset;
+				break;
+			case VIRTIO_PCI_CAP_NOTIFY_CFG:
+				notify_base = arch->host_pci_base + (config->assigned[bar] & ~0x0000000F) + offset;
+				notify_mult = pci_config_read32(addr, cap_idx + 16);
+				break;
+			case VIRTIO_PCI_CAP_DEVICE_CFG:
+				device_cfg = arch->host_pci_base + (config->assigned[bar] & ~0x0000000F) + offset;
+				break;
+			}
+		}
+
+		cap_idx = pci_config_read8(addr, cap_idx + 1);
+	}
+
+	/* If we didn't find the required configuration then exit */
+	if (common_cfg == 0 || device_cfg == 0 || notify_base == 0) {
+		return 0;
+	}
+
+	ob_virtio_init(config->path, "virtio-blk", common_cfg, device_cfg,
+					notify_base, notify_mult, idx);
+#endif
+	return 0;
+}
+
 /*
  * "Designing PCI Cards and Drivers for Power Macintosh Computers", p. 454
  *
@@ -1237,13 +1300,11 @@ static void ob_pci_add_properties(phandle_t phandle,
 	set_int_property(dev, "class-code", class_code << 8 | class_prog);
 
 	if (config->irq_pin) {
-		OLDWORLD(set_int_property(dev, "AAPL,interrupts",
-					  config->irq_line));
-#if defined(CONFIG_SPARC64)
-                set_int_property(dev, "interrupts", config->irq_pin);
-#else
-		NEWWORLD(set_int_property(dev, "interrupts", config->irq_pin));
-#endif
+		if (is_oldworld()) {
+			set_int_property(dev, "AAPL,interrupts", config->irq_line);
+		} else {
+			set_int_property(dev, "interrupts", config->irq_pin);
+		}
 	}
 
 	set_int_property(dev, "min-grant", pci_config_read8(addr, PCI_MIN_GNT));
@@ -1599,7 +1660,7 @@ static void ob_configure_pci_bridge(pci_addr addr,
        Some drivers (e.g. IDE) will attempt ioport access as part of
        the configuration process, so we allow them during the secondary
        bus scan and then set the correct IO limit below. */
-    io_scan_limit = *io_base + (0xffff - *io_base);
+    io_scan_limit = *io_base + 0xffff;
     pci_config_write16(addr, PCI_IO_LIMIT_UPPER, (io_scan_limit >> 16));
     pci_config_write8(addr, PCI_IO_LIMIT, (io_scan_limit >> 8) & ~(0xf));
 
@@ -1848,8 +1909,9 @@ static phandle_t ob_pci_host_set_interrupt_map(phandle_t host)
     char *path, buf[256];
 
     /* Oldworld macs do interrupt maps differently */
-    if (!is_newworld())
+    if (is_oldworld()) {
         return 0;
+    }
 
     PCI_DPRINTF("setting up interrupt map for host %x\n", host);
     dnode = dt_iterate_type(0, "open-pic");
@@ -1924,10 +1986,29 @@ static phandle_t ob_pci_host_set_interrupt_map(phandle_t host)
 static void ob_pci_host_bus_interrupt(ucell dnode, u32 *props, int *ncells, u32 addr, u32 intno)
 {
     *ncells += pci_encode_phys_addr(props + *ncells, 0, 0, addr, 0, 0);
-    props[(*ncells)++] = intno;
-    props[(*ncells)++] = dnode;
-    props[(*ncells)++] = arch->irqs[((intno - 1) + (addr >> 11)) & 3];
-    props[(*ncells)++] = 1;
+
+    if (is_oldworld() || is_newworld()) {
+        /* Mac machines */
+        props[(*ncells)++] = intno;
+        props[(*ncells)++] = dnode;
+        props[(*ncells)++] = arch->irqs[((intno - 1) + (addr >> 11)) & 3];
+        props[(*ncells)++] = 1;
+    } else {
+        /* PReP machines */
+        props[(*ncells)++] = intno;
+        props[(*ncells)++] = dnode;
+
+        if (PCI_DEV(addr) == 1 && PCI_FN(addr) == 0) {
+            /* LSI SCSI has fixed routing to IRQ 13 */
+            props[(*ncells)++] = 13;
+        } else {
+            /* Use the same "physical" routing as QEMU's raven_map_irq() although
+               ultimately all 4 PCI interrupts are ORd to IRQ 15 as indicated
+               by the PReP specification */
+            props[(*ncells)++] = arch->irqs[((intno - 1) + (addr >> 11)) & 1];
+        }
+        props[(*ncells)++] = 1;
+    }
 }
 
 #elif defined(CONFIG_SPARC64)

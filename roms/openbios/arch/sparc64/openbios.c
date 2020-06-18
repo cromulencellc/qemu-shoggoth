@@ -26,6 +26,7 @@
 #include "arch/common/fw_cfg.h"
 #include "arch/sparc64/ofmem_sparc64.h"
 #include "spitfire.h"
+#include "libc/vsprintf.h"
 
 #define UUID_FMT "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x"
 
@@ -538,6 +539,8 @@ void arch_nvram_get(char *data)
     uint32_t clock_frequency;
     uint16_t machine_id;
     const char *stdin_path, *stdout_path;
+    char *bootorder_file, *boot_path;
+    uint32_t bootorder_sz, sz;
 
     fw_cfg_init();
 
@@ -557,8 +560,14 @@ void arch_nvram_get(char *data)
     }
 
     kernel_size = fw_cfg_read_i32(FW_CFG_KERNEL_SIZE);
-    if (kernel_size)
+    if (kernel_size) {
         kernel_image = fw_cfg_read_i64(FW_CFG_KERNEL_ADDR);
+
+        /* Mark the kernel memory as mapped 1:1 and in use */
+        ofmem_claim_phys(PAGE_ALIGN(kernel_image), PAGE_ALIGN(kernel_size), 0);
+        ofmem_claim_virt(PAGE_ALIGN(kernel_image), PAGE_ALIGN(kernel_size), 0);
+        ofmem_map(PAGE_ALIGN(kernel_image), PAGE_ALIGN(kernel_image), PAGE_ALIGN(kernel_size), -1);
+    }
 
     size = fw_cfg_read_i32(FW_CFG_CMDLINE_SIZE);
     if (size) {
@@ -570,7 +579,16 @@ void arch_nvram_get(char *data)
     }
     qemu_cmdline = (uint64_t)obio_cmdline;
     cmdline_size = size;
-    boot_device = fw_cfg_read_i16(FW_CFG_BOOT_DEVICE);
+
+    initrd_size = fw_cfg_read_i32(FW_CFG_INITRD_SIZE);
+    if (initrd_size) {
+        initrd_image = fw_cfg_read_i32(FW_CFG_INITRD_ADDR);
+
+        /* Mark initrd memory as mapped 1:1 and in use */
+        ofmem_claim_phys(PAGE_ALIGN(initrd_image), PAGE_ALIGN(initrd_size), 0);
+        ofmem_claim_virt(PAGE_ALIGN(initrd_image), PAGE_ALIGN(initrd_size), 0);
+        ofmem_map(PAGE_ALIGN(initrd_image), PAGE_ALIGN(initrd_image), PAGE_ALIGN(initrd_size), -1);
+    }
 
     if (kernel_size)
         printk("kernel addr %llx size %llx\n", kernel_image, kernel_size);
@@ -630,7 +648,11 @@ void arch_nvram_get(char *data)
     push_str("/options");
     fword("find-device");
 
-    switch (boot_device) {
+    /* Boot order */
+    bootorder_file = fw_cfg_read_file("bootorder", &bootorder_sz);
+
+    if (bootorder_file == NULL) {
+        switch (fw_cfg_read_i16(FW_CFG_BOOT_DEVICE)) {
         case 'a':
             push_str("/obio/SUNW,fdtwo");
             break;
@@ -644,11 +666,31 @@ void arch_nvram_get(char *data)
         case 'n':
             push_str("net");
             break;
-    }
+        }
 
-    fword("encode-string");
-    push_str("boot-device");
-    fword("property");
+        fword("encode-string");
+        push_str("boot-device");
+        fword("property");
+    } else {
+        sz = bootorder_sz * (3 * 2);
+        boot_device = malloc(sz);
+        memset(boot_device, 0, sz);
+
+        while ((boot_path = strsep(&bootorder_file, "\n")) != NULL) {
+            snprintf(buf, sizeof(buf),
+                     "%s:f "
+                     "%s:a "
+                     "%s ",
+                     boot_path, boot_path, boot_path);
+
+            strncat(boot_device, buf, sz);
+        }
+
+        push_str(boot_device);
+        fword("encode-string");
+        push_str("boot-device");
+        fword("property");
+    }
 
     push_str(obio_cmdline);
     fword("encode-string");

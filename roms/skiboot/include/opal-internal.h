@@ -61,6 +61,8 @@ extern void add_opal_node(void);
 			(func), (nargs))
 extern void __opal_register(uint64_t token, void *func, unsigned num_args);
 
+int64_t opal_quiesce(uint32_t shutdown_type, int32_t cpu);
+
 /* Warning: no locking at the moment, do at init time only
  *
  * XXX TODO: Add the big RCU-ish "opal API lock" to protect us here
@@ -74,13 +76,12 @@ extern void opal_run_pollers(void);
  * Warning: no locking, only call that from the init processor
  */
 extern void opal_add_host_sync_notifier(bool (*notify)(void *data), void *data);
-extern void opal_del_host_sync_notifier(bool (*notify)(void *data));
+extern void opal_del_host_sync_notifier(bool (*notify)(void *data), void *data);
 
 /*
  * Opal internal function prototype
  */
 struct OpalHMIEvent;
-extern int handle_hmi_exception(__be64 hmer, struct OpalHMIEvent *hmi_evt);
 extern int occ_msg_queue_occ_reset(void);
 
 extern unsigned long top_of_ram;
@@ -99,7 +100,7 @@ static inline bool opal_addr_valid(const void *addr)
 	unsigned long val = (unsigned long)addr;
 	if ((val >> 60) != 0xc && (val >> 60) != 0x0)
 		return false;
-	val &= ~0xf000000000000000;
+	val &= ~0xf000000000000000UL;
 	if (val > top_of_ram)
 		return false;
 	return true;

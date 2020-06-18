@@ -28,6 +28,11 @@
 #define OFFSET(sym, str, mem) \
 	DEFINE(sym, offsetof(struct str, mem))
 
+/*
+ * 64-bit ELF ABI specifies 288 byte redzone size.
+ */
+#define REDZONE_SIZE 288
+
 int main(void);
 
 int main(void)
@@ -37,6 +42,8 @@ int main(void)
 	OFFSET(CPUTHREAD_PIR, cpu_thread, pir);
 	OFFSET(CPUTHREAD_SAVE_R1, cpu_thread, save_r1);
 	OFFSET(CPUTHREAD_STATE, cpu_thread, state);
+	OFFSET(CPUTHREAD_IN_OPAL_CALL, cpu_thread, in_opal_call);
+	OFFSET(CPUTHREAD_QUIESCE_OPAL_CALL, cpu_thread, quiesce_opal_call);
 	OFFSET(CPUTHREAD_CUR_TOKEN, cpu_thread, current_token);
 	DEFINE(CPUTHREAD_GAP, sizeof(struct cpu_thread) + STACK_SAFETY_GAP);
 #ifdef STACK_CHECK_ENABLED
@@ -81,15 +88,19 @@ int main(void)
 
 	OFFSET(STACK_CR,	stack_frame, cr);
 	OFFSET(STACK_XER,	stack_frame, xer);
+	OFFSET(STACK_DSISR,	stack_frame, dsisr);
 	OFFSET(STACK_CTR,	stack_frame, ctr);
 	OFFSET(STACK_LR,	stack_frame, lr);
 	OFFSET(STACK_PC,	stack_frame, pc);
+	OFFSET(STACK_MSR,	stack_frame, msr);
 	OFFSET(STACK_CFAR,	stack_frame, cfar);
 	OFFSET(STACK_SRR0,	stack_frame, srr0);
 	OFFSET(STACK_SRR1,	stack_frame, srr1);
 	OFFSET(STACK_HSRR0,	stack_frame, hsrr0);
 	OFFSET(STACK_HSRR1,	stack_frame, hsrr1);
+	OFFSET(STACK_DAR,	stack_frame, dar);
 	DEFINE(STACK_FRAMESIZE,	sizeof(struct stack_frame));
+	DEFINE(INT_FRAMESIZE,	(sizeof(struct stack_frame) + REDZONE_SIZE));
 
 	return 0;
 }

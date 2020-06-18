@@ -53,7 +53,7 @@ static int check_exception(CPUX86State *env, int intno, int *error_code,
 
 #if !defined(CONFIG_USER_ONLY)
     if (env->old_exception == EXCP08_DBLE) {
-        if (env->hflags & HF_SVMI_MASK) {
+        if (env->hflags & HF_GUEST_MASK) {
             cpu_vmexit(env, SVM_EXIT_SHUTDOWN, 0, retaddr); /* does not return */
         }
 
@@ -99,12 +99,6 @@ static void QEMU_NORETURN raise_interrupt2(CPUX86State *env, int intno,
     } else {
         cpu_svm_check_intercept_param(env, SVM_EXIT_SWINT, 0, retaddr);
     }
-
-    //if (cs->exception_index >= 0 )
-    //{
-    //    printf("\nException Index: %d -> %d\n", cs->exception_index, intno);
-    //    printf("Error Code: %d\n", error_code);
-    //}
 
     cs->exception_index = intno;
     env->error_code = error_code;

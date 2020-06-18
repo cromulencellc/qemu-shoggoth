@@ -227,17 +227,30 @@ static bool p8dtu2u_probe(void)
 	return true;
 }
 
-static const struct bmc_platform astbmc_smc = {
-	.name = "SMC",
+static const struct bmc_sw_config bmc_sw_smc = {
 	.ipmi_oem_partial_add_esel   = IPMI_CODE(0x3a, 0xf0),
 	.ipmi_oem_pnor_access_status = IPMI_CODE(0x3a, 0x07),
+	.ipmi_oem_hiomap_cmd         = IPMI_CODE(0x3a, 0x5a),
 };
 
+/* Provided by Eric Chen (SMC) */
+const struct bmc_hw_config p8dtu_bmc_hw = {
+	.scu_revision_id = 0x02010303,
+	.mcr_configuration = 0x00000577,
+	.mcr_scu_mpll = 0x000050c0,
+	.mcr_scu_strap = 0x00000000,
+};
+
+static const struct bmc_platform bmc_plat_ast2400_smc = {
+	.name = "SMC",
+	.hw = &p8dtu_bmc_hw,
+	.sw = &bmc_sw_smc,
+};
 
 DECLARE_PLATFORM(p8dtu1u) = {
 	.name			= "p8dtu1u",
 	.probe			= p8dtu1u_probe,
-	.bmc			= &astbmc_smc,
+	.bmc			= &bmc_plat_ast2400_smc,
 	.init			= astbmc_init,
 	.pci_get_slot_info	= slot_table_get_slot_info,
 	.pci_probe_complete	= check_all_slot_table,
@@ -254,7 +267,7 @@ DECLARE_PLATFORM(p8dtu1u) = {
 DECLARE_PLATFORM(p8dtu2u) = {
 	.name			= "p8dtu2u",
 	.probe			= p8dtu2u_probe,
-	.bmc			= &astbmc_smc,
+	.bmc			= &bmc_plat_ast2400_smc,
 	.init			= astbmc_init,
 	.pci_get_slot_info	= slot_table_get_slot_info,
 	.pci_probe_complete	= check_all_slot_table,

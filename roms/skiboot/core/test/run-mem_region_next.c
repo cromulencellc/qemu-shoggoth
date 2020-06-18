@@ -17,12 +17,8 @@
 #include <config.h>
 
 #define BITS_PER_LONG (sizeof(long) * 8)
-/* Don't include this, it's PPC-specific */
-#define __CPU_H
-static unsigned int cpu_max_pir = 1;
-struct cpu_thread {
-	unsigned int			chip_id;
-};
+
+#include "dummy-cpu.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -52,8 +48,11 @@ static void real_free(void *p)
 #include <assert.h>
 #include <stdio.h>
 
-void lock(struct lock *l)
+enum proc_chip_quirks proc_chip_quirks;
+
+void lock_caller(struct lock *l, const char *caller)
 {
+	(void)caller;
 	assert(!l->lock_val);
 	l->lock_val++;
 }

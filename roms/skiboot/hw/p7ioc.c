@@ -584,7 +584,7 @@ static void p7ioc_rgc_interrupt(struct irq_source *is, uint32_t isn)
 static uint64_t p7ioc_rgc_irq_attributes(struct irq_source *is __unused,
 					 uint32_t isn __unused)
 {
-	return IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TARGET_RARE;
+	return IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TARGET_RARE | IRQ_ATTR_TYPE_LSI;
 }
 
 static const struct irq_source_ops p7ioc_rgc_irq_ops = {
@@ -666,8 +666,6 @@ static void p7ioc_create_hub(struct dt_node *np)
 	for (i = 0; i < P7IOC_NUM_PHBS; i++) {
 		if (p7ioc_phb_enabled(ioc, i))
 			p7ioc_phb_setup(ioc, i);
-		else
-			ioc->phbs[i].state = P7IOC_PHB_STATE_OFF;
 	}
 
 	/* Now, we do the bulk of the inits */

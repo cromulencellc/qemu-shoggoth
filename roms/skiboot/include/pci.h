@@ -23,6 +23,27 @@
 #include <bitmap.h>
 #include <ccan/list/list.h>
 
+#define PCITRACE(_p, _bdfn, fmt, a...) \
+	prlog(PR_TRACE, "PHB#%04x:%02x:%02x.%x " fmt,	\
+	      (_p)->opal_id,				\
+	      ((_bdfn) >> 8) & 0xff,			\
+	      ((_bdfn) >> 3) & 0x1f, (_bdfn) & 0x7, ## a)
+#define PCIDBG(_p, _bdfn, fmt, a...) \
+	prlog(PR_DEBUG, "PHB#%04x:%02x:%02x.%x " fmt,	\
+	      (_p)->opal_id,				\
+	      ((_bdfn) >> 8) & 0xff,			\
+	      ((_bdfn) >> 3) & 0x1f, (_bdfn) & 0x7, ## a)
+#define PCINOTICE(_p, _bdfn, fmt, a...) \
+	prlog(PR_NOTICE, "PHB#%04x:%02x:%02x.%x " fmt,	\
+	      (_p)->opal_id,				\
+	      ((_bdfn) >> 8) & 0xff,			\
+	      ((_bdfn) >> 3) & 0x1f, (_bdfn) & 0x7, ## a)
+#define PCIERR(_p, _bdfn, fmt, a...) \
+	prlog(PR_ERR, "PHB#%04x:%02x:%02x.%x " fmt,	\
+	      (_p)->opal_id,				\
+	      ((_bdfn) >> 8) & 0xff,			\
+	      ((_bdfn) >> 3) & 0x1f, (_bdfn) & 0x7, ## a)
+
 struct pci_device;
 struct pci_cfg_reg_filter;
 
@@ -76,7 +97,7 @@ struct pci_device {
 	uint32_t		vdid;
 	uint32_t		sub_vdid;
 #define PCI_VENDOR_ID(x)	((x) & 0xFFFF)
-#define PCI_DEVICE_ID(x)	((x) >> 8)
+#define PCI_DEVICE_ID(x)	((x) >> 16)
 	uint32_t		class;
 	uint64_t		cap_list;
 	struct {
@@ -89,6 +110,14 @@ struct pci_device {
 	uint32_t		pcrf_start;
 	uint32_t		pcrf_end;
 	struct list_head	pcrf;
+
+	/*
+	 * Relaxed ordering is a feature which allows PCIe devices accessing GPU
+	 * memory to bypass the normal PCIe ordering rules to increase
+	 * performance. It is enabled on a per-PEC basis so every device on a
+	 * PEC must support it before we can enable it.
+	 */
+	bool                    allow_relaxed_ordering;
 
 	struct dt_node		*dn;
 	struct pci_slot		*slot;
@@ -231,8 +260,7 @@ struct phb_ops {
 	int64_t (*eeh_freeze_status)(struct phb *phb, uint64_t pe_number,
 				     uint8_t *freeze_state,
 				     uint16_t *pci_error_type,
-				     uint16_t *severity,
-				     uint64_t *phb_status);
+				     uint16_t *severity);
 	int64_t (*eeh_freeze_clear)(struct phb *phb, uint64_t pe_number,
 				    uint64_t eeh_action_token);
 	int64_t (*eeh_freeze_set)(struct phb *phb, uint64_t pe_number,
@@ -333,6 +361,10 @@ struct phb_ops {
 	/* PCI peer-to-peer setup */
 	void (*set_p2p)(struct phb *phb, uint64_t mode, uint64_t flags,
 			uint16_t pe_number);
+
+	/* Get/set PBCQ Tunnel BAR register */
+	void (*get_tunnel_bar)(struct phb *phb, uint64_t *addr);
+	int64_t (*set_tunnel_bar)(struct phb *phb, uint64_t addr);
 };
 
 enum phb_type {
@@ -344,6 +376,7 @@ enum phb_type {
 	phb_type_pcie_v3,
 	phb_type_pcie_v4,
 	phb_type_npu_v2,
+	phb_type_npu_v2_opencapi,
 };
 
 struct phb {
@@ -431,6 +464,7 @@ extern int64_t pci_find_ecap(struct phb *phb, uint16_t bdfn, uint16_t cap,
 			     uint8_t *version);
 extern void pci_init_capabilities(struct phb *phb, struct pci_device *pd);
 extern bool pci_wait_crs(struct phb *phb, uint16_t bdfn, uint32_t *out_vdid);
+extern void pci_restore_slot_bus_configs(struct pci_slot *slot);
 extern void pci_device_init(struct phb *phb, struct pci_device *pd);
 extern struct pci_device *pci_walk_dev(struct phb *phb,
 				       struct pci_device *pd,
@@ -475,7 +509,7 @@ extern void pci_std_swizzle_irq_map(struct dt_node *dt_node,
 
 /* Initialize all PCI slots */
 extern void pci_init_slots(void);
-extern void pci_reset(void);
+extern int64_t pci_reset(void);
 
 extern void opal_pci_eeh_set_evt(uint64_t phb_id);
 extern void opal_pci_eeh_clear_evt(uint64_t phb_id);

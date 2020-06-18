@@ -24,6 +24,7 @@
 #include "qapi/qapi-commands-ui.h"
 #include "plugin/plugin-error.h"
 #include "block/qapi.h"
+#include "hw/boards.h"
 
 #include "qemu-vm.h"
 
@@ -88,7 +89,7 @@ void qemu_vm_shutdown(void)
 void qemu_vm_reset(void)
 {
     // This isn't quite QMP, but we want qmp-like behavior
-    qemu_system_reset_request(SHUTDOWN_CAUSE_HOST_QMP);
+    qemu_system_reset_request(SHUTDOWN_CAUSE_HOST_QMP_QUIT);
 }
 
 void qemu_vm_quit(void)
@@ -96,7 +97,7 @@ void qemu_vm_quit(void)
     no_shutdown = 0;
 
     // This isn't quite QMP, but we want qmp-like behavior
-    qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_QMP);
+    qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_QMP_QUIT);
 }
 
 int qemu_vm_get_state(void)
@@ -319,4 +320,18 @@ void qemu_vm_get_snapshots(ImageInfoList **snapshots)
             return;
         }
     }
+}
+
+const char *qemu_vm_get_arch(int cpu_idx)
+{
+    MachineClass *mc = MACHINE_GET_CLASS(current_machine);
+    const CPUArchIdList *cpus = mc->possible_cpu_arch_ids(current_machine);
+    if (cpus && cpu_idx < cpus->len){
+        const CPUArchId *arch = &cpus->cpus[cpu_idx];
+        if(arch){
+            return arch->type;
+        }
+    }
+
+    return NULL;
 }

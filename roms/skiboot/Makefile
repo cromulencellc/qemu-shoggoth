@@ -9,16 +9,19 @@ ARCH = $(shell uname -m)
 ifdef CROSS_COMPILE
 	CROSS ?= $(CROSS_COMPILE)
 endif
-ifeq ("$(ARCH)", "ppc64")
-	CROSS ?=
-else
+ifneq ("$(ARCH)", "ppc64")
+ifneq ("$(ARCH)", "ppc64le")
 	CROSS ?= powerpc64-linux-
+endif
 endif
 
 #
 # Main debug switch
 #
 DEBUG ?= 0
+
+# Run tests under valgrind?
+USE_VALGRIND ?= 1
 
 #
 # Optional location of embedded linux kernel file

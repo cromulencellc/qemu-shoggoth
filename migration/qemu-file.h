@@ -27,12 +27,6 @@
 
 #include <zlib.h>
 
-typedef struct QEMUFilePublic QEMUFilePublic;
-
-struct QEMUFilePublic {
-    int last_error;
-};
-
 /* Read a chunk of data from a file at the given position.  The pos argument
  * can be ignored if the file is only be used for streaming.  The number of
  * bytes actually read should be returned.
@@ -183,18 +177,4 @@ size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
 
 void qemu_put_counted_string(QEMUFile *f, const char *name);
 
-/*
- * Get last error for stream f
- *
- * Return negative error value if there has been an error on previous
- * operations, return 0 if no error happened.
- *
- */
-static inline int qemu_file_get_error(QEMUFile *f)
-{
-    QEMUFilePublic *fp = (QEMUFilePublic *)f;
-    return fp->last_error;
-}
-
 #endif
-

@@ -700,7 +700,7 @@ static inline void sunhme_set_rx_ring_nr(SunHMEState *s, int i)
 
 #define MIN_BUF_SIZE 60
 
-static ssize_t sunhme_receive(NetClientState *nc, uint8_t *buf,
+static ssize_t sunhme_receive(NetClientState *nc, const uint8_t *buf,
                               size_t size)
 {
     SunHMEState *s = qemu_get_nic_opaque(nc);

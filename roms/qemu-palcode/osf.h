@@ -294,6 +294,7 @@
 
 #define MCHK_K_READ_NXM     0x0200
 #define MCHK_K_SYS_HERR     0x0202
+#define MCHK_K_SYS_NOMEM    0x0207
 
 /*
 **  Machine Check Error Status Summary (MCES) Register Format

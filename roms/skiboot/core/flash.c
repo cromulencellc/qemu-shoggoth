@@ -1,4 +1,4 @@
-/* Copyright 2013-2014 IBM Corp.
+/* Copyright 2013-2018 IBM Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,9 @@
 #include <libflash/libffs.h>
 #include <libflash/blocklevel.h>
 #include <libflash/ecc.h>
-#include <libstb/stb.h>
-#include <libstb/container.h>
+#include <libstb/secureboot.h>
+#include <libstb/trustedboot.h>
+#include <libxz/xz.h>
 #include <elf.h>
 
 struct flash {
@@ -48,10 +49,6 @@ static struct lock flash_lock;
 /* nvram-on-flash support */
 static struct flash *nvram_flash;
 static u32 nvram_offset, nvram_size;
-
-/* ibm,firmware-versions support */
-static char *version_buf;
-static size_t version_buf_size = 0x1000;
 
 bool flash_reserve(void)
 {
@@ -118,8 +115,13 @@ static int flash_nvram_start_read(void *dst, uint32_t src, uint32_t len)
 		goto out;
 	}
 
+	nvram_flash->busy = true;
+	unlock(&flash_lock);
+
 	rc = blocklevel_read(nvram_flash->bl, nvram_offset + src, dst, len);
 
+	lock(&flash_lock);
+	nvram_flash->busy = false;
 out:
 	unlock(&flash_lock);
 	if (!rc)
@@ -147,114 +149,17 @@ static int flash_nvram_write(uint32_t dst, void *src, uint32_t len)
 		rc = OPAL_PARAMETER;
 		goto out;
 	}
+
+	nvram_flash->busy = true;
+	unlock(&flash_lock);
+
 	rc = blocklevel_write(nvram_flash->bl, nvram_offset + dst, src, len);
 
+	lock(&flash_lock);
+	nvram_flash->busy = false;
 out:
 	unlock(&flash_lock);
 	return rc;
-}
-
-static void __flash_dt_add_fw_version(struct dt_node *fw_version, char* data)
-{
-	char *prop;
-	int version_len, i;
-	int len = strlen(data);
-	const char * version_str[] = {"open-power", "buildroot", "skiboot",
-				      "hostboot-binaries", "hostboot", "linux",
-				      "petitboot", "occ", "capp-ucode", "sbe",
-				      "machine-xml"};
-
-	/*
-	 * PNOR version strings are not easily consumable. Split them into
-	 * property, value.
-	 *
-	 * Example input from PNOR :
-	 *   "open-power-firestone-v1.8"
-	 *   "linux-4.4.6-openpower1-8420e0f"
-	 *
-	 * Desired output in device tree:
-	 *   open-power = "firestone-v1.8";
-	 *   linux = "4.4.6-openpower1-8420e0f";
-	 */
-	for(i = 0; i < ARRAY_SIZE(version_str); i++)
-	{
-		version_len = strlen(version_str[i]);
-		if (len < version_len)
-			continue;
-
-		if (memcmp(data, version_str[i], version_len) != 0)
-			continue;
-
-		/* Found a match, add property */
-		if (dt_find_property(fw_version, version_str[i]))
-			continue;
-
-		/* Increment past "key-" */
-		prop = data + version_len + 1;
-		dt_add_property_string(fw_version, version_str[i], prop);
-	}
-}
-
-void flash_dt_add_fw_version(void)
-{
-	uint8_t version_data[80];
-	int rc;
-	int numbytes = 0, i = 0;
-	struct dt_node *fw_version;
-
-	if (version_buf == NULL)
-		return;
-
-	rc = wait_for_resource_loaded(RESOURCE_ID_VERSION, RESOURCE_SUBID_NONE);
-	if (rc != OPAL_SUCCESS) {
-		prlog(PR_WARNING, "FLASH: Failed to load VERSION data\n");
-		free(version_buf);
-		return;
-	}
-
-	fw_version = dt_new(dt_root, "ibm,firmware-versions");
-	assert(fw_version);
-
-	for ( ; (numbytes < version_buf_size) && version_buf[numbytes]; numbytes++) {
-		if (version_buf[numbytes] == '\n') {
-			version_data[i] = '\0';
-			__flash_dt_add_fw_version(fw_version, version_data);
-			memset(version_data, 0, sizeof(version_data));
-			i = 0;
-			continue;
-		} else if (version_buf[numbytes] == '\t') {
-			continue; /* skip tabs */
-		}
-
-		version_data[i++] = version_buf[numbytes];
-	}
-
-	free(version_buf);
-}
-
-void flash_fw_version_preload(void)
-{
-	int rc;
-
-	if (proc_gen < proc_gen_p9)
-		return;
-
-	prlog(PR_INFO, "FLASH: Loading VERSION section\n");
-
-	version_buf = malloc(version_buf_size);
-	if (!version_buf) {
-		prlog(PR_WARNING, "FLASH: Failed to allocate memory\n");
-		return;
-	}
-
-	rc = start_preload_resource(RESOURCE_ID_VERSION, RESOURCE_SUBID_NONE,
-				    version_buf, &version_buf_size);
-	if (rc != OPAL_SUCCESS) {
-		prlog(PR_WARNING,
-		      "FLASH: Failed to start loading VERSION data\n");
-		free(version_buf);
-		version_buf = NULL;
-	}
 }
 
 static int flash_nvram_probe(struct flash *flash, struct ffs_handle *ffs)
@@ -377,16 +282,16 @@ int flash_register(struct blocklevel_device *bl)
 	if (rc)
 		return rc;
 
+	if (!name)
+		name = "(unnamed)";
+
 	prlog(PR_INFO, "FLASH: registering flash device %s "
 			"(size 0x%llx, blocksize 0x%x)\n",
-			name ?: "(unnamed)", size, block_size);
-
-	lock(&flash_lock);
+			name, size, block_size);
 
 	flash = malloc(sizeof(struct flash));
 	if (!flash) {
 		prlog(PR_ERR, "FLASH: Error allocating flash structure\n");
-		unlock(&flash_lock);
 		return OPAL_RESOURCE;
 	}
 
@@ -396,8 +301,6 @@ int flash_register(struct blocklevel_device *bl)
 	flash->size = size;
 	flash->block_size = block_size;
 	flash->id = num_flashes();
-
-	list_add(&flashes, &flash->list);
 
 	rc = ffs_init(0, flash->size, bl, &ffs, 1);
 	if (rc) {
@@ -419,6 +322,8 @@ int flash_register(struct blocklevel_device *bl)
 	if (ffs)
 		ffs_close(ffs);
 
+	lock(&flash_lock);
+	list_add(&flashes, &flash->list);
 	unlock(&flash_lock);
 
 	return OPAL_SUCCESS;
@@ -537,6 +442,16 @@ static struct {
 	{ RESOURCE_ID_VERSION,	RESOURCE_SUBID_NONE,		"VERSION" },
 };
 
+const char *flash_map_resource_name(enum resource_id id)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(part_name_map); i++) {
+		if (part_name_map[i].id == id)
+			return part_name_map[i].name;
+	}
+	return NULL;
+}
 
 static size_t sizeof_elf_from_hdr(void *buf)
 {
@@ -632,7 +547,7 @@ static int flash_load_resource(enum resource_id id, uint32_t subid,
 
 	rc = ffs_init(0, flash->size, flash->bl, &ffs, 1);
 	if (rc) {
-		prerror("FLASH: Can't open ffs handle\n");
+		prerror("FLASH: Can't open ffs handle: %d\n", rc);
 		goto out_unlock;
 	}
 
@@ -653,8 +568,7 @@ static int flash_load_resource(enum resource_id id, uint32_t subid,
 	prlog(PR_DEBUG,"FLASH: %s partition %s ECC\n",
 	      name, ecc  ? "has" : "doesn't have");
 
-	if ((ecc ? ecc_buffer_size_minus_ecc(ffs_part_size) : ffs_part_size) <
-	     SECURE_BOOT_HEADERS_SIZE) {
+	if (ffs_part_size < SECURE_BOOT_HEADERS_SIZE) {
 		prerror("FLASH: secboot headers bigger than "
 			"partition size 0x%x\n", ffs_part_size);
 		goto out_free_ffs;
@@ -692,8 +606,6 @@ static int flash_load_resource(enum resource_id id, uint32_t subid,
 		}
 
 		ffs_part_start += SECURE_BOOT_HEADERS_SIZE;
-		if (ecc)
-			ffs_part_start += ecc_size(SECURE_BOOT_HEADERS_SIZE);
 
 		rc = blocklevel_read(flash->bl, ffs_part_start, bufp,
 					  content_size);
@@ -721,7 +633,8 @@ static int flash_load_resource(enum resource_id id, uint32_t subid,
 		 * Back to the old way of doing things, no STB header.
 		 */
 		if (subid == RESOURCE_SUBID_NONE) {
-			if (id == RESOURCE_ID_KERNEL) {
+			if (id == RESOURCE_ID_KERNEL ||
+				id == RESOURCE_ID_INITRAMFS) {
 				/*
 				 * Because actualSize is a lie, we compute the
 				 * size of the BOOTKERNEL based on what the ELF
@@ -789,8 +702,8 @@ done_reading:
 	 * Verify and measure the retrieved PNOR partition as part of the
 	 * secure boot and trusted boot requirements
 	 */
-	sb_verify(id, buf, *len);
-	tb_measure(id, buf, *len);
+	secureboot_verify(id, buf, *len);
+	trustedboot_measure(id, buf, *len);
 
 	/* Find subpartition */
 	if (subid != RESOURCE_SUBID_NONE) {
@@ -921,4 +834,106 @@ int flash_start_preload_resource(enum resource_id id, uint32_t subid,
 		start_flash_load_resource_job();
 
 	return OPAL_SUCCESS;
+}
+
+/*
+ * The `libxz` decompression routines are blocking; the new decompression
+ * routines, wrapper around `libxz` functions, provide support for asynchronous
+ * decompression. There are two routines, which start the decompression, and one
+ * which waits for the decompression to complete.
+ *
+ * The decompressed image will be present in the `dst` parameter of
+ * `xz_decompress` structure.
+ *
+ * When the decompression is successful, the xz_decompress->status will be
+ * `OPAL_SUCCESS` else OPAL_PARAMETER, see definition of xz_decompress structure
+ * for details.
+ */
+static void xz_decompress(void *data)
+{
+	struct xz_decompress *xz = (struct xz_decompress *)data;
+	struct xz_dec *s;
+	struct xz_buf b;
+
+	/* Initialize the xz library first */
+	xz_crc32_init();
+	s = xz_dec_init(XZ_SINGLE, 0);
+	if (s == NULL) {
+		prerror("initialization error for xz\n");
+		xz->status = OPAL_NO_MEM;
+		return;
+	}
+
+	xz->xz_error = XZ_DATA_ERROR;
+	xz->status = OPAL_PARTIAL;
+
+	b.in = xz->src;
+	b.in_pos = 0;
+	b.in_size = xz->src_size;
+	b.out = xz->dst;
+	b.out_pos = 0;
+	b.out_size = xz->dst_size;
+
+	/* Start decompressing */
+	xz->xz_error = xz_dec_run(s, &b);
+	if (xz->xz_error != XZ_STREAM_END) {
+		prerror("failed to decompress subpartition\n");
+		xz->status = OPAL_PARAMETER;
+	} else
+		xz->status = OPAL_SUCCESS;
+
+	xz_dec_end(s);
+}
+
+/*
+ * xz_start_decompress: start the decompression job and return.
+ *
+ * struct xz_decompress *xz, should be populated by the caller with
+ *     - the starting address of the compressed binary
+ *     - the address where the decompressed image should be placed
+ *     - the sizes of the source and the destination
+ *
+ * xz->src: Source address (The compressed binary)
+ * xz->src_size: Source size
+ * xz->dst: Destination address (The memory area where the `src` will be
+ *          decompressed)
+ * xz->dst_size: Destination size
+ *
+ * The `status` value will be OPAL_PARTIAL till the job completes (successfully
+ * or not)
+ */
+void xz_start_decompress(struct xz_decompress *xz)
+{
+	struct cpu_job *job;
+
+	if (!xz)
+		return;
+
+	if (!xz->dst || !xz->dst_size || !xz->src || !xz->src_size) {
+		xz->status = OPAL_PARAMETER;
+		return;
+	}
+
+	job = cpu_queue_job(NULL, "xz_decompress", xz_decompress,
+			    (void *) xz);
+	if (!job) {
+		xz->status = OPAL_NO_MEM;
+		return;
+	}
+
+	xz->job = job;
+}
+
+/*
+ * This function waits for the decompression job to complete. The `ret`
+ * structure member in `xz_decompress` will have the status code.
+ *
+ * status == OPAL_SUCCESS on success, else the corresponding error code.
+ */
+void wait_xz_decompress(struct xz_decompress *xz)
+{
+	if (!xz)
+		return;
+
+	cpu_wait_job(xz->job, true);
 }

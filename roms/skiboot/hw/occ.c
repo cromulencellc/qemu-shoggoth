@@ -31,6 +31,7 @@
 #include <powercap.h>
 #include <psr.h>
 #include <sensor.h>
+#include <occ.h>
 
 /* OCC Communication Area for PStates */
 
@@ -46,6 +47,11 @@
 
 #define MAX_OPAL_CMD_DATA_LENGTH	4090
 #define MAX_OCC_RSP_DATA_LENGTH		8698
+
+#define P8_PIR_CORE_MASK		0xFFF8
+#define P9_PIR_QUAD_MASK		0xFFF0
+#define FREQ_MAX_IN_DOMAIN		0
+#define FREQ_MOST_RECENTLY_SET		1
 
 /**
  * OCC-OPAL Shared Memory Region
@@ -65,7 +71,7 @@
  *
  * struct occ_pstate_table -	Pstate table layout
  * @valid:			Indicates if data is valid
- * @version:			Layout version
+ * @version:			Layout version [Major/Minor]
  * @v2.throttle:		Reason for limiting the max pstate
  * @v9.occ_role:		OCC role (Master/Slave)
  * @v#.pstate_min:		Minimum pstate ever allowed
@@ -211,6 +217,11 @@ struct occ_response_buffer {
  *
  * struct occ_dynamic_data -	Contains runtime attributes
  * @occ_state:			Current state of OCC
+ * @major_version:		Major version number
+ * @minor_version:		Minor version number (backwards compatible)
+ *				Version 1 indicates GPU presence populated
+ * @gpus_present:		Bitmask of GPUs present (on systems where GPU
+ *				presence is detected through APSS)
  * @cpu_throttle:		Reason for limiting the max pstate
  * @mem_throttle:		Reason for throttling memory
  * @quick_pwr_drop:		Indicates if QPD is asserted
@@ -219,28 +230,32 @@ struct occ_response_buffer {
  *				power to maintain a power cap. Value of 100
  *				means take all power from CPU.
  * @pwr_cap_type:		Indicates type of power cap in effect
- * @min_pwr_cap:		Minimum allowed system power cap in Watts
+ * @hard_min_pwr_cap:		Hard minimum system power cap in Watts.
+ *				Guaranteed unless hardware failure
  * @max_pwr_cap:		Maximum allowed system power cap in Watts
  * @cur_pwr_cap:		Current system power cap
+ * @soft_min_pwr_cap:		Soft powercap minimum. OCC may or may not be
+ *				able to maintain this
  * @spare/reserved:		Unused data
  * @cmd:			Opal Command Buffer
  * @rsp:			OCC Response Buffer
  */
 struct occ_dynamic_data {
 	u8 occ_state;
+	u8 major_version;
+	u8 minor_version;
+	u8 gpus_present;
 	u8 spare1;
-	u8 spare2;
-	u8 spare3;
-	u8 spare4;
 	u8 cpu_throttle;
 	u8 mem_throttle;
 	u8 quick_pwr_drop;
 	u8 pwr_shifting_ratio;
 	u8 pwr_cap_type;
-	u16 min_pwr_cap;
+	u16 hard_min_pwr_cap;
 	u16 max_pwr_cap;
 	u16 cur_pwr_cap;
-	u8 pad[112];
+	u16 soft_min_pwr_cap;
+	u8 pad[110];
 	struct opal_command_buffer cmd;
 	struct occ_response_buffer rsp;
 } __packed;
@@ -487,7 +502,16 @@ static bool add_cpu_pstate_properties(int *pstate_nom)
 	int pmax, pmin, pnom;
 	u8 nr_pstates;
 	bool ultra_turbo_supported;
-	int i;
+	int i, major, minor;
+	u8 domain_runs_at;
+	u32 freq_domain_mask;
+
+	/* TODO Firmware plumbing required so as to have two modes to set
+	 * PMCR based on max in domain or most recently used. As of today,
+	 * it is always max in domain for P9.
+	 */
+	domain_runs_at = 0;
+	freq_domain_mask = 0;
 
 	prlog(PR_DEBUG, "OCC: CPU pstate state device tree init\n");
 
@@ -525,12 +549,12 @@ static bool add_cpu_pstate_properties(int *pstate_nom)
 	 */
 	ultra_turbo_supported = true;
 
+	major = occ_data->version >> 4;
+	minor = occ_data->version & 0xF;
+
 	/* Parse Pmax, Pmin and Pnominal */
-	switch (occ_data->version) {
-	case 0x01:
-		ultra_turbo_supported = false;
-		/* fallthrough */
-	case 0x02:
+	switch (major) {
+	case 0:
 		if (proc_gen == proc_gen_p9) {
 			/**
 			 * @fwts-label OCCInvalidVersion02
@@ -543,6 +567,8 @@ static bool add_cpu_pstate_properties(int *pstate_nom)
 				occ_data->version);
 			return false;
 		}
+		if (minor == 0x1)
+			ultra_turbo_supported = false;
 		pmin = occ_data->v2.pstate_min;
 		pnom = occ_data->v2.pstate_nom;
 		if (ultra_turbo_supported)
@@ -550,7 +576,7 @@ static bool add_cpu_pstate_properties(int *pstate_nom)
 		else
 			pmax = occ_data->v2.pstate_turbo;
 		break;
-	case 0x90:
+	case 0x9:
 		if (proc_gen == proc_gen_p8) {
 			/**
 			 * @fwts-label OCCInvalidVersion90
@@ -612,13 +638,14 @@ static bool add_cpu_pstate_properties(int *pstate_nom)
 	nr_pstates = labs(pmax - pmin) + 1;
 	prlog(PR_DEBUG, "OCC: Version %x Min %d Nom %d Max %d Nr States %d\n",
 	      occ_data->version, pmin, pnom, pmax, nr_pstates);
-	if (nr_pstates <= 1 || nr_pstates > 128) {
+	if ((major == 0x9 && nr_pstates <= 1) ||
+	    (major == 0 && (nr_pstates <= 1 || nr_pstates > 128))) {
 		/**
 		 * @fwts-label OCCInvalidPStateRange
 		 * @fwts-advice The number of pstates is outside the valid
-		 * range (currently <=1 or > 128), so OPAL has not added
-		 * pstates to the device tree. This means that OCC (On Chip
-		 * Controller) will be non-functional. This means
+		 * range (currently <=1 or > 128 on p8, >255 on P9), so OPAL
+		 * has not added pstates to the device tree. This means that
+		 * OCC (On Chip Controller) will be non-functional. This means
 		 * that CPU idle states and CPU frequency scaling
 		 * will not be functional.
 		 */
@@ -644,18 +671,25 @@ static bool add_cpu_pstate_properties(int *pstate_nom)
 	dt_freq = malloc(nr_pstates * sizeof(u32));
 	assert(dt_freq);
 
-	switch (occ_data->version) {
-	case 0x01:
-	case 0x02:
+	switch (major) {
+	case 0:
 		parse_pstates_v2(occ_data, dt_id, dt_freq, nr_pstates,
 				 pmax, pmin);
 		break;
-	case 0x90:
+	case 0x9:
 		parse_pstates_v9(occ_data, dt_id, dt_freq, nr_pstates,
 				 pmax, pmin);
 		break;
 	default:
 		return false;
+	}
+
+	if (proc_gen == proc_gen_p8) {
+		freq_domain_mask = P8_PIR_CORE_MASK;
+		domain_runs_at = FREQ_MOST_RECENTLY_SET;
+	} else if (proc_gen == proc_gen_p9) {
+		freq_domain_mask = P9_PIR_QUAD_MASK;
+		domain_runs_at = FREQ_MAX_IN_DOMAIN;
 	}
 
 	/* Add the device-tree entries */
@@ -666,6 +700,8 @@ static bool add_cpu_pstate_properties(int *pstate_nom)
 	dt_add_property_cells(power_mgt, "ibm,pstate-min", pmin);
 	dt_add_property_cells(power_mgt, "ibm,pstate-nominal", pnom);
 	dt_add_property_cells(power_mgt, "ibm,pstate-max", pmax);
+	dt_add_property_cells(power_mgt, "freq-domain-mask", freq_domain_mask);
+	dt_add_property_cells(power_mgt, "domain-runs-at", domain_runs_at);
 
 	free(dt_freq);
 	free(dt_id);
@@ -682,14 +718,14 @@ static bool add_cpu_pstate_properties(int *pstate_nom)
 
 		dt_cmax = malloc(nr_cores * sizeof(u32));
 		assert(dt_cmax);
-		switch (occ_data->version) {
-		case 0x02:
+		switch (major) {
+		case 0:
 			pturbo = occ_data->v2.pstate_turbo;
 			pultra_turbo = occ_data->v2.pstate_ultra_turbo;
 			for (i = 0; i < nr_cores; i++)
 				dt_cmax[i] = occ_data->v2.core_max[i];
 			break;
-		case 0x90:
+		case 0x9:
 			pturbo = occ_data->v9.pstate_turbo;
 			pultra_turbo = occ_data->v9.pstate_ultra_turbo;
 			for (i = 0; i < nr_cores; i++)
@@ -717,7 +753,7 @@ static bool add_cpu_pstate_properties(int *pstate_nom)
 		free(dt_cmax);
 	}
 
-	if (occ_data->version > 0x02)
+	if (major == 0x9)
 		goto out;
 
 	dt_add_property_cells(power_mgt, "#address-cells", 2);
@@ -794,7 +830,7 @@ static bool cpu_pstates_prepare_core(struct proc_chip *chip,
 	rc = xscom_read(chip->id, XSCOM_ADDR_P8_EX_SLAVE(core, EX_PM_PPMCR), &tmp);
 	if (rc) {
 		log_simple_error(&e_info(OPAL_RC_OCC_PSTATE_INIT),
-			"OCC: Failed to read from OCC in pstates init\n");
+			"OCC: Failed to read PM_PPMCR from OCC in pstates init\n");
 		return false;
 	}
 	tmp = tmp & ~0xFFFF000000000000ULL;
@@ -803,7 +839,7 @@ static bool cpu_pstates_prepare_core(struct proc_chip *chip,
 	rc = xscom_write(chip->id, XSCOM_ADDR_P8_EX_SLAVE(core, EX_PM_PPMCR), tmp);
 	if (rc) {
 		log_simple_error(&e_info(OPAL_RC_OCC_PSTATE_INIT),
-			"OCC: Failed to write PM_GP1 in pstates init\n");
+			"OCC: Failed to write PM_PPMCR in pstates init\n");
 		return false;
 	}
 	time_wait_ms(1); /* Wait for PState to change */
@@ -830,7 +866,7 @@ static bool cpu_pstates_prepare_core(struct proc_chip *chip,
 	rc = xscom_read(chip->id, XSCOM_ADDR_P8_EX_SLAVE(core, EX_PM_PPMSR), &tmp);
 	if (rc) {
 		log_simple_error(&e_info(OPAL_RC_OCC_PSTATE_INIT),
-			"OCC: Failed to read back setting from OCC"
+			"OCC: Failed to read PM_PPMSR from OCC"
 				 "in pstates init\n");
 		return false;
 	}
@@ -859,11 +895,10 @@ static inline u8 get_cpu_throttle(struct proc_chip *chip)
 	struct occ_pstate_table *pdata = get_occ_pstate_table(chip);
 	struct occ_dynamic_data *data;
 
-	switch (pdata->version) {
-	case 0x01:
-	case 0x02:
+	switch (pdata->version >> 4) {
+	case 0:
 		return pdata->v2.throttle;
-	case 0x90:
+	case 0x9:
 		data = get_occ_dynamic_data(chip);
 		return data->cpu_throttle;
 	default:
@@ -952,7 +987,7 @@ enum occ_cmd {
 	OCC_CMD_CLEAR_SENSOR_DATA,
 	OCC_CMD_SET_POWER_CAP,
 	OCC_CMD_SET_POWER_SHIFTING_RATIO,
-	OCC_CMD_LAST
+	OCC_CMD_SELECT_SENSOR_GROUP,
 };
 
 struct opal_occ_cmd_info {
@@ -987,6 +1022,13 @@ static struct opal_occ_cmd_info occ_cmds[] = {
 		PPC_BIT16(OCC_STATE_CHARACTERIZATION),
 		PPC_BIT8(OCC_ROLE_MASTER) | PPC_BIT8(OCC_ROLE_SLAVE)
 	},
+	{	OCC_CMD_SELECT_SENSOR_GROUP,
+		0xD3, 2, 2, 1000,
+		PPC_BIT16(OCC_STATE_OBSERVATION) |
+		PPC_BIT16(OCC_STATE_ACTIVE) |
+		PPC_BIT16(OCC_STATE_CHARACTERIZATION),
+		PPC_BIT8(OCC_ROLE_MASTER) | PPC_BIT8(OCC_ROLE_SLAVE)
+	},
 };
 
 enum occ_response_status {
@@ -1016,6 +1058,7 @@ static struct cmd_interface {
 	u8 *valid;
 	u32 chip_id;
 	u32 token;
+	u16 enabled_sensor_mask;
 	u8 occ_role;
 	u8 request_id;
 	bool cmd_in_progress;
@@ -1210,10 +1253,41 @@ static void handle_occ_rsp(uint32_t chip_id)
 		goto exit;
 	}
 
+	if (rsp->cmd == occ_cmds[OCC_CMD_SELECT_SENSOR_GROUP].cmd_value &&
+	    rsp->status == OCC_RSP_SUCCESS)
+		chip->enabled_sensor_mask = *(u16 *)chip->cdata->data;
+
 	chip->cmd_in_progress = false;
 	queue_occ_rsp_msg(chip->token, read_occ_rsp(chip->rsp));
 exit:
 	unlock(&chip->queue_lock);
+}
+
+bool occ_get_gpu_presence(struct proc_chip *chip, int gpu_num)
+{
+	struct occ_dynamic_data *ddata;
+	static int max_retries = 20;
+	static bool found = false;
+
+	assert(gpu_num <= 2);
+
+	ddata = get_occ_dynamic_data(chip);
+	while (!found && max_retries) {
+		if (ddata->major_version == 0 && ddata->minor_version >= 1) {
+			found = true;
+			break;
+		}
+		time_wait_ms(100);
+		max_retries--;
+		ddata = get_occ_dynamic_data(chip);
+	}
+
+	if (!found) {
+		prlog(PR_INFO, "OCC: No GPU slot presence, assuming GPU present\n");
+		return true;
+	}
+
+	return (bool)(ddata->gpus_present & 1 << gpu_num);
 }
 
 static void occ_add_powercap_sensors(struct dt_node *power_mgt);
@@ -1227,9 +1301,16 @@ static void occ_cmd_interface_init(void)
 	struct proc_chip *chip;
 	int i = 0;
 
+	/* Check if the OCC data is valid */
+	for_each_chip(chip) {
+		pdata = get_occ_pstate_table(chip);
+		if (!pdata->valid)
+			return;
+	}
+
 	chip = next_chip(NULL);
 	pdata = get_occ_pstate_table(chip);
-	if (pdata->version != 0x90)
+	if ((pdata->version >> 4) != 0x9)
 		return;
 
 	for_each_chip(chip)
@@ -1250,6 +1331,7 @@ static void occ_cmd_interface_init(void)
 		init_lock(&chips[i].queue_lock);
 		chips[i].cmd_in_progress = false;
 		chips[i].request_id = 0;
+		chips[i].enabled_sensor_mask = OCC_ENABLED_SENSOR_MASK;
 		init_timer(&chips[i].timeout, occ_cmd_timeout_handler,
 			   &chips[i]);
 		i++;
@@ -1270,9 +1352,10 @@ static void occ_cmd_interface_init(void)
 
 /* Powercap interface */
 enum sensor_powercap_occ_attr {
-	POWERCAP_OCC_MIN,
+	POWERCAP_OCC_SOFT_MIN,
 	POWERCAP_OCC_MAX,
 	POWERCAP_OCC_CUR,
+	POWERCAP_OCC_HARD_MIN,
 };
 
 static void occ_add_powercap_sensors(struct dt_node *power_mgt)
@@ -1296,11 +1379,17 @@ static void occ_add_powercap_sensors(struct dt_node *power_mgt)
 	handle = powercap_make_handle(POWERCAP_CLASS_OCC, POWERCAP_OCC_CUR);
 	dt_add_property_cells(node, "powercap-current", handle);
 
-	handle = powercap_make_handle(POWERCAP_CLASS_OCC, POWERCAP_OCC_MIN);
+	handle = powercap_make_handle(POWERCAP_CLASS_OCC,
+				      POWERCAP_OCC_SOFT_MIN);
 	dt_add_property_cells(node, "powercap-min", handle);
 
 	handle = powercap_make_handle(POWERCAP_CLASS_OCC, POWERCAP_OCC_MAX);
 	dt_add_property_cells(node, "powercap-max", handle);
+
+	handle = powercap_make_handle(POWERCAP_CLASS_OCC,
+				      POWERCAP_OCC_HARD_MIN);
+	dt_add_property_cells(node, "powercap-hard-min", handle);
+
 }
 
 int occ_get_powercap(u32 handle, u32 *pcap)
@@ -1317,14 +1406,17 @@ int occ_get_powercap(u32 handle, u32 *pcap)
 		return OPAL_HARDWARE;
 
 	switch (powercap_get_attr(handle)) {
-	case POWERCAP_OCC_MIN:
-		*pcap = ddata->min_pwr_cap;
+	case POWERCAP_OCC_SOFT_MIN:
+		*pcap = ddata->soft_min_pwr_cap;
 		break;
 	case POWERCAP_OCC_MAX:
 		*pcap = ddata->max_pwr_cap;
 		break;
 	case POWERCAP_OCC_CUR:
 		*pcap = ddata->cur_pwr_cap;
+		break;
+	case POWERCAP_OCC_HARD_MIN:
+		*pcap = ddata->hard_min_pwr_cap;
 		break;
 	default:
 		*pcap = 0;
@@ -1349,6 +1441,9 @@ int occ_set_powercap(u32 handle, int token, u32 pcap)
 	if (powercap_get_attr(handle) != POWERCAP_OCC_CUR)
 		return OPAL_PERMISSION;
 
+	if (!chips)
+		return OPAL_HARDWARE;
+
 	for (i = 0; i < nr_occs; i++)
 		if (chips[i].occ_role == OCC_ROLE_MASTER)
 			break;
@@ -1363,7 +1458,7 @@ int occ_set_powercap(u32 handle, int token, u32 pcap)
 		return OPAL_SUCCESS;
 
 	if (pcap && (pcap > ddata->max_pwr_cap ||
-	    pcap < ddata->min_pwr_cap))
+	    pcap < ddata->soft_min_pwr_cap))
 		return OPAL_PARAMETER;
 
 	pcap_cdata = pcap;
@@ -1442,6 +1537,8 @@ static void occ_add_psr_sensors(struct dt_node *power_mgt)
 
 	dt_add_property_string(node, "compatible",
 			       "ibm,opal-power-shift-ratio");
+	dt_add_property_cells(node, "#address-cells", 1);
+	dt_add_property_cells(node, "#size-cells", 0);
 	for (i = 0; i < nr_occs; i++) {
 		struct dt_node *cnode;
 		char name[20];
@@ -1457,6 +1554,7 @@ static void occ_add_psr_sensors(struct dt_node *power_mgt)
 		snprintf(name, 20, "cpu_to_gpu_%d", chips[i].chip_id);
 		dt_add_property_string(cnode, "label", name);
 		dt_add_property_cells(cnode, "handle", handle);
+		dt_add_property_cells(cnode, "reg", chips[i].chip_id);
 	}
 }
 
@@ -1498,31 +1596,114 @@ int occ_sensor_group_clear(u32 group_hndl, int token)
 	return opal_occ_command(&chips[i], token, &slimit_data);
 }
 
-void occ_add_sensor_groups(struct dt_node *sg, u32 *phandles, int nr_phandles,
-			   int chipid)
+static u16 sensor_enable;
+static struct opal_occ_cmd_data sensor_mask_data = {
+	.data		= (u8 *)&sensor_enable,
+	.cmd		= OCC_CMD_SELECT_SENSOR_GROUP,
+};
+
+int occ_sensor_group_enable(u32 group_hndl, int token, bool enable)
 {
-	struct limit_group_info {
-		int limit;
+	u16 type = sensor_get_rid(group_hndl);
+	u8 i = sensor_get_attr(group_hndl);
+
+	if (i > nr_occs)
+		return OPAL_UNSUPPORTED;
+
+	switch (type) {
+	case OCC_SENSOR_TYPE_GENERIC:
+	case OCC_SENSOR_TYPE_CURRENT:
+	case OCC_SENSOR_TYPE_VOLTAGE:
+	case OCC_SENSOR_TYPE_TEMPERATURE:
+	case OCC_SENSOR_TYPE_UTILIZATION:
+	case OCC_SENSOR_TYPE_TIME:
+	case OCC_SENSOR_TYPE_FREQUENCY:
+	case OCC_SENSOR_TYPE_POWER:
+	case OCC_SENSOR_TYPE_PERFORMANCE:
+		break;
+	default:
+		return OPAL_UNSUPPORTED;
+	}
+
+	if (!(*chips[i].valid))
+		return OPAL_HARDWARE;
+
+	if (enable && (type & chips[i].enabled_sensor_mask))
+		return OPAL_SUCCESS;
+	else if (!enable && !(type & chips[i].enabled_sensor_mask))
+		return OPAL_SUCCESS;
+
+	sensor_enable = enable ? type | chips[i].enabled_sensor_mask :
+				~type & chips[i].enabled_sensor_mask;
+
+	return opal_occ_command(&chips[i], token, &sensor_mask_data);
+}
+
+void occ_add_sensor_groups(struct dt_node *sg, u32 *phandles, u32 *ptype,
+			   int nr_phandles, int chipid)
+{
+	struct group_info {
+		int type;
 		const char *str;
-	} limits[] = {
-		{ OCC_SENSOR_LIMIT_GROUP_CSM, "csm" },
-		{ OCC_SENSOR_LIMIT_GROUP_PROFILER, "profiler" },
-		{ OCC_SENSOR_LIMIT_GROUP_JOB_SCHED, "js" },
+		u32 ops;
+	} groups[] = {
+		{ OCC_SENSOR_LIMIT_GROUP_CSM, "csm",
+		  OPAL_SENSOR_GROUP_CLEAR
+		},
+		{ OCC_SENSOR_LIMIT_GROUP_PROFILER, "profiler",
+		  OPAL_SENSOR_GROUP_CLEAR
+		},
+		{ OCC_SENSOR_LIMIT_GROUP_JOB_SCHED, "js",
+		  OPAL_SENSOR_GROUP_CLEAR
+		},
+		{ OCC_SENSOR_TYPE_GENERIC, "generic",
+		  OPAL_SENSOR_GROUP_ENABLE
+		},
+		{ OCC_SENSOR_TYPE_CURRENT, "curr",
+		  OPAL_SENSOR_GROUP_ENABLE
+		},
+		{ OCC_SENSOR_TYPE_VOLTAGE, "in",
+		  OPAL_SENSOR_GROUP_ENABLE
+		},
+		{ OCC_SENSOR_TYPE_TEMPERATURE, "temp",
+		  OPAL_SENSOR_GROUP_ENABLE
+		},
+		{ OCC_SENSOR_TYPE_UTILIZATION, "utilization",
+		  OPAL_SENSOR_GROUP_ENABLE
+		},
+		{ OCC_SENSOR_TYPE_TIME, "time",
+		  OPAL_SENSOR_GROUP_ENABLE
+		},
+		{ OCC_SENSOR_TYPE_FREQUENCY, "frequency",
+		  OPAL_SENSOR_GROUP_ENABLE
+		},
+		{ OCC_SENSOR_TYPE_POWER, "power",
+		  OPAL_SENSOR_GROUP_ENABLE
+		},
+		{ OCC_SENSOR_TYPE_PERFORMANCE, "performance",
+		  OPAL_SENSOR_GROUP_ENABLE
+		},
 	};
 	int i, j;
+
+	/*
+	 * Dont add sensor groups if cmd-interface is not intialized
+	 */
+	if (!chips)
+		return;
 
 	for (i = 0; i < nr_occs; i++)
 		if (chips[i].chip_id == chipid)
 			break;
 
-	for (j = 0; j < ARRAY_SIZE(limits); j++) {
+	for (j = 0; j < ARRAY_SIZE(groups); j++) {
 		struct dt_node *node;
 		char name[20];
 		u32 handle;
 
-		snprintf(name, 20, "occ-%s", limits[j].str);
+		snprintf(name, 20, "occ-%s", groups[j].str);
 		handle = sensor_make_handler(SENSOR_OCC, 0,
-					     limits[j].limit, i);
+					     groups[j].type, i);
 		node = dt_new_addr(sg, name, handle);
 		if (!node) {
 			prerror("Failed to create sensor group nodes\n");
@@ -1530,10 +1711,38 @@ void occ_add_sensor_groups(struct dt_node *sg, u32 *phandles, int nr_phandles,
 		}
 
 		dt_add_property_cells(node, "sensor-group-id", handle);
-		dt_add_property_string(node, "type", limits[j].str);
+		dt_add_property_string(node, "type", groups[j].str);
+
+		if (groups[j].type == OCC_SENSOR_TYPE_CURRENT ||
+		    groups[j].type == OCC_SENSOR_TYPE_VOLTAGE ||
+		    groups[j].type == OCC_SENSOR_TYPE_TEMPERATURE ||
+		    groups[j].type == OCC_SENSOR_TYPE_POWER) {
+			dt_add_property_string(node, "sensor-type",
+					      groups[j].str);
+			dt_add_property_string(node, "compatible",
+					       "ibm,opal-sensor");
+		}
+
 		dt_add_property_cells(node, "ibm,chip-id", chipid);
-		dt_add_property(node, "sensors", phandles, nr_phandles);
-		dt_add_property_cells(node, "ops", OPAL_SENSOR_GROUP_CLEAR);
+		dt_add_property_cells(node, "reg", handle);
+		if (groups[j].ops == OPAL_SENSOR_GROUP_ENABLE) {
+			u32 *_phandles;
+			int k, pcount = 0;
+
+			_phandles = malloc(sizeof(u32) * nr_phandles);
+			assert(_phandles);
+			for (k = 0; k < nr_phandles; k++)
+				if (ptype[k] == groups[j].type)
+					_phandles[pcount++] = phandles[k];
+			if (pcount)
+				dt_add_property(node, "sensors", _phandles,
+						pcount * sizeof(u32));
+			free(_phandles);
+		} else {
+			dt_add_property(node, "sensors", phandles,
+					nr_phandles * sizeof(u32));
+		}
+		dt_add_property_cells(node, "ops", groups[j].ops);
 	}
 }
 
@@ -1550,8 +1759,32 @@ void occ_pstates_init(void)
 	if (proc_gen < proc_gen_p8)
 		return;
 	/* Handle fast reboots */
-	if (occ_pstates_initialized)
-		return;
+	if (occ_pstates_initialized) {
+		struct dt_node *power_mgt, *child;
+		int i;
+		const char *props[] = {
+				"ibm,pstate-core-max",
+				"ibm,pstate-frequencies-mhz",
+				"ibm,pstate-ids",
+				"ibm,pstate-max",
+				"ibm,pstate-min",
+				"ibm,pstate-nominal",
+				"ibm,pstate-turbo",
+				"ibm,pstate-ultra-turbo",
+				"#address-cells",
+				"#size-cells",
+				};
+
+		power_mgt = dt_find_by_path(dt_root, "/ibm,opal/power-mgt");
+		if (power_mgt) {
+			for (i = 0; i < ARRAY_SIZE(props); i++)
+				dt_check_del_prop(power_mgt, props[i]);
+
+			dt_for_each_child(power_mgt, child)
+				if (!strncmp(child->name, "occ", 3))
+					dt_free(child);
+		}
+	}
 
 	switch (proc_gen) {
 	case proc_gen_p8:
@@ -1586,18 +1819,18 @@ void occ_pstates_init(void)
 	if (!add_cpu_pstate_properties(&pstate_nom)) {
 		log_simple_error(&e_info(OPAL_RC_OCC_PSTATE_INIT),
 			"Skiping core cpufreq init due to OCC error\n");
-		return;
-	}
-
-	/*
-	 * Setup host based pstates and set nominal frequency only in
-	 * P8.
-	 */
-	if (proc_gen == proc_gen_p8) {
+	} else if (proc_gen == proc_gen_p8) {
+		/*
+		 * Setup host based pstates and set nominal frequency only in
+		 * P8.
+		 */
 		for_each_chip(chip)
 			for_each_available_core_in_chip(c, chip->id)
 				cpu_pstates_prepare_core(chip, c, pstate_nom);
 	}
+
+	if (occ_pstates_initialized)
+		return;
 
 	/* Add opal_poller to poll OCC throttle status of each chip */
 	for_each_chip(chip)
@@ -1748,6 +1981,8 @@ void occ_poke_load_queue(void)
 	}
 }
 
+static u32 last_seq_id;
+static bool in_ipl = true;
 static void occ_do_load(u8 scope, u32 dbob_id __unused, u32 seq_id)
 {
 	struct fsp_msg *rsp;
@@ -1780,15 +2015,25 @@ static void occ_do_load(u8 scope, u32 dbob_id __unused, u32 seq_id)
 		return;
 
 	if (proc_gen == proc_gen_p9) {
-		rc = -ENOMEM;
-		/* OCC is pre-loaded in P9, so send SUCCESS to FSP */
-		rsp = fsp_mkmsg(FSP_CMD_LOAD_OCC_STAT, 2, 0, seq_id);
-		if (rsp)
+		if (in_ipl) {
+			/* OCC is pre-loaded in P9, so send SUCCESS to FSP */
+			rsp = fsp_mkmsg(FSP_CMD_LOAD_OCC_STAT, 2, 0, seq_id);
+			if (!rsp)
+				return;
+
 			rc = fsp_queue_msg(rsp, fsp_freemsg);
-		if (rc) {
-			log_simple_error(&e_info(OPAL_RC_OCC_LOAD),
-				"OCC: Error %d queueing FSP OCC LOAD STATUS msg", rc);
-			fsp_freemsg(rsp);
+			if (rc) {
+				log_simple_error(&e_info(OPAL_RC_OCC_LOAD),
+				"OCC: Error %d queueing OCC LOAD STATUS msg",
+						 rc);
+				fsp_freemsg(rsp);
+			}
+			in_ipl = false;
+		} else {
+			struct proc_chip *chip = next_chip(NULL);
+
+			last_seq_id = seq_id;
+			prd_fsp_occ_load_start(chip->id);
 		}
 		return;
 	}
@@ -1837,6 +2082,74 @@ out:
 	return rc;
 }
 
+int fsp_occ_reset_status(u64 chipid, s64 status)
+{
+	struct fsp_msg *stat;
+	int rc = OPAL_NO_MEM;
+	int status_word = 0;
+
+	prlog(PR_INFO, "HBRT: OCC stop() completed with %lld\n", status);
+
+	if (status) {
+		struct proc_chip *chip = get_chip(chipid);
+
+		if (!chip)
+			return OPAL_PARAMETER;
+
+		status_word = 0xfe00 | (chip->pcid & 0xff);
+		log_simple_error(&e_info(OPAL_RC_OCC_RESET),
+				 "OCC: Error %lld in OCC reset of chip %lld\n",
+				 status, chipid);
+	} else {
+		occ_msg_queue_occ_reset();
+	}
+
+	stat = fsp_mkmsg(FSP_CMD_RESET_OCC_STAT, 2, status_word, last_seq_id);
+	if (!stat)
+		return rc;
+
+	rc = fsp_queue_msg(stat, fsp_freemsg);
+	if (rc) {
+		fsp_freemsg(stat);
+		log_simple_error(&e_info(OPAL_RC_OCC_RESET),
+			"OCC: Error %d queueing FSP OCC RESET STATUS message\n",
+			rc);
+	}
+	return rc;
+}
+
+int fsp_occ_load_start_status(u64 chipid, s64 status)
+{
+	struct fsp_msg *stat;
+	int rc = OPAL_NO_MEM;
+	int status_word = 0;
+
+	if (status) {
+		struct proc_chip *chip = get_chip(chipid);
+
+		if (!chip)
+			return OPAL_PARAMETER;
+
+		status_word = 0xB500 | (chip->pcid & 0xff);
+		log_simple_error(&e_info(OPAL_RC_OCC_LOAD),
+				 "OCC: Error %d in load/start OCC %lld\n", rc,
+				 chipid);
+	}
+
+	stat = fsp_mkmsg(FSP_CMD_LOAD_OCC_STAT, 2, status_word, last_seq_id);
+	if (!stat)
+		return rc;
+
+	rc = fsp_queue_msg(stat, fsp_freemsg);
+	if (rc) {
+		fsp_freemsg(stat);
+		log_simple_error(&e_info(OPAL_RC_OCC_LOAD),
+			"OCC: Error %d queueing FSP OCC LOAD STATUS msg", rc);
+	}
+
+	return rc;
+}
+
 static void occ_do_reset(u8 scope, u32 dbob_id, u32 seq_id)
 {
 	struct fsp_msg *rsp, *stat;
@@ -1877,7 +2190,18 @@ static void occ_do_reset(u8 scope, u32 dbob_id, u32 seq_id)
 	 * FSP will request OCC to left in stopped state.
 	 */
 
-	rc = host_services_occ_stop();
+	switch (proc_gen) {
+	case proc_gen_p8:
+		rc = host_services_occ_stop();
+		break;
+	case proc_gen_p9:
+		last_seq_id = seq_id;
+		chip = next_chip(NULL);
+		prd_fsp_occ_reset(chip->id);
+		return;
+	default:
+		return;
+	}
 
 	/* Handle fallback to preload */
 	if (rc == -ENOENT && chip->homer_base) {

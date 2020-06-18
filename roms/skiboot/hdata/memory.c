@@ -1,4 +1,4 @@
-/* Copyright 2013-2014 IBM Corp.
+/* Copyright 2013-2018 IBM Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #include <mem_region.h>
 #include <types.h>
 #include <inttypes.h>
+#include <processor.h>
 
 #include "spira.h"
 #include "hdata.h"
@@ -31,6 +32,8 @@ struct HDIF_ram_area_id {
 #define RAM_AREA_INSTALLED	0x8000
 #define RAM_AREA_FUNCTIONAL	0x4000
 	__be16 flags;
+	__be32 dimm_id;
+	__be32 speed;
 } __packed;
 
 struct HDIF_ram_area_size {
@@ -44,7 +47,30 @@ struct HDIF_ms_area_address_range {
 	__be32 chip;
 	__be32 mirror_attr;
 	__be64 mirror_start;
+	__be32 controller_id;
+	__be32 phys_attr;
 } __packed;
+#define PHYS_ATTR_TYPE_MASK 	0xff000000
+#define   PHYS_ATTR_TYPE_STD		0
+#define   PHYS_ATTR_TYPE_NVDIMM		1
+#define   PHYS_ATTR_TYPE_MRAM		2
+#define   PHYS_ATTR_TYPE_PCM		3
+
+#define PHYS_ATTR_STATUS_MASK 	0x00ff0000
+/*
+ * The values here are mutually exclusive. I have no idea why anyone
+ * decided encoding these are flags rather than sequential numbers was
+ * a good idea, but here we are.
+ */
+#define   PHYS_ATTR_STATUS_CANT_SAVE 	0x01
+#define   PHYS_ATTR_STATUS_SAVE_FAILED	0x02
+#define   PHYS_ATTR_STATUS_SAVED	0x04
+#define   PHYS_ATTR_STATUS_NOT_SAVED	0x08
+#define   PHYS_ATTR_STATUS_MEM_INVALID	0xff
+
+#define MS_CONTROLLER_MCBIST_ID(id)	GETFIELD(PPC_BITMASK32(0, 1), id)
+#define MS_CONTROLLER_MCS_ID(id)	GETFIELD(PPC_BITMASK32(4, 7), id)
+#define MS_CONTROLLER_MCA_ID(id)	GETFIELD(PPC_BITMASK32(8, 15), id)
 
 struct HDIF_ms_area_id {
 	__be16 id;
@@ -59,32 +85,6 @@ struct HDIF_ms_area_id {
 	__be16 flags;
 	__be16 share_id;
 } __packed;
-
-static struct dt_node *find_shared(struct dt_node *root, u16 id, u64 start, u64 len)
-{
-	struct dt_node *i;
-
-	for (i = dt_first(root); i; i = dt_next(root, i)) {
-		__be64 reg[2];
-		const struct dt_property *shared, *type, *region;
-
-		type = dt_find_property(i, "device_type");
-		if (!type || strcmp(type->prop, "memory") != 0)
-			continue;
-
-		shared = dt_find_property(i, DT_PRIVATE "share-id");
-		if (!shared || fdt32_to_cpu(*(u32 *)shared->prop) != id)
-			continue;
-
-		region = dt_find_property(i, "reg");
-		if (!region)
-			continue;
-		memcpy(reg, region->prop, sizeof(reg));
-		if (be64_to_cpu(reg[0]) == start && be64_to_cpu(reg[1]) == len)
-			break;
-	}
-	return i;
-}
 
 static void append_chip_id(struct dt_node *mem, u32 id)
 {
@@ -110,53 +110,96 @@ static void append_chip_id(struct dt_node *mem, u32 id)
 	p[len] = cpu_to_be32(id);
 }
 
+static void update_status(struct dt_node *mem, uint32_t status)
+{
+	switch (status) {
+	case PHYS_ATTR_STATUS_CANT_SAVE:
+		if (!dt_find_property(mem, "save-trigged-unarmed"))
+			dt_add_property(mem, "save-trigger-unarmed", NULL, 0);
+		break;
+
+	case PHYS_ATTR_STATUS_SAVE_FAILED:
+		if (!dt_find_property(mem, "save-failed"))
+			dt_add_property(mem, "save-failed", NULL, 0);
+
+		break;
+
+	case PHYS_ATTR_STATUS_MEM_INVALID:
+		if (dt_find_property(mem, "save-trigged-unarmed"))
+			dt_add_property_string(mem, "status",
+				"disabled-memory-invalid");
+		break;
+	}
+}
+
 static bool add_address_range(struct dt_node *root,
 			      const struct HDIF_ms_area_id *id,
-			      const struct HDIF_ms_area_address_range *arange)
+			      const struct HDIF_ms_area_address_range *arange,
+			      uint32_t mem_type, uint32_t mem_status)
 {
+	const char *compat = NULL, *dev_type = NULL, *name = NULL;
 	struct dt_node *mem;
-	u64 reg[2];
-	char *name;
 	u32 chip_id;
-	size_t namesz = sizeof("memory@") + STR_MAX_CHARS(reg[0]);
-
-	name = (char*)malloc(namesz);
-	assert(name);
+	u64 reg[2];
 
 	chip_id = pcid_to_chip_id(be32_to_cpu(arange->chip));
 
 	prlog(PR_DEBUG, "  Range: 0x%016llx..0x%016llx "
-	      "on Chip 0x%x mattr: 0x%x\n",
+	      "on Chip 0x%x mattr: 0x%x pattr: 0x%x status:0x%x\n",
 	      (long long)be64_to_cpu(arange->start),
 	      (long long)be64_to_cpu(arange->end),
-	      chip_id, arange->mirror_attr);
+	      chip_id, arange->mirror_attr, mem_type, mem_status);
 
 	/* reg contains start and length */
 	reg[0] = cleanup_addr(be64_to_cpu(arange->start));
 	reg[1] = cleanup_addr(be64_to_cpu(arange->end)) - reg[0];
 
+	switch (mem_type) {
+	case PHYS_ATTR_TYPE_STD:
+		name = "memory";
+		dev_type = "memory";
+		break;
+
+	case PHYS_ATTR_TYPE_NVDIMM:
+	case PHYS_ATTR_TYPE_MRAM:
+	case PHYS_ATTR_TYPE_PCM:
+		/* fall through */
+		name = "nvdimm";
+		compat = "pmem-region";
+		break;
+
+	/*
+	 * Future memory types could be volatile or non-volatile. Bail if don't
+	 * recognise the type so we don't end up trashing data accidently.
+	 */
+	default:
+		return false;
+	}
+
 	if (be16_to_cpu(id->flags) & MS_AREA_SHARED) {
-		/* Only enter shared nodes once. */ 
-		mem = find_shared(root, be16_to_cpu(id->share_id),
-				  reg[0], reg[1]);
+		mem = dt_find_by_name_addr(dt_root, name, reg[0]);
 		if (mem) {
 			append_chip_id(mem, chip_id);
-			free(name);
+			if (mem_type == PHYS_ATTR_TYPE_NVDIMM)
+				update_status(mem, mem_status);
 			return true;
 		}
 	}
-	snprintf(name, namesz, "memory@%llx", (long long)reg[0]);
 
-	mem = dt_new(root, name);
-	dt_add_property_string(mem, "device_type", "memory");
-	dt_add_property_cells(mem, "ibm,chip-id", chip_id);
+	mem = dt_new_addr(root, name, reg[0]);
+	if (compat)
+		dt_add_property_string(mem, "compatible", compat);
+	if (dev_type)
+		dt_add_property_string(mem, "device_type", dev_type);
+
+	/* add in the nvdimm backup status flags */
+	if (mem_type == PHYS_ATTR_TYPE_NVDIMM)
+		update_status(mem, mem_status);
+
+	/* common properties */
+
 	dt_add_property_u64s(mem, "reg", reg[0], reg[1]);
-	if (be16_to_cpu(id->flags) & MS_AREA_SHARED)
-		dt_add_property_cells(mem, DT_PRIVATE "share-id",
-				      be16_to_cpu(id->share_id));
-
-	free(name);
-
+	dt_add_property_cells(mem, "ibm,chip-id", chip_id);
 	return true;
 }
 
@@ -228,32 +271,19 @@ static void add_bus_freq_to_ram_area(struct dt_node *ram_node, u32 chip_id)
 }
 
 static void add_size_to_ram_area(struct dt_node *ram_node,
-				 const struct HDIF_common_hdr *hdr,
-				 int indx_vpd)
+				 const struct HDIF_common_hdr *ramarea)
 {
-	const void	*fruvpd;
-	unsigned int	fruvpd_sz;
-	const void	*kw;
-	char		*str;
-	uint8_t		kwsz;
+	char	str[16];
+	const struct HDIF_ram_area_size *ram_area_sz;
 
-	fruvpd = HDIF_get_idata(hdr, indx_vpd, &fruvpd_sz);
-	if (!CHECK_SPPTR(fruvpd))
+	/* DIMM size */
+	ram_area_sz = HDIF_get_idata(ramarea, 3, NULL);
+	if (!CHECK_SPPTR(ram_area_sz))
 		return;
 
-	/* DIMM Size */
-	kw = vpd_find(fruvpd, fruvpd_sz, "VINI", "SZ", &kwsz);
-	if (!kw)
-		return;
-
-	str = zalloc(kwsz + 1);
-	if (!str){
-		prerror("Allocation failed\n");
-		return;
-	}
-	memcpy(str, kw, kwsz);
+	memset(str, 0, 16);
+	snprintf(str, 16, "%d", be32_to_cpu(ram_area_sz->mb));
 	dt_add_property_string(ram_node, "size", str);
-	free(str);
 }
 
 static void vpd_add_ram_area(const struct HDIF_common_hdr *msarea)
@@ -293,24 +323,188 @@ static void vpd_add_ram_area(const struct HDIF_common_hdr *msarea)
 		chip_id = add_chip_id_to_ram_area(msarea, ram_node);
 		add_bus_freq_to_ram_area(ram_node, chip_id);
 
+		if (ram_sz >= offsetof(struct HDIF_ram_area_id, speed)) {
+			dt_add_property_cells(ram_node, "frequency",
+					      be32_to_cpu(ram_id->speed)*1000000);
+		}
+
 		vpd_blob = HDIF_get_idata(ramarea, 1, &ram_sz);
 
+		/* DIMM size */
+		add_size_to_ram_area(ram_node, ramarea);
 		/*
 		 * For direct-attached memory we have a DDR "Serial
 		 * Presence Detection" blob rather than an IBM keyword
 		 * blob.
 		 */
-		if (vpd_valid(vpd_blob, ram_sz)) {
-			/* the ibm,vpd blob was added in dt_add_vpd_node() */
-			add_size_to_ram_area(ram_node, ramarea, 1);
-		} else {
-			/*
-			 * FIXME: There's probably a way to calculate the
-			 * size of the DIMM from the SPD info.
-			 */
+		if (!vpd_valid(vpd_blob, ram_sz))
 			dt_add_property(ram_node, "spd", vpd_blob, ram_sz);
-		}
 	}
+}
+
+static void vpd_parse_spd(struct dt_node *dimm, const char *spd, u32 size)
+{
+	u16 *vendor;
+	u32 *sn;
+
+	/* SPD is too small */
+	if (size < 512) {
+		prlog(PR_WARNING, "MSVPD: Invalid SPD size. "
+		      "Expected 512 bytes, got %d\n", size);
+		return;
+	}
+
+	/* Supports DDR4 format pasing only */
+	if (spd[0x2] < 0xc) {
+		prlog(PR_WARNING,
+		      "MSVPD: SPD format (%x) not supported\n", spd[0x2]);
+		return;
+	}
+
+	dt_add_property_string(dimm, "device_type", "memory-dimm-ddr4");
+
+	/* DRAM device type */
+	dt_add_property_cells(dimm, "memory-id", spd[0x2]);
+
+	/* Module revision code */
+	dt_add_property_cells(dimm, "product-version", spd[0x15d]);
+
+	/* Serial number */
+	sn = (u32 *)&spd[0x145];
+	dt_add_property_cells(dimm, "serial-number", be32_to_cpu(*sn));
+
+	/* Part number */
+	dt_add_property_nstr(dimm, "part-number", &spd[0x149], 20);
+
+	/* Module manufacturer ID */
+	vendor = (u16 *)&spd[0x140];
+	dt_add_property_cells(dimm, "manufacturer-id", be16_to_cpu(*vendor));
+}
+
+static void add_mca_dimm_info(struct dt_node *mca,
+			      const struct HDIF_common_hdr *msarea)
+{
+	unsigned int i, size;
+	const struct HDIF_child_ptr *ramptr;
+	const struct HDIF_common_hdr *ramarea;
+	const struct spira_fru_id *fru_id;
+	const struct HDIF_ram_area_id *ram_id;
+	const struct HDIF_ram_area_size *ram_area_sz;
+	struct dt_node *dimm;
+	const void *vpd_blob;
+
+	ramptr = HDIF_child_arr(msarea, 0);
+	if (!CHECK_SPPTR(ramptr)) {
+		prerror("MS AREA: No RAM area at %p\n", msarea);
+		return;
+	}
+
+	for (i = 0; i < be32_to_cpu(ramptr->count); i++) {
+		ramarea = HDIF_child(msarea, ramptr, i, "RAM   ");
+		if (!CHECK_SPPTR(ramarea))
+			continue;
+
+		fru_id = HDIF_get_idata(ramarea, 0, NULL);
+		if (!fru_id)
+			continue;
+
+		/* Use Resource ID to add dimm node */
+		dimm = dt_find_by_name_addr(mca, "dimm",
+					    be16_to_cpu(fru_id->rsrc_id));
+		if (dimm)
+			continue;
+		dimm= dt_new_addr(mca, "dimm", be16_to_cpu(fru_id->rsrc_id));
+		assert(dimm);
+		dt_add_property_cells(dimm, "reg", be16_to_cpu(fru_id->rsrc_id));
+
+		/* Add location code */
+		slca_vpd_add_loc_code(dimm, be16_to_cpu(fru_id->slca_index));
+
+		/* DIMM size */
+		ram_area_sz = HDIF_get_idata(ramarea, 3, NULL);
+		if (!CHECK_SPPTR(ram_area_sz))
+			continue;
+		dt_add_property_cells(dimm, "size", be32_to_cpu(ram_area_sz->mb));
+
+		/* DIMM state */
+		ram_id = HDIF_get_idata(ramarea, 2, NULL);
+		if (!CHECK_SPPTR(ram_id))
+			continue;
+
+		if ((be16_to_cpu(ram_id->flags) & RAM_AREA_INSTALLED) &&
+		    (be16_to_cpu(ram_id->flags) & RAM_AREA_FUNCTIONAL))
+			dt_add_property_string(dimm, "status", "okay");
+		else
+			dt_add_property_string(dimm, "status", "disabled");
+
+		vpd_blob = HDIF_get_idata(ramarea, 1, &size);
+		if (!CHECK_SPPTR(vpd_blob))
+			continue;
+		if (vpd_valid(vpd_blob, size))
+			vpd_data_parse(dimm, vpd_blob, size);
+		else
+			vpd_parse_spd(dimm, vpd_blob, size);
+	}
+}
+
+static inline void dt_add_mem_reg_property(struct dt_node *node, u64 addr)
+{
+	dt_add_property_cells(node, "#address-cells", 1);
+	dt_add_property_cells(node, "#size-cells", 0);
+	dt_add_property_cells(node, "reg", addr);
+}
+
+static void add_memory_controller(const struct HDIF_common_hdr *msarea,
+				  const struct HDIF_ms_area_address_range *arange)
+{
+	uint32_t chip_id, version;
+	uint32_t controller_id, mcbist_id, mcs_id, mca_id;
+	struct dt_node *xscom, *mcbist, *mcs, *mca;
+
+	/*
+	 * Memory hierarchy may change between processor version. Presently
+	 * it's only creating memory hierarchy for P9 (Nimbus) and P9P (Axone).
+	 */
+	version = PVR_TYPE(mfspr(SPR_PVR));
+	if (version != PVR_TYPE_P9 && version != PVR_TYPE_P9P)
+		return;
+
+	chip_id = pcid_to_chip_id(be32_to_cpu(arange->chip));
+	controller_id = be32_to_cpu(arange->controller_id);
+	xscom = find_xscom_for_chip(chip_id);
+	if (!xscom) {
+		prlog(PR_WARNING,
+		      "MS AREA: Can't find XSCOM for chip %d\n", chip_id);
+		return;
+	}
+
+	mcbist_id = MS_CONTROLLER_MCBIST_ID(controller_id);
+	mcbist = dt_find_by_name_addr(xscom, "mcbist", mcbist_id);
+	if (!mcbist) {
+		mcbist = dt_new_addr(xscom, "mcbist", mcbist_id);
+		assert(mcbist);
+		dt_add_property_cells(mcbist, "#address-cells", 1);
+		dt_add_property_cells(mcbist, "#size-cells", 0);
+		dt_add_property_cells(mcbist, "reg", mcbist_id, 0);
+	}
+
+	mcs_id = MS_CONTROLLER_MCS_ID(controller_id);
+	mcs = dt_find_by_name_addr(mcbist, "mcs", mcs_id);
+	if (!mcs) {
+		mcs = dt_new_addr(mcbist, "mcs", mcs_id);
+		assert(mcs);
+		dt_add_mem_reg_property(mcs, mcs_id);
+	}
+
+	mca_id = MS_CONTROLLER_MCA_ID(controller_id);
+	mca = dt_find_by_name_addr(mcs, "mca", mca_id);
+	if (!mca) {
+		mca = dt_new_addr(mcs, "mca", mca_id);
+		assert(mca);
+		dt_add_mem_reg_property(mca, mca_id);
+	}
+
+	add_mca_dimm_info(mca, msarea);
 }
 
 static void get_msareas(struct dt_node *root,
@@ -332,7 +526,7 @@ static void get_msareas(struct dt_node *root,
 		const struct HDIF_ms_area_address_range *arange;
 		const struct HDIF_ms_area_id *id;
 		const void *fruid;
-		unsigned int size, j;
+		unsigned int size, j, offset;
 		u16 flags;
 
 		msarea = HDIF_child(ms_vpd, msptr, i, "MSAREA");
@@ -372,7 +566,8 @@ static void get_msareas(struct dt_node *root,
 			return;
 		}
 
-		if (be32_to_cpu(arr->eactsz) < sizeof(*arange)) {
+		offset = offsetof(struct HDIF_ms_area_address_range, mirror_start);
+		if (be32_to_cpu(arr->eactsz) < offset) {
 			prerror("MS VPD: %p msarea #%i arange size too small!\n",
 				ms_vpd, i);
 			return;
@@ -392,8 +587,27 @@ static void get_msareas(struct dt_node *root,
 		/* This offset is from the arr, not the header! */
 		arange = (void *)arr + be32_to_cpu(arr->offset);
 		for (j = 0; j < be32_to_cpu(arr->ecnt); j++) {
-			if (!add_address_range(root, id, arange))
-				return;
+			uint32_t type = 0, status = 0;
+
+			/*
+			 * Check that the required fields are present in this
+			 * version of the HDAT structure.
+			 */
+			offset = offsetof(struct HDIF_ms_area_address_range, controller_id);
+			if (be32_to_cpu(arr->eactsz) >= offset)
+				add_memory_controller(msarea, arange);
+
+			offset = offsetof(struct HDIF_ms_area_address_range, phys_attr);
+			if (be32_to_cpu(arr->eactsz) >= offset) {
+				uint32_t attr = be32_to_cpu(arange->phys_attr);
+
+				type = GETFIELD(PHYS_ATTR_TYPE_MASK, attr);
+				status = GETFIELD(PHYS_ATTR_STATUS_MASK, attr);
+			}
+
+			if (!add_address_range(root, id, arange, type, status))
+				prerror("Unable to use memory range %d from MSAREA %d\n", j, i);
+
 			arange = (void *)arange + be32_to_cpu(arr->esize);
 		}
 	}
@@ -403,6 +617,8 @@ static struct dt_node *dt_hb_reserves;
 
 static struct dt_node *add_hb_reserve_node(const char *name, u64 start, u64 end)
 {
+	/* label size + "ibm," + NULL */
+	char node_name[HB_RESERVE_MEM_LABEL_SIZE + 5] = { 0 };
 	struct dt_node *node, *hb;
 
 	if (!dt_hb_reserves) {
@@ -416,10 +632,15 @@ static struct dt_node *add_hb_reserve_node(const char *name, u64 start, u64 end)
 		dt_add_property_cells(dt_hb_reserves, "#address-cells", 2);
 	}
 
-	node = dt_new_addr(dt_hb_reserves, name, start);
+	/* Add "ibm," to reserved node name */
+	if (strncasecmp(name, "ibm", 3))
+		snprintf(node_name, 5, "ibm,");
+	strcat(node_name, name);
+
+	node = dt_new_addr(dt_hb_reserves, node_name, start);
 	if (!node) {
 		prerror("Unable to create node for %s@%llx\n",
-			name, (unsigned long long) start);
+			node_name, (unsigned long long) start);
 		return NULL;
 	}
 
@@ -428,15 +649,13 @@ static struct dt_node *add_hb_reserve_node(const char *name, u64 start, u64 end)
 	return node;
 }
 
-#define HRMOR_BIT (1ul << 63)
-
 static void get_hb_reserved_mem(struct HDIF_common_hdr *ms_vpd)
 {
 	const struct msvpd_hb_reserved_mem *hb_resv_mem;
 	u64 start_addr, end_addr, label_size;
 	struct dt_node *node;
 	int count, i;
-	char *label;
+	char label[HB_RESERVE_MEM_LABEL_SIZE + 1];
 
 	/*
 	 * XXX: Reservation names only exist on P9 and on P7/8 we get the
@@ -480,20 +699,16 @@ static void get_hb_reserved_mem(struct HDIF_common_hdr *ms_vpd)
 		/* remove the HRMOR bypass bit */
 		start_addr &= ~HRMOR_BIT;
 		end_addr &= ~HRMOR_BIT;
-		if (label_size > 64)
-			label_size = 64;
+		if (label_size > HB_RESERVE_MEM_LABEL_SIZE)
+			label_size = HB_RESERVE_MEM_LABEL_SIZE;
 
-		label = malloc(label_size+1);
-		assert(label);
-
+		memset(label, 0, HB_RESERVE_MEM_LABEL_SIZE + 1);
 		memcpy(label, hb_resv_mem->label, label_size);
 		label[label_size] = '\0';
 
 		/* Unnamed reservations are always broken. Ignore them. */
-		if (strlen(label) == 0) {
-			free(label);
+		if (strlen(label) == 0)
 			continue;
-		}
 
 		prlog(PR_DEBUG, "MEM: Reserve '%s' %#" PRIx64 "-%#" PRIx64 " (type/inst=0x%08x)\n",
 		      label, start_addr, end_addr, be32_to_cpu(hb_resv_mem->type_instance));

@@ -241,10 +241,10 @@ static int64_t npu_dev_cfg_bar_write(struct npu_dev *dev,
 
 	/* Update BAR base address */
 	if (offset == pcrf->start) {
-		bar->base &= 0xffffffff00000000;
+		bar->base &= 0xffffffff00000000UL;
 		bar->base |= (data & 0xfffffff0);
 	} else {
-		bar->base &= 0x00000000ffffffff;
+		bar->base &= 0x00000000ffffffffUL;
 		bar->base |= ((uint64_t)data << 32);
 
 		PCI_VIRT_CFG_NORMAL_RD(pvd, PCI_CFG_CMD, 4, &pci_cmd);
@@ -617,7 +617,7 @@ static uint64_t npu_lsi_attributes(struct irq_source *is, uint32_t isn)
 	uint32_t idx = isn - p->base_lsi;
 
 	if (idx >= 4)
-		return IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TARGET_RARE;
+		return IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TARGET_RARE | IRQ_ATTR_TYPE_LSI;
 	return IRQ_ATTR_TARGET_LINUX;
 }
 
@@ -882,8 +882,7 @@ static int64_t npu_freeze_status(struct phb *phb,
 				     uint64_t pe_number __unused,
 				     uint8_t *freeze_state,
 				     uint16_t *pci_error_type __unused,
-				     uint16_t *severity __unused,
-				     uint64_t *phb_status __unused)
+				     uint16_t *severity __unused)
 {
 	/* FIXME: When it's called by skiboot PCI config accessor,
 	 * the PE number is fixed to 0, which is incorrect. We need
@@ -1052,7 +1051,7 @@ static void assign_mmio_bars(uint32_t gcid, uint32_t xscom,
 	 * Link#3-BAR#1:  UNASSIGNED
 	 */
 	xscom_write(gcid, xscom + NPU_AT_SCOM_OFFSET + NX_BAR,
-		    0x0211000043500000);
+		    0x0211000043500000UL);
 
 	xscom_read(gcid, npu_link_scom_base(npu_dn, xscom, 0) + NX_MMIO_BAR_0,
 		   &mem_start);

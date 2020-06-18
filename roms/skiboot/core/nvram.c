@@ -21,6 +21,7 @@
 #include <device.h>
 #include <platform.h>
 #include <nvram.h>
+#include <timebase.h>
 
 static void *nvram_image;
 static uint32_t nvram_size;
@@ -69,8 +70,10 @@ opal_call(OPAL_WRITE_NVRAM, opal_write_nvram, 3);
 
 bool nvram_validate(void)
 {
-	if (!nvram_valid)
-		nvram_valid = !nvram_check(nvram_image, nvram_size);
+	if (!nvram_valid) {
+		if (!nvram_check(nvram_image, nvram_size))
+			nvram_valid = true;
+	}
 
 	return nvram_valid;
 }
@@ -87,7 +90,7 @@ static void nvram_reformat(void)
 	if (platform.nvram_write)
 		platform.nvram_write(0, nvram_image, nvram_size);
 
-	nvram_valid = true;
+	nvram_validate();
 }
 
 void nvram_reinit(void)
@@ -122,6 +125,49 @@ void nvram_read_complete(bool success)
 	nvram_ready = true;
 }
 
+bool nvram_wait_for_load(void)
+{
+	uint64_t started;
+
+	/* Short cut */
+	if (nvram_ready)
+		return true;
+
+	/* Tell the caller it will never happen */
+	if (!platform.nvram_info)
+		return false;
+
+	/*
+	 * One of two things has happened here.
+	 * 1. nvram_wait_for_load() was called before nvram_init()
+	 * 2. The read of NVRAM failed.
+	 * Either way, this is quite a bad event.
+	 */
+	if (!nvram_image && !nvram_size) {
+		prlog(PR_CRIT, "NVRAM: Possible wait before nvram_init()!\n");
+		return false;
+	}
+
+	started = mftb();
+
+	while (!nvram_ready) {
+		opal_run_pollers();
+		/* If the read fails, tell the caller */
+		if (!nvram_image && !nvram_size)
+			return false;
+	}
+
+	prlog(PR_DEBUG, "NVRAM: Waited %lums for nvram to load\n",
+		tb_to_msecs(mftb() - started));
+
+	return true;
+}
+
+bool nvram_has_loaded(void)
+{
+	return nvram_ready;
+}
+
 void nvram_init(void)
 {
 	int rc;
@@ -133,9 +179,9 @@ void nvram_init(void)
 		prerror("NVRAM: Error %d retrieving nvram info\n", rc);
 		return;
 	}
-	printf("NVRAM: Size is %d KB\n", nvram_size >> 10);
+	prlog(PR_INFO, "NVRAM: Size is %d KB\n", nvram_size >> 10);
 	if (nvram_size > 0x100000) {
-		printf("NVRAM: Cropping to 1MB !\n");
+		prlog(PR_WARNING, "NVRAM: Cropping to 1MB !\n");
 		nvram_size = 0x100000;
 	}
 

@@ -20,6 +20,7 @@
 #include "qemu/option.h"
 #include "qemu-options.h"
 #include "plugin/plugin_mgr.h"
+#include "qemu/error-report.h"
 
 #include <stdlib.h>
 #include <dlfcn.h>
@@ -49,7 +50,7 @@ static bool plugin_load_plugin(Plugin *this)
     error = dlerror(); 
     if(error != NULL)
     {
-        // error_report("%s\n", error);
+        error_report("%s\n", error);
         return false;
     }
 
@@ -57,13 +58,13 @@ static bool plugin_load_plugin(Plugin *this)
     error = dlerror(); 
     if(error != NULL)
     {
-        // error_report("%s\n", error);
+        error_report("%s\n", error);
         return false;
     }
 
     if(!this_plugin_setup((void*)this, this->plugin_path))
     {
-        // error_report("Setup failed for plugin %s\n", this->plugin_path);
+        error_report("Setup failed for plugin %s\n", this->plugin_path);
         return false;
     }
 

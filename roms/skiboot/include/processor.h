@@ -77,6 +77,7 @@
 #define SPR_LPCR	0x13e
 #define SPR_HMER	0x150	/* Hypervisor Maintenance Exception */
 #define SPR_HMEER	0x151	/* HMER interrupt enable mask */
+#define SPR_PCR		0x152
 #define SPR_AMOR	0x15d
 #define SPR_PSSCR	0x357   /* RW: Stop status and control (ISA 3) */
 #define SPR_TSCR	0x399
@@ -87,6 +88,11 @@
 #define SPR_HID5	0x3f6
 #define SPR_PIR		0x3ff	/* RO: Processor Identification */
 
+/* Bits in SRR1 */
+
+#define SPR_SRR1_PM_WAKE_MASK	0x3c0000	/* PM wake reason for P8/9 */
+#define SPR_SRR1_PM_WAKE_SRESET	0x100000
+#define SPR_SRR1_PM_WAKE_MCE	0x3c0000	/* Use reserved value for MCE */
 
 /* Bits in LPCR */
 
@@ -181,7 +187,7 @@
 #define SPR_HID0_POWER8_HILE		PPC_BIT(19)
 #define SPR_HID0_POWER9_HILE		PPC_BIT(4)
 #define SPR_HID0_POWER8_ENABLE_ATTN	PPC_BIT(31)
-#define SPR_HID0_POWER9_ENABLE_ATTN	PPC_BIT(3)
+#define SPR_HID0_POWER9_ENABLE_ATTN	(PPC_BIT(2) | PPC_BIT(3))
 #define SPR_HID0_POWER9_RADIX		PPC_BIT(8)
 
 /* PVR bits */
@@ -200,6 +206,7 @@
 #define PVR_TYPE_P8	0x004d /* Venice */
 #define PVR_TYPE_P8NVL	0x004c /* Naples */
 #define PVR_TYPE_P9	0x004e
+#define PVR_TYPE_P9P	0x004f /* Axone */
 
 #ifdef __ASSEMBLY__
 
@@ -215,9 +222,15 @@
 
 #else /* __ASSEMBLY__ */
 
+#include <ccan/str/str.h>
 #include <compiler.h>
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
+
+#define RB(b)		(((b) & 0x1f) << 11)
+#define MSGSND(b)	stringify(.long 0x7c00019c | RB(b))
+#define MSGCLR(b)	stringify(.long 0x7c0001dc | RB(b))
+#define MSGSYNC		stringify(.long 0x7c0006ec)
 
 static inline bool is_power9n(uint32_t version)
 {
@@ -232,6 +245,8 @@ static inline bool is_power9n(uint32_t version)
 		return false;
 	return true;
 }
+
+#ifndef __TEST__
 
 /*
  * SMT priority
@@ -326,20 +341,24 @@ static inline void sync_icache(void)
 static inline void msgclr(void)
 {
 	uint64_t rb = (0x05 << (63-36));
-	asm volatile("msgclr %0" : : "r"(rb));
+	asm volatile(MSGCLR(%0) : : "r"(rb));
 }
 
 static inline void p9_dbell_receive(void)
 {
 	uint64_t rb = (0x05 << (63-36));
-	/* msgclr ; msgsync ; lwsync */
-	asm volatile("msgclr %0 ; .long 0x7c0006ec ; lwsync" : : "r"(rb));
+	asm volatile(MSGCLR(%0)	";"
+		     MSGSYNC	";"
+		     "lwsync"
+		     : : "r"(rb));
 }
 
 static inline void p9_dbell_send(uint32_t pir)
 {
 	uint64_t rb = (0x05 << (63-36)) | pir;
-	asm volatile("sync ; msgsnd %0" : : "r"(rb));
+	asm volatile("sync ;"
+		     MSGSND(%0)
+		     : : "r"(rb));
 }
 
 /*
@@ -369,6 +388,8 @@ static inline void st_le32(uint32_t *addr, uint32_t val)
 {
 	asm volatile("stwbrx %0,0,%1" : : "r"(val), "r"(addr), "m"(*addr));
 }
+
+#endif /* __TEST__ */
 
 #endif /* __ASSEMBLY__ */
 

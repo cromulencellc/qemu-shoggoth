@@ -2,8 +2,6 @@
 #ifndef __X86_H
 #define __X86_H
 
-#include "parisc/hppa_hardware.h"
-
 // CPU flag bitdefs
 #define F_CF (1<<0)
 #define F_ZF (1<<6)
@@ -20,67 +18,37 @@
 #define PORT_A20 0x0092
 #define A20_ENABLE_BIT 0x02
 
+#if defined(__i386__) || defined(__x86_64__)
+
 #ifndef __ASSEMBLY__
 
 #include "types.h" // u32
-#include "byteorder.h" // le16_to_cpu
-
-#define   PSW_I   0x00000001
-
-static inline unsigned long arch_local_save_flags(void)
-{
-	unsigned long flags;
-	asm volatile("ssm 0, %0" : "=r" (flags) : : "memory");
-	return flags;
-}
-
-static inline void arch_local_irq_disable(void)
-{
-	asm volatile("rsm %0,%%r0\n" : : "i" (PSW_I) : "memory");
-}
-
-static inline void arch_local_irq_enable(void)
-{
-	asm volatile("ssm %0,%%r0\n" : : "i" (PSW_I) : "memory");
-}
-
-static inline unsigned long arch_local_irq_save(void)
-{
-	unsigned long flags;
-	asm volatile("rsm %1,%0" : "=r" (flags) : "i" (PSW_I) : "memory");
-	return flags;
-}
-
-static inline void arch_local_irq_restore(unsigned long flags)
-{
-	asm volatile("mtsm %0" : : "r" (flags) : "memory");
-}
 
 static inline void irq_disable(void)
 {
-   arch_local_irq_disable();
+    asm volatile("cli": : :"memory");
 }
 
 static inline void irq_enable(void)
 {
-    arch_local_irq_enable();
+    asm volatile("sti": : :"memory");
 }
 
 static inline u32 save_flags(void)
 {
-    return arch_local_irq_save();
+    u32 flags;
+    asm volatile("pushfl ; popl %0" : "=rm" (flags));
+    return flags;
 }
 
 static inline void restore_flags(u32 flags)
 {
-    arch_local_irq_restore(flags);
+    asm volatile("pushl %0 ; popfl" : : "g" (flags) : "memory", "cc");
 }
-
-
 
 static inline void cpu_relax(void)
 {
-    asm volatile("nop": : :"memory");
+    asm volatile("rep ; nop": : :"memory");
 }
 
 static inline void nop(void)
@@ -88,53 +56,15 @@ static inline void nop(void)
     asm volatile("nop");
 }
 
-extern void hlt(void);
+static inline void hlt(void)
+{
+    asm volatile("hlt": : :"memory");
+}
 
 static inline void wbinvd(void)
 {
-    asm volatile("sync": : :"memory"); // fdc... FIXME !!! flush_data_cache_local
+    asm volatile("wbinvd": : :"memory");
 }
-
-
-
-#define mfctl(reg)	({		\
-	unsigned long cr;		\
-	__asm__ __volatile__(		\
-		"mfctl " #reg ",%0" :	\
-		 "=r" (cr)		\
-	);				\
-	cr;				\
-})
-
-#define mtctl(gr, cr) \
-	__asm__ __volatile__("mtctl %0,%1" \
-		: /* no outputs */ \
-		: "r" (gr), "i" (cr) : "memory")
-
-/* these are here to de-mystefy the calling code, and to provide hooks */
-/* which I needed for debugging EIEM problems -PB */
-#define get_eiem() mfctl(15)
-static inline void set_eiem(unsigned long val)
-{
-	mtctl(val, 15);
-}
-
-#define mfsp(reg)	({		\
-	unsigned long cr;		\
-	__asm__ __volatile__(		\
-		"mfsp " #reg ",%0" :	\
-		 "=r" (cr)		\
-	);				\
-	cr;				\
-})
-
-#define mtsp(val, cr) \
-	{ if (__builtin_constant_p(val) && ((val) == 0)) \
-	 __asm__ __volatile__("mtsp %%r0,%0" : : "i" (cr) : "memory"); \
-	else \
-	 __asm__ __volatile__("mtsp %0,%1" \
-		: /* no outputs */ \
-		: "r" (val), "i" (cr) : "memory"); }
 
 #define CPUID_TSC (1 << 4)
 #define CPUID_MSR (1 << 5)
@@ -177,70 +107,26 @@ static inline void wrmsr(u32 index, u64 val)
     asm volatile ("wrmsr" : : "c"(index), "A"(val));
 }
 
-static inline unsigned long rdtscll(void)
+static inline u64 rdtscll(void)
 {
-    return mfctl(16);
+    u64 val;
+    asm volatile("rdtsc" : "=A" (val));
+    return val;
 }
 
-static inline u32 __ffs(u32 x)
+static inline u32 __ffs(u32 word)
 {
-	unsigned long ret;
-
-	if (!x)
-		return 0;
-
-	__asm__(
-#ifdef CONFIG_64BIT
-		" ldi       63,%1\n"
-		" extrd,u,*<>  %0,63,32,%%r0\n"
-		" extrd,u,*TR  %0,31,32,%0\n"	/* move top 32-bits down */
-		" addi    -32,%1,%1\n"
-#else
-		" ldi       31,%1\n"
-#endif
-		" extru,<>  %0,31,16,%%r0\n"
-		" extru,TR  %0,15,16,%0\n"	/* xxxx0000 -> 0000xxxx */
-		" addi    -16,%1,%1\n"
-		" extru,<>  %0,31,8,%%r0\n"
-		" extru,TR  %0,23,8,%0\n"	/* 0000xx00 -> 000000xx */
-		" addi    -8,%1,%1\n"
-		" extru,<>  %0,31,4,%%r0\n"
-		" extru,TR  %0,27,4,%0\n"	/* 000000x0 -> 0000000x */
-		" addi    -4,%1,%1\n"
-		" extru,<>  %0,31,2,%%r0\n"
-		" extru,TR  %0,29,2,%0\n"	/* 0000000y, 1100b -> 0011b */
-		" addi    -2,%1,%1\n"
-		" extru,=  %0,31,1,%%r0\n"	/* check last bit */
-		" addi    -1,%1,%1\n"
-			: "+r" (x), "=r" (ret) );
-	return ret;
+    asm("bsf %1,%0"
+        : "=r" (word)
+        : "rm" (word));
+    return word;
 }
-
-static inline u32 __fls(u32 x)
+static inline u32 __fls(u32 word)
 {
-	int ret;
-	if (!x)
-		return 0;
-
-	__asm__(
-	"	ldi		1,%1\n"
-	"	extru,<>	%0,15,16,%%r0\n"
-	"	zdep,TR		%0,15,16,%0\n"		/* xxxx0000 */
-	"	addi		16,%1,%1\n"
-	"	extru,<>	%0,7,8,%%r0\n"
-	"	zdep,TR		%0,23,24,%0\n"		/* xx000000 */
-	"	addi		8,%1,%1\n"
-	"	extru,<>	%0,3,4,%%r0\n"
-	"	zdep,TR		%0,27,28,%0\n"		/* x0000000 */
-	"	addi		4,%1,%1\n"
-	"	extru,<>	%0,1,2,%%r0\n"
-	"	zdep,TR		%0,29,30,%0\n"		/* y0000000 (y&3 = 0) */
-	"	addi		2,%1,%1\n"
-	"	extru,=		%0,0,1,%%r0\n"
-	"	addi		1,%1,%1\n"		/* if y & 8, add 1 */
-		: "+r" (x), "=r" (ret) );
-
-	return ret;
+    asm("bsr %1,%0"
+        : "=r" (word)
+        : "rm" (word));
+    return word;
 }
 
 static inline u32 getesp(void) {
@@ -256,113 +142,55 @@ static inline u32 rol(u32 val, u16 rol) {
     return res;
 }
 
-#define pci_ioport_addr(port) ((port >= 0x1000)  && (port < FIRMWARE_START))
-
-static inline void outl(u32 value, portaddr_t port) {
-    if (!pci_ioport_addr(port)) {
-        *(volatile u32 *)(port) = be32_to_cpu(value);
-    } else {
-	/* write PCI I/O address to Dino's PCI_CONFIG_ADDR */
-	outl(port, DINO_HPA + 0x064);
-	/* write value to PCI_IO_DATA */
-	outl(value, DINO_HPA + 0x06c);
-    }
+static inline void outb(u8 value, u16 port) {
+    __asm__ __volatile__("outb %b0, %w1" : : "a"(value), "Nd"(port));
+}
+static inline void outw(u16 value, u16 port) {
+    __asm__ __volatile__("outw %w0, %w1" : : "a"(value), "Nd"(port));
+}
+static inline void outl(u32 value, u16 port) {
+    __asm__ __volatile__("outl %0, %w1" : : "a"(value), "Nd"(port));
+}
+static inline u8 inb(u16 port) {
+    u8 value;
+    __asm__ __volatile__("inb %w1, %b0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+static inline u16 inw(u16 port) {
+    u16 value;
+    __asm__ __volatile__("inw %w1, %w0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+static inline u32 inl(u16 port) {
+    u32 value;
+    __asm__ __volatile__("inl %w1, %0" : "=a"(value) : "Nd"(port));
+    return value;
 }
 
-static inline void outw(u16 value, portaddr_t port) {
-    if (!pci_ioport_addr(port)) {
-        *(volatile u16 *)(port) = be16_to_cpu(value);
-    } else {
-	/* write PCI I/O address to Dino's PCI_CONFIG_ADDR */
-	outl(port, DINO_HPA + 0x064);
-	/* write value to PCI_IO_DATA */
-	outw(value, DINO_HPA + 0x06c);
-    }
+static inline void insb(u16 port, u8 *data, u32 count) {
+    asm volatile("rep insb (%%dx), %%es:(%%edi)"
+                 : "+c"(count), "+D"(data) : "d"(port) : "memory");
 }
-
-static inline void outb(u8 value, portaddr_t port) {
-    if (!pci_ioport_addr(port)) {
-	*(volatile u8 *)(port) = value;
-    } else {
-	/* write PCI I/O address to Dino's PCI_CONFIG_ADDR */
-	outl(port, DINO_HPA + 0x064);
-	/* write value to PCI_IO_DATA */
-	outb(value, DINO_HPA + 0x06c);
-    }
+static inline void insw(u16 port, u16 *data, u32 count) {
+    asm volatile("rep insw (%%dx), %%es:(%%edi)"
+                 : "+c"(count), "+D"(data) : "d"(port) : "memory");
 }
-
-static inline u8 inb(portaddr_t port) {
-    if (!pci_ioport_addr(port)) {
-        return *(volatile u8 *)(port);
-    } else {
-	/* write PCI I/O address to Dino's PCI_CONFIG_ADDR */
-	outl(port, DINO_HPA + 0x064);
-	/* read value to PCI_IO_DATA */
-	return inb(DINO_HPA + 0x06c);
-    }
-}
-
-static inline u16 inw(portaddr_t port) {
-    if (!pci_ioport_addr(port)) {
-        return *(volatile u16 *)(port);
-    } else {
-	/* write PCI I/O address to Dino's PCI_CONFIG_ADDR */
-	outl(port, DINO_HPA + 0x064);
-	/* read value to PCI_IO_DATA */
-	return inw(DINO_HPA + 0x06c);
-    }
-}
-static inline u32 inl(portaddr_t port) {
-    if (!pci_ioport_addr(port)) {
-        return *(volatile u32 *)(port);
-    } else {
-	/* write PCI I/O address to Dino's PCI_CONFIG_ADDR */
-	outl(port, DINO_HPA + 0x064);
-	/* read value to PCI_IO_DATA */
-	return inl(DINO_HPA + 0x06c);
-    }
-}
-
-static inline void insb(portaddr_t port, u8 *data, u32 count) {
-    while (count--)
-	*data++ = inb(port);
-}
-static inline void insw(portaddr_t port, u16 *data, u32 count) {
-    while (count--)
-	if (pci_ioport_addr(port))
-		*data++ = be16_to_cpu(inw(port));
-	else
-		*data++ = inw(port);
-}
-static inline void insl(portaddr_t port, u32 *data, u32 count) {
-    while (count--)
-	if (pci_ioport_addr(port))
-		*data++ = be32_to_cpu(inl(port));
-	else
-		*data++ = inl(port);
+static inline void insl(u16 port, u32 *data, u32 count) {
+    asm volatile("rep insl (%%dx), %%es:(%%edi)"
+                 : "+c"(count), "+D"(data) : "d"(port) : "memory");
 }
 // XXX - outs not limited to es segment
-static inline void outsb(portaddr_t port, u8 *data, u32 count) {
-    while (count--)
-	outb(*data++, port);
+static inline void outsb(u16 port, u8 *data, u32 count) {
+    asm volatile("rep outsb %%es:(%%esi), (%%dx)"
+                 : "+c"(count), "+S"(data) : "d"(port) : "memory");
 }
-static inline void outsw(portaddr_t port, u16 *data, u32 count) {
-    while (count--) {
-	if (pci_ioport_addr(port))
-		outw(cpu_to_be16(*data), port);
-	else
-		outw(*data, port);
-	data++;
-    }
+static inline void outsw(u16 port, u16 *data, u32 count) {
+    asm volatile("rep outsw %%es:(%%esi), (%%dx)"
+                 : "+c"(count), "+S"(data) : "d"(port) : "memory");
 }
-static inline void outsl(portaddr_t port, u32 *data, u32 count) {
-    while (count--) {
-	if (pci_ioport_addr(port))
-		outl(cpu_to_be32(*data), port);
-	else
-		outl(*data, port);
-	data++;
-    }
+static inline void outsl(u16 port, u32 *data, u32 count) {
+    asm volatile("rep outsl %%es:(%%esi), (%%dx)"
+                 : "+c"(count), "+S"(data) : "d"(port) : "memory");
 }
 
 /* Compiler barrier is enough as an x86 CPU does not reorder reads or writes */
@@ -384,6 +212,11 @@ static inline void writew(void *addr, u16 val) {
 static inline void writeb(void *addr, u8 val) {
     barrier();
     *(volatile u8 *)addr = val;
+}
+static inline u64 readq(const void *addr) {
+    u64 val = *(volatile const u64 *)addr;
+    barrier();
+    return val;
 }
 static inline u32 readl(const void *addr) {
     u32 val = *(volatile const u32 *)addr;
@@ -421,21 +254,30 @@ struct descloc_s {
 } PACKED;
 
 static inline void sgdt(struct descloc_s *desc) {
+    asm("sgdtl %0" : "=m"(*desc));
 }
 static inline void lgdt(struct descloc_s *desc) {
+    asm("lgdtl %0" : : "m"(*desc) : "memory");
 }
 
 static inline u8 get_a20(void) {
-    return 0;
+    return (inb(PORT_A20) & A20_ENABLE_BIT) != 0;
 }
 
 static inline u8 set_a20(u8 cond) {
-    return 0;
+    u8 val = inb(PORT_A20), a20_enabled = (val & A20_ENABLE_BIT) != 0;
+    if (a20_enabled != !!cond)
+        outb(val ^ A20_ENABLE_BIT, PORT_A20);
+    return a20_enabled;
 }
 
 // x86.c
 void cpuid(u32 index, u32 *eax, u32 *ebx, u32 *ecx, u32 *edx);
 
 #endif // !__ASSEMBLY__
+
+#elif defined(__hppa__)
+#include "parisc/hppa.h"        /* replacement functions for parisc architecture */
+#endif
 
 #endif // x86.h

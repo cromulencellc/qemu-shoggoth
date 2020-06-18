@@ -4,6 +4,8 @@
 #include <fsp.h>
 #include <device.h>
 #include <opal.h>
+#include <sbe-p8.h>
+#include <sbe-p9.h>
 
 #ifdef __TEST__
 #define this_cpu()	((void *)-1)
@@ -20,6 +22,14 @@ static LIST_HEAD(timer_list);
 static LIST_HEAD(timer_poll_list);
 static bool timer_in_poll;
 static uint64_t timer_poll_gen;
+
+static inline void update_timer_expiry(uint64_t target)
+{
+	if (proc_gen < proc_gen_p9)
+		p8_sbe_update_timer_expiry(target);
+	else
+		p9_sbe_update_timer_expiry(target);
+}
 
 void init_timer(struct timer *t, timer_func_t expiry, void *data)
 {
@@ -108,8 +118,9 @@ static void __schedule_timer_at(struct timer *t, uint64_t when)
  bail:
 	/* Pick up the next timer and upddate the SBE HW timer */
 	lt = list_top(&timer_list, struct timer, link);
-	if (lt)
-		slw_update_timer_expiry(lt->target);
+	if (lt) {
+		update_timer_expiry(lt->target);
+	}
 }
 
 void schedule_timer_at(struct timer *t, uint64_t when)
@@ -166,7 +177,7 @@ static void __check_poll_timers(uint64_t now)
 		 * arbitrarily 1us.
 		 */
 		if (t->running) {
-			slw_update_timer_expiry(now + usecs_to_tb(1));
+			update_timer_expiry(now + usecs_to_tb(1));
 			break;
 		}
 
@@ -223,7 +234,6 @@ static void __check_timers(uint64_t now)
 
 void check_timers(bool from_interrupt)
 {
-	struct timer *t;
 	uint64_t now = mftb();
 
 	/* This is the polling variant, the SLW interrupt path, when it
@@ -231,9 +241,11 @@ void check_timers(bool from_interrupt)
 	 * the pollers
 	 */
 
-	/* Lockless "peek", a bit racy but shouldn't be a problem */
-	t = list_top(&timer_list, struct timer, link);
-	if (list_empty_nocheck(&timer_poll_list) && (!t || t->target > now))
+	/* Lockless "peek", a bit racy but shouldn't be a problem as
+	 * we are only looking at whether the list is empty
+	 */
+	if (list_empty_nocheck(&timer_poll_list) &&
+	    list_empty_nocheck(&timer_list))
 		return;
 
 	/* Take lock and try again */
@@ -256,7 +268,7 @@ void late_init_timers(void)
 	 *
 	 * If a platform quirk exists, use that, else use the default.
 	 *
-	 * If we have an SLW timer facility, we run this 10 times slower,
+	 * If we have an SBE timer facility, we run this 10 times slower,
 	 * we could possibly completely get rid of it.
 	 *
 	 * We use a value in milliseconds, we don't want this to ever be
@@ -264,7 +276,9 @@ void late_init_timers(void)
 	 */
 	if (platform.heartbeat_time) {
 		heartbeat = platform.heartbeat_time();
-	} else if (slw_timer_ok() || fsp_present()) {
+	} else if (p9_sbe_timer_ok()) {
+		heartbeat = HEARTBEAT_DEFAULT_MS * 10;
+	} else if (p8_sbe_timer_ok() || fsp_present()) {
 		heartbeat = HEARTBEAT_DEFAULT_MS * 10;
 	}
 

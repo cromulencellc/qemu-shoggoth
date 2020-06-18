@@ -56,6 +56,9 @@ int qemu_set_anonymous_breakpoint_on_cpu(int cpu_idx, uint64_t addr, uint64_t le
 int qemu_remove_anonymous_breakpoint(uint64_t addr);
 int qemu_remove_anonymous_breakpoint_on_cpu(int cpu_idx, uint64_t addr, uint64_t length, OSBreakpointType bp_type);
 
+bool qemu_process_get_memory(int cpu_idx, OSPid pid, uint64_t address, uint8_t size, uint8_t **data);
+bool qemu_process_set_memory(int cpu_idx, OSPid pid, uint64_t address, uint8_t size, uint8_t *data);
+
 #ifdef __cplusplus
 }
 #endif

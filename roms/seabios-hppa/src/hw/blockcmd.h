@@ -105,7 +105,7 @@ int scsi_fill_cmd(struct disk_op_s *op, void *cdbcmd, int maxcdb);
 int scsi_is_read(struct disk_op_s *op);
 int scsi_is_ready(struct disk_op_s *op);
 struct drive_s;
-int scsi_drive_setup(struct drive_s *drive, const char *s, int prio);
+int scsi_drive_setup(struct drive_s *drive, const char *s, int prio, u8 target, u8 lun);
 typedef int (*scsi_add_lun)(u32 lun, struct drive_s *tmpl_drv);
 int scsi_rep_luns_scan(struct drive_s *tmp_drive, scsi_add_lun add_lun);
 int scsi_sequential_scan(struct drive_s *tmp_drive, u32 maxluns,

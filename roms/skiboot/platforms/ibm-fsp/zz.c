@@ -23,9 +23,27 @@
 #include <i2c.h>
 #include <timebase.h>
 #include <hostservices.h>
+#include <npu2.h>
 
 #include "ibm-fsp.h"
 #include "lxvpd.h"
+
+/* We don't yet create NPU device nodes on ZZ, but these values are correct */
+static const struct platform_ocapi zz_ocapi = {
+	.i2c_engine          = 1,
+	.i2c_port            = 4,
+	.i2c_reset_addr      = 0x20,
+	.i2c_reset_brick2    = (1 << 1),
+	.i2c_reset_brick3    = (1 << 6),
+	.i2c_reset_brick4    = 0, /* unused */
+	.i2c_reset_brick5    = 0, /* unused */
+	.i2c_presence_addr   = 0x20,
+	.i2c_presence_brick2 = (1 << 2), /* bottom connector */
+	.i2c_presence_brick3 = (1 << 7), /* top connector */
+	.i2c_presence_brick4 = 0, /* unused */
+	.i2c_presence_brick5 = 0, /* unused */
+	.odl_phy_swap        = true,
+};
 
 static bool zz_probe(void)
 {
@@ -58,10 +76,9 @@ DECLARE_PLATFORM(zz) = {
 	.exit			= ibm_fsp_exit,
 	.cec_power_down		= ibm_fsp_cec_power_down,
 	.cec_reboot		= ibm_fsp_cec_reboot,
-	/* FIXME: correct once PCI slot into is available */
-	.pci_setup_phb		= NULL,
-	.pci_get_slot_info	= NULL,
-	.pci_probe_complete	= NULL,
+	.pci_setup_phb		= firenze_pci_setup_phb,
+	.pci_get_slot_info	= firenze_pci_get_slot_info,
+	.pci_probe_complete	= firenze_pci_send_inventory,
 	.nvram_info		= fsp_nvram_info,
 	.nvram_start_read	= fsp_nvram_start_read,
 	.nvram_write		= fsp_nvram_write,
@@ -71,4 +88,6 @@ DECLARE_PLATFORM(zz) = {
 	.resource_loaded	= fsp_resource_loaded,
 	.sensor_read		= ibm_fsp_sensor_read,
 	.terminate		= ibm_fsp_terminate,
+	.ocapi			= &zz_ocapi,
+	.npu2_device_detect	= npu2_i2c_presence_detect,
 };

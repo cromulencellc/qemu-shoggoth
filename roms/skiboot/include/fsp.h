@@ -671,10 +671,10 @@ extern bool fsp_present(void);
  * instead as we will eventually use pre-allocated message pools
  */
 extern struct fsp_msg *fsp_allocmsg(bool alloc_response) __warn_unused_result;
-extern struct fsp_msg *fsp_mkmsg(u32 cmd_sub_mod, u8 add_words, ...) __warn_unused_result;
+extern struct fsp_msg *fsp_mkmsg(u32 cmd_sub_mod, u32 add_words, ...) __warn_unused_result;
 
 /* Populate a pre-allocated msg */
-extern void fsp_fillmsg(struct fsp_msg *msg, u32 cmd_sub_mod, u8 add_words, ...);
+extern void fsp_fillmsg(struct fsp_msg *msg, u32 cmd_sub_mod, u32 add_words, ...);
 
 /* Free a message
  *
@@ -776,7 +776,6 @@ extern void fsp_used_by_console(void);
 extern int fsp_nvram_info(uint32_t *total_size);
 extern int fsp_nvram_start_read(void *dst, uint32_t src, uint32_t len);
 extern int fsp_nvram_write(uint32_t offset, void *src, uint32_t size);
-extern void fsp_nvram_wait_open(void);
 
 /* RTC */
 extern void fsp_rtc_init(void);
@@ -823,7 +822,7 @@ extern void fsp_memory_err_init(void);
 /* Sensor */
 extern void fsp_init_sensor(void);
 extern int64_t fsp_opal_read_sensor(uint32_t sensor_hndl, int token,
-			uint32_t *sensor_data);
+			uint64_t *sensor_data);
 
 /* Diagnostic */
 extern void fsp_init_diag(void);

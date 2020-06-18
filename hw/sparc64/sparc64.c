@@ -36,10 +36,11 @@
 void cpu_check_irqs(CPUSPARCState *env)
 {
     CPUState *cs;
-
-    qemu_mutex_lock_iothread();
     uint32_t pil = env->pil_in |
                   (env->softint & ~(SOFTINT_TIMER | SOFTINT_STIMER));
+
+    /* We should be holding the BQL before we mess with IRQs */
+    qemu_mutex_lock_iothread();
 
     /* TT_IVEC has a higher priority (16) than TT_EXTINT (31..17) */
     if (env->ivec_status & 0x20) {

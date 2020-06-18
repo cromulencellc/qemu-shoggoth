@@ -254,11 +254,11 @@
         0A  OF pci-class-name-0A ENDOF
         0B  OF pci-class-name-0B ENDOF
         0C  OF pci-class-name-0C ENDOF
-        0C  OF pci-class-name-0D ENDOF
-        0C  OF pci-class-name-0E ENDOF
-        0C  OF pci-class-name-0F ENDOF
-        0C  OF pci-class-name-10 ENDOF
-        0C  OF pci-class-name-11 ENDOF
+        0D  OF pci-class-name-0D ENDOF
+        0E  OF pci-class-name-0E ENDOF
+        0F  OF pci-class-name-0F ENDOF
+        10  OF pci-class-name-10 ENDOF
+        11  OF pci-class-name-11 ENDOF
         dup OF drop s" unknown"  ENDOF
         ENDCASE
 ;

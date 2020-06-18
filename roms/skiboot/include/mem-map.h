@@ -23,11 +23,16 @@
  */
 #define SKIBOOT_BASE		0x30000000
 
-/* Stack size set to 16K, some of it will be used for
- * machine check (see stack.h)
+/* Stack size set to 32K, 16K for general stack and 16K for an emergency
+ * stack.
  */
-#define STACK_SHIFT		14
+#define STACK_SHIFT		15
 #define STACK_SIZE		(1 << STACK_SHIFT)
+
+/* End of the exception region we copy from 0x0. 0x0-0x100 will have
+ * IPL data and is not actually for exception vectors.
+ */
+#define EXCEPTION_VECTORS_END	0x2000
 
 /* The NACA and other stuff in head.S need to be at the start: we
  * give it 64k before placing the SPIRA and related data.
@@ -104,7 +109,9 @@
  * each stack is STACK_SIZE in size (naturally aligned power of
  * two) and the bottom of the stack contains the cpu thread
  * structure for the processor, so it can be obtained by a simple
- * bit mask from the stack pointer.
+ * bit mask from the stack pointer. Within the CPU stack is divided
+ * into a normal and emergency stack to cope with a single level of
+ * re-entrancy.
  *
  * The size of this array is dynamically determined at boot time
  */

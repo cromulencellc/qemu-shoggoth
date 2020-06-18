@@ -84,7 +84,7 @@ struct PythonCallbacks
     PyObject *ra_stop;
     PyObject *ra_idle;
     PyObject *get_ra_report_type;
-    PyObject *breakpoint_hit;
+    PyObject *breakpoint;
     PyObject *exception;
     PyObject *execute_instruction;
     PyObject *memory_read;
@@ -306,7 +306,7 @@ static void python_on_breakpoint(void *opaque, int cpu_idx, uint64_t vaddr, int 
     python_error_check(callback_args);
 
     // Call the callback and check for an error
-    PyObject_CallObject(p->py_callbacks.breakpoint_hit, callback_args);
+    PyObject_CallObject(p->py_callbacks.breakpoint, callback_args);
     python_call_check();
 
     // decref
@@ -331,12 +331,12 @@ static void python_on_exception(void *opaque, int32_t exception)
     Py_DECREF(callback_args); 
 }
 
-static void python_on_memory_write(void *opaque, uint64_t paddr, const uint8_t *value, void *addr, int size)
+static void python_on_memory_write(void *opaque, uint64_t paddr, uint64_t vaddr, const uint8_t *value, void *addr, int size)
 {
     PyObject *callback_args;
     PythonInterface *p = PYTHON(opaque);
 
-    callback_args = Py_BuildValue("KKy#", paddr, value, addr, size);
+    callback_args = Py_BuildValue("KKKy#", paddr, vaddr, value, addr, size);
     python_error_check(callback_args);
 
     // Call the callback and check for an error
@@ -347,12 +347,12 @@ static void python_on_memory_write(void *opaque, uint64_t paddr, const uint8_t *
     Py_DECREF(callback_args); 
 }
 
-static void python_on_memory_read(void *opaque, uint64_t paddr, uint8_t *value, void *addr, int size)
+static void python_on_memory_read(void *opaque, uint64_t paddr, uint64_t vaddr, uint8_t *value, void *addr, int size)
 {
     PyObject *callback_args;
     PythonInterface *p = PYTHON(opaque);
 
-    callback_args = Py_BuildValue("KKy#", paddr, value, addr, size);
+    callback_args = Py_BuildValue("KKKy#", paddr, vaddr, value, addr, size);
     python_error_check(callback_args);
 
     // Call the callback and check for an error
@@ -610,7 +610,7 @@ static PyObject *python_set_virtual_memory(PyObject *self, PyObject *args)
     Py_ssize_t size;
     PyObject *bytes = NULL;
 
-    if (PyArg_ParseTuple(args, "iLO", &cpu_id, &address, &bytes)) 
+    if (PyArg_ParseTuple(args, "iLO", &cpu_id, &address, &bytes))
     {
         uint8_t *data = (uint8_t *)PyByteArray_AsString(bytes);
         size = PyByteArray_Size(bytes);
@@ -1318,7 +1318,6 @@ static PyObject *python_init_oshandler(PyObject *self, PyObject *args)
     if (PyArg_ParseTuple(args, "z", &hint_string))
     {
         const char *os_found = qemu_init_oshandler(0, hint_string);
-        printf("Found os %s!\n", os_found);
 
         if(os_found){
             os_string = PyByteArray_FromStringAndSize(os_found, strlen(os_found));
@@ -1414,13 +1413,16 @@ static PyObject *python_get_process_detail_list(PyObject *self, PyObject *args)
 static PyObject *python_get_process_pid_by_name(PyObject *self, PyObject *args)
 {
     char *name = NULL;
+    PyObject *pylong;
 
     if (PyArg_ParseTuple(args, "s", &name)) 
     {
-        OSPid pid = qemu_get_ospid_by_name(name);
+        OSPid os_pid = qemu_get_ospid_by_name(name);
 
-        if( pid != NULL_PID ){
-            return PyLong_FromLong(qemu_get_pid_by_os_process(pid));
+        if( os_pid != NULL_PID ){
+            pylong = PyLong_FromLong(qemu_get_pid_by_os_process(os_pid));
+            qemu_free_ospid(os_pid);
+            return pylong;
         }
     }
     else
@@ -1436,13 +1438,16 @@ static PyObject *python_get_process_pid_by_name(PyObject *self, PyObject *args)
 static PyObject *python_get_process_pid_by_active(PyObject *self, PyObject *args)
 {
     uint64_t cpu_idx = 0;
+    PyObject *pylong;
 
     if (PyArg_ParseTuple(args, "i", &cpu_idx) && cpu_idx > 0)
     {
-        OSPid pid = qemu_get_ospid_by_active(cpu_idx);
+        OSPid os_pid = qemu_get_ospid_by_active(cpu_idx);
 
-        if( pid != NULL_PID ){
-            return PyLong_FromLong(qemu_get_pid_by_os_process(pid));
+        if( os_pid != NULL_PID ){
+            pylong = PyLong_FromLong(qemu_get_pid_by_os_process(os_pid));
+            qemu_free_ospid(os_pid);
+            return pylong;
         }
     }
     else
@@ -1505,6 +1510,7 @@ static void python_timer_delete(PyObject *self)
     QEMUTimer *timer = (QEMUTimer*)PyCapsule_GetPointer(self, NULL);
 
     timer_del(timer);
+    timer_free(timer);
 }
 
 static void python_timer_trigger(void *callable_pyobject)
@@ -1737,6 +1743,92 @@ static PyObject *python_command_pretty_print(PyObject *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
+static PyObject *python_get_process_memory(PyObject *self, PyObject *args)
+{
+    int cpu_id, process_pid;
+    unsigned long long address;
+    Py_ssize_t size;
+    PyObject *pydata = NULL;
+
+    if (PyArg_ParseTuple(args, "iiLn", &cpu_id, &process_pid, &address, &size))
+    {
+        OSPid os_pid = NULL_PID;
+        if(process_pid > 0){
+            os_pid = qemu_get_ospid(process_pid);
+        }
+
+        pydata = PyByteArray_FromStringAndSize((char*)NULL, size);
+        python_error_check(pydata);
+
+        uint8_t *data = (uint8_t *)PyByteArray_AsString(pydata);
+        qemu_process_get_memory(cpu_id, os_pid, address, size, &data);
+        qemu_free_ospid(os_pid);
+        return pydata;
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_get_process_memory requires cpu id (int), pid (int), address (long int), and  size (int).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_set_process_memory(PyObject *self, PyObject *args)
+{
+    unsigned long long address;
+    int cpu_id, process_pid;
+    Py_ssize_t size;
+    PyObject *bytes = NULL;
+
+    if (PyArg_ParseTuple(args, "iiLO", &cpu_id, &process_pid, &address, &bytes))
+    {
+        OSPid os_pid = NULL_PID;
+        if(process_pid > 0){
+            os_pid = qemu_get_ospid(process_pid);
+        }
+
+        uint8_t *data = (uint8_t *)PyByteArray_AsString(bytes);
+        size = PyByteArray_Size(bytes);
+        qemu_process_set_memory(cpu_id, os_pid, address, size, data);
+        qemu_free_ospid(os_pid);
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_set_process_memory requires cpu id (int), pid (int). address (long int), and  data (bytearray).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *python_get_cpu_type(PyObject *self, PyObject *args)
+{
+    int cpu_id;
+    PyObject *arch_string;
+
+    if (PyArg_ParseTuple(args, "i", &cpu_id))
+    {
+        const char *arch_type = qemu_vm_get_arch(cpu_id);
+
+        if(arch_type){
+            arch_string = PyByteArray_FromStringAndSize(arch_type, strlen(arch_type));
+            python_error_check(arch_string);
+            return arch_string;
+        }
+    }
+    else
+    {
+        char message[500];
+        snprintf(message, sizeof(message), "python_get_cpu_type cpu_id (int).");
+        PyErr_SetString(PyExc_TypeError, message);
+    }
+
+    Py_RETURN_NONE;
+}
+
 void qmp_python_exec(const char *script, Error **errp)
 {
     Error* local_err = NULL;
@@ -1862,24 +1954,30 @@ static PyMethodDef pyToQemu[] = {
      "Create a timer for periodic notifications."},
     {"qtimer_start", python_timer_start, METH_VARARGS,
      "Start a timer."},
-     {"save_screenshot", python_save_screenshot, METH_VARARGS,
+    {"save_screenshot", python_save_screenshot, METH_VARARGS,
      "Save a screenshot of the VM to the specified file path."},
-     {"is_kvm_enabled", python_is_kvm_enabled, METH_VARARGS,
+    {"is_kvm_enabled", python_is_kvm_enabled, METH_VARARGS,
      "Returns true when KVM mode is enabled."},
-     {"is_tcg_enabled", python_is_tcg_enabled, METH_VARARGS,
+    {"is_tcg_enabled", python_is_tcg_enabled, METH_VARARGS,
      "Returns true when TCG mode is enabled."},
-     {"get_snapshots", python_get_snapshots, METH_VARARGS,
+    {"get_snapshots", python_get_snapshots, METH_VARARGS,
      "Returns info for the snapshots in the current block drive."},
-     {"get_process_detail_list", python_get_process_detail_list, METH_VARARGS,
+    {"get_process_detail_list", python_get_process_detail_list, METH_VARARGS,
      "Get a list of all processes in the guest OS."},
-     {"add_command", python_add_command, METH_VARARGS,
+    {"add_command", python_add_command, METH_VARARGS,
      "Add the command to this plugin\'s list of handled commands."},
-     {"remove_command", python_remove_command, METH_VARARGS,
+    {"remove_command", python_remove_command, METH_VARARGS,
      "Removes the command from this plugin\'s list of handled commands."},
-     {"command_print", python_command_print, METH_VARARGS,
+    {"command_print", python_command_print, METH_VARARGS,
      "Print to the command console."},
-     {"command_pretty_print", python_command_pretty_print, METH_VARARGS,
+    {"command_pretty_print", python_command_pretty_print, METH_VARARGS,
      "Pretty print to the command console."},
+    {"get_process_memory", python_get_process_memory, METH_VARARGS,
+     "Access the specified process virtual memory."},
+    {"set_process_memory", python_set_process_memory, METH_VARARGS,
+     "Set the requested process memory with the given data."},
+    {"get_cpu_type", python_get_cpu_type, METH_VARARGS,
+     "Get the type as a string for the specified cpu."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -2088,8 +2186,8 @@ static void python_set_callbacks(void *opaque, PluginCallbacks *callbacks)
         PyErr_Clear();
     }
 
-    p->py_callbacks.breakpoint_hit = PyObject_GetAttrString(p->script_module, "on_breakpoint_hit");
-    if (p->py_callbacks.breakpoint_hit && PyCallable_Check(p->py_callbacks.breakpoint_hit))
+    p->py_callbacks.breakpoint = PyObject_GetAttrString(p->script_module, "on_breakpoint");
+    if (p->py_callbacks.breakpoint && PyCallable_Check(p->py_callbacks.breakpoint))
     {
         callbacks->on_breakpoint = python_on_breakpoint;
     }
@@ -2242,7 +2340,7 @@ static void python_iface_initfn(Object *obj)
     p->py_callbacks.get_ra_report_type = NULL;
     p->py_callbacks.execute_instruction = NULL;
     p->py_callbacks.exception = NULL;
-    p->py_callbacks.breakpoint_hit = NULL;
+    p->py_callbacks.breakpoint = NULL;
     p->py_callbacks.memory_read = NULL;
     p->py_callbacks.memory_write = NULL;
     p->py_callbacks.on_syscall = NULL;
@@ -2273,62 +2371,57 @@ static void python_iface_finalize(Object *obj)
     if (p->py_callbacks.ra_start)
     {
         Py_DECREF(p->py_callbacks.ra_start);
-        p->py_callbacks.ra_start = NULL; 
+        p->py_callbacks.ra_start = NULL;
     }
     if (p->py_callbacks.ra_stop)
     {
         Py_DECREF(p->py_callbacks.ra_stop);
-        p->py_callbacks.ra_stop = NULL; 
-    }  
+        p->py_callbacks.ra_stop = NULL;
+    }
     if (p->py_callbacks.ra_idle)
     {
         Py_DECREF(p->py_callbacks.ra_idle);
-        p->py_callbacks.ra_idle = NULL; 
-    } 
+        p->py_callbacks.ra_idle = NULL;
+    }
     if (p->py_callbacks.get_ra_report_type)
     {
         Py_DECREF(p->py_callbacks.get_ra_report_type);
-        p->py_callbacks.get_ra_report_type = NULL;         
-    }   
+        p->py_callbacks.get_ra_report_type = NULL;
+    }
     if (p->py_callbacks.execute_instruction)
     {
         Py_DECREF(p->py_callbacks.execute_instruction);
-        p->py_callbacks.execute_instruction = NULL;         
-    } 
+        p->py_callbacks.execute_instruction = NULL;
+    }
     if (p->py_callbacks.exception)
     {
         Py_DECREF(p->py_callbacks.exception);
-        p->py_callbacks.exception = NULL;         
-    } 
-    if (p->py_callbacks.breakpoint_hit)
+        p->py_callbacks.exception = NULL;
+    }
+    if (p->py_callbacks.breakpoint)
     {
-        Py_DECREF(p->py_callbacks.breakpoint_hit);
-        p->py_callbacks.breakpoint_hit = NULL;         
-    } 
-    if (p->py_callbacks.breakpoint_hit)
-    {
-        Py_DECREF(p->py_callbacks.breakpoint_hit);
-        p->py_callbacks.breakpoint_hit = NULL;         
-    } 
+        Py_DECREF(p->py_callbacks.breakpoint);
+        p->py_callbacks.breakpoint = NULL;
+    }
     if (p->py_callbacks.memory_read)
     {
         Py_DECREF(p->py_callbacks.memory_read);
-        p->py_callbacks.memory_read = NULL;         
-    } 
+        p->py_callbacks.memory_read = NULL;
+    }
     if (p->py_callbacks.memory_write)
     {
         Py_DECREF(p->py_callbacks.memory_write);
-        p->py_callbacks.memory_write = NULL;         
-    } 
+        p->py_callbacks.memory_write = NULL;
+    }
     if (p->py_callbacks.on_syscall)
     {
         Py_DECREF(p->py_callbacks.on_syscall);
-        p->py_callbacks.on_syscall = NULL;  
+        p->py_callbacks.on_syscall = NULL;
     }
     if (p->py_callbacks.vm_change_state_handler)
     {
         Py_DECREF(p->py_callbacks.vm_change_state_handler);
-        p->py_callbacks.vm_change_state_handler = NULL;  
+        p->py_callbacks.vm_change_state_handler = NULL;
     }
     if (p->py_callbacks.on_interrupt)
     {

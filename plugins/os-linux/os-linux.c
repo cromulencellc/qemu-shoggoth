@@ -319,6 +319,28 @@ static bool parse_do_page_fault(Linux* ctxt)
                op1 = &(detail->operands[0]);
                break;
          }
+         // {
+         //    printf("cur_instr is %s (%d)\n", cur_instr->mnemonic, cur_instr->id);
+         //    for(uint32_t n = 0; n < detail->op_count; n++ )
+         //    {
+         //       cs_x86_op *op = &(detail->operands[n]);
+         //       printf("  op->type (size) = %d (%d): ", op->type, op->size);
+         //       if( op->type == X86_OP_REG)
+         //       {
+         //          printf("    OP REG  %d\n", detail->operands[n].reg);
+         //       }else
+         //       if( op->type == X86_OP_IMM )
+         //       {
+         //          printf("    OP IMM  %#"PRIx64"\n", detail->operands[n].imm);
+         //       }else
+         //       if( op->type == X86_OP_MEM )
+         //       {
+         //          printf("    OP MEM BASE %du\n", detail->operands[n].mem.base);
+         //          printf("    OP MEM DISP %ld\n", detail->operands[n].mem.disp);
+         //       }
+         //    }
+         //    printf("\n");
+         // }
 
          // follow the first branch in each function
          // and look for an access to gs:current_task
@@ -486,6 +508,185 @@ static bool parse_vmalloc_fault(Linux* ctxt)
    return false;
 }
 
+// static bool parse_sys_mprotect(Linux* ctxt)
+// {
+//    uint64_t cur_addr = 0;
+//    uint32_t num_instr = 0;
+//    cs_insn* instr = NULL;
+//    x86_reg entry_reg = X86_REG_INVALID;
+//    x86_reg nr_segments_reg = X86_REG_INVALID;
+//    x86_reg segments_reg = X86_REG_INVALID;
+//    x86_reg flags_reg = X86_REG_INVALID;
+//    // x86_reg target_reg = X86_REG_INVALID;
+//    int stage = 0;
+//    x86_reg rdi_arg = X86_REG_INVALID;
+//    x86_reg rsi_arg = X86_REG_INVALID;
+//    x86_reg rdx_arg = X86_REG_INVALID;
+//    x86_reg rcx_arg = X86_REG_INVALID;
+//    x86_reg r8_arg = X86_REG_INVALID;
+
+//    qemu_load_u64(ctxt->cpu->cpu_index, ctxt->sys_call_table+8*246, &cur_addr);
+
+//    // sys_kexec_load -> machine_kexec_prepare
+
+// // var 1
+// // sys_kexec_load+11   49 89 FE                                mov     r14, rdi
+// // sys_kexec_load+14   53                                      push    rbx
+// // sys_kexec_load+15   BF 16 00 00 00                          mov     edi, 16h
+// // sys_kexec_load+1A   49 89 F4                                mov     r12, rsi
+// // sys_kexec_load+1D   49 89 D7                                mov     r15, rdx
+// // sys_kexec_load+20   48 89 CB                                mov     rbx, rcx
+
+// // sys_kexec_load+123  48 8D 7D C8                             lea     rdi, [rbp-38h]
+// // sys_kexec_load+127  4C 89 F6                                mov     rsi, r14
+// // sys_kexec_load+12A  49 89 D8                                mov     r8, rbx
+// // sys_kexec_load+12D  4C 89 F9                                mov     rcx, r15
+// // sys_kexec_load+130  4C 89 E2                                mov     rdx, r12
+// // sys_kexec_load+133  49 C7 C5 10 81 16 82                    mov     r13, offset kexec_image
+// // sys_kexec_load+13A  E8 51 FD FF FF                          call    kimage_alloc_init
+
+// // var 2
+// // .text:FFFFFFFF811213DB 48 8B 5F 38                             mov     rbx, [rdi+38h]
+// // .text:FFFFFFFF811213DF 4C 8B 67 60                             mov     r12, [rdi+60h]
+// // .text:FFFFFFFF811213E3 48 8B 6F 68                             mov     rbp, [rdi+68h]
+// // .text:FFFFFFFF811213E7 4C 8B 6F 70                             mov     r13, [rdi+70h]
+
+// //       FFFFF81121475 48 89 D9                                   mov     rcx, rbx
+// // .text:FFFFFFFF81121478 4C 89 E2                                mov     rdx, r12
+// // .text:FFFFFFFF8112147B 48 89 EE                                mov     rsi, rbp
+// // .text:FFFFFFFF8112147E 4C 89 EF                                mov     rdi, r13
+// // .text:FFFFFFFF81121481 E8 4A FB FF FF                          call    do_kexec_load
+
+//    for(uint32_t i = 0; i < 50; i++)
+//    {
+//       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+//       for(uint32_t j = 0; j < num_instr; j++)
+//       {
+//          cs_insn* cur_instr = &instr[j];
+//          cs_x86* detail = &(cur_instr->detail->x86);
+//          cs_x86_op *op1 = NULL;
+//          cs_x86_op *op2 = NULL;
+//          switch(detail->op_count)
+//          {
+//             case 2:
+//                op2 = &(detail->operands[1]);
+//             case 1:
+//                op1 = &(detail->operands[0]);
+//                break;
+//          }
+
+//          {
+//             printf("cur_instr is %s (%d)\n", cur_instr->mnemonic, cur_instr->id);
+//             for(uint32_t n = 0; n < detail->op_count; n++ )
+//             {
+//                cs_x86_op *op = &(detail->operands[n]);
+//                printf("  op->type (size) = %d (%d): ", op->type, op->size);
+//                if( op->type == X86_OP_REG)
+//                {
+//                   printf("    OP REG  %d\n", detail->operands[n].reg);
+//                }else
+//                if( op->type == X86_OP_IMM )
+//                {
+//                   printf("    OP IMM  %#"PRIx64"\n", detail->operands[n].imm);
+//                }else
+//                if( op->type == X86_OP_MEM )
+//                {
+//                   printf("    OP MEM BASE %du\n", detail->operands[n].mem.base);
+//                   printf("    OP MEM DISP %ld\n", detail->operands[n].mem.disp);
+//                }
+//             }
+//             printf("\n");
+//          }
+         
+//          // use input args to find kmexec_machine_prepare
+//          if(stage < 4){
+//             // get input arguments
+//             if(cur_instr->id == X86_INS_MOV
+//                && op1->type == X86_OP_REG
+//                && op1->size == 8
+//                && ((stage == 3 && op2->type == X86_OP_MEM && op2->mem.segment == X86_REG_RDI)
+//                || (op2->type == X86_OP_REG && op2->reg == X86_REG_RDI)))
+//             {
+//                entry_reg = op1->reg;
+//                stage++;
+//             }else if(cur_instr->id == X86_INS_MOV
+//                && op1->type == X86_OP_REG
+//                && op1->size == 8
+//                && ((stage == 2 && op2->type == X86_OP_MEM && op2->mem.segment == X86_REG_RDI)
+//                || (op2->type == X86_OP_REG && op2->reg == X86_REG_RSI)))
+//             {
+//                nr_segments_reg = op1->reg;
+//                stage++;
+//             }else if(cur_instr->id == X86_INS_MOV
+//                && op1->type == X86_OP_REG
+//                && op1->size == 8
+//                && ((stage == 1 && op2->type == X86_OP_MEM && op2->mem.segment == X86_REG_RDI)
+//                || (op2->type == X86_OP_REG && op2->reg == X86_REG_RDX)))
+//             {
+//                segments_reg = op1->reg;
+//                stage++;
+//             }else if(cur_instr->id == X86_INS_MOV
+//                && op1->type == X86_OP_REG
+//                && op1->size == 8
+//                && ((stage == 0 && op2->type == X86_OP_MEM && op2->mem.segment == X86_REG_RDI)
+//                || (op2->type == X86_OP_REG && op2->reg == X86_REG_RCX)))
+//             {
+//                flags_reg = op1->reg;
+//                stage++;
+//             }
+//          }else if(stage == 4)
+//          {
+//             // look for pass to arguments
+//             if(cur_instr->id == X86_INS_MOV
+//                && op1->type == X86_OP_REG
+//                && op2->type == X86_OP_REG)
+//             {
+//                if(op1->reg == X86_REG_RDI){
+//                   rdi_arg = op2->reg;
+//                }else if(op1->reg == X86_REG_RSI){
+//                   rsi_arg = op2->reg;
+//                }else if(op1->reg == X86_REG_RDX){
+//                   rdx_arg = op2->reg;
+//                }else if(op1->reg == X86_REG_RCX){
+//                   rcx_arg = op2->reg;
+//                }else if(op1->reg == X86_REG_R8){
+//                   r8_arg = op2->reg;
+//                }
+//             }else
+//             if(cur_instr->id == X86_INS_CALL
+//                && op1->type == X86_OP_IMM)
+//             {
+//                if( rdi_arg == entry_reg
+//                   && rsi_arg == nr_segments_reg
+//                   && rdx_arg == segments_reg
+//                   && rcx_arg == flags_reg)
+//                {
+//                   if(r8_arg == X86_REG_INVALID)
+//                   {
+//                      // this do_kexec_load so follow it...
+//                      cur_addr = op1->imm;
+//                      break;
+//                   }else{
+//                      // this is kimage_alloc_init so the return image is in rdi
+                     
+//                   }
+                  
+//                }
+
+//                rdi_arg = X86_REG_INVALID;
+//                rsi_arg = X86_REG_INVALID;
+//                rdx_arg = X86_REG_INVALID;
+//                rcx_arg = X86_REG_INVALID;
+//                r8_arg = X86_REG_INVALID;
+//             }
+//          }
+//       }
+//    }
+
+//    return false;
+// }
+
 static bool parse_sys_mprotect(Linux* ctxt)
 {
    uint64_t cur_addr = 0;
@@ -527,6 +728,29 @@ static bool parse_sys_mprotect(Linux* ctxt)
                op1 = &(detail->operands[0]);
                break;
          }
+
+         // if(stage == 3){
+         //    printf("cur_instr is %s (%d)\n", cur_instr->mnemonic, cur_instr->id);
+         //    for(uint32_t n = 0; n < detail->op_count; n++ )
+         //    {
+         //       cs_x86_op *op = &(detail->operands[n]);
+         //       printf("  op->type (size) = %d (%d): ", op->type, op->size);
+         //       if( op->type == X86_OP_REG)
+         //       {
+         //          printf("    OP REG  %d\n", detail->operands[n].reg);
+         //       }else
+         //       if( op->type == X86_OP_IMM )
+         //       {
+         //          printf("    OP IMM  %#"PRIx64"\n", detail->operands[n].imm);
+         //       }else
+         //       if( op->type == X86_OP_MEM )
+         //       {
+         //          printf("    OP MEM BASE %du\n", detail->operands[n].mem.base);
+         //          printf("    OP MEM DISP %ld\n", detail->operands[n].mem.disp);
+         //       }
+         //    }
+         //    printf("\n");
+         // }
 
          if(stage == 0)
          {
@@ -672,6 +896,183 @@ static bool parse_sys_mprotect(Linux* ctxt)
       cs_free(instr, num_instr);
    }
 
+   // uint64_t inner_addr = 0;
+   // cs_insn* inner_instr = NULL;
+   // uint32_t num_inner = 0;
+   // // lookup failed in base function of change_protection...
+   // // so proceed to look in inner functions for phys_base.
+   // if( current_call )
+   // {
+   //    printf("Lookup failed, try again in change_protection %lX\n", current_call);
+   //    for(uint32_t i = 0; i < 30; i++)
+   //    {
+   //       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+   //       for(uint32_t j = 0; j < num_instr; j++)
+   //       {
+   //          cs_insn* cur_instr = &instr[j];
+   //          // {
+   //          //    cs_x86* detail = &(cur_instr->detail->x86);
+   //          //    printf("cur_instr is %s (%d)\n", cur_instr->mnemonic, cur_instr->id);
+   //          //    for(uint32_t n = 0; n < detail->op_count; n++ )
+   //          //    {
+   //          //       cs_x86_op *op = &(detail->operands[n]);
+   //          //       printf("  op->type (size) = %d (%d): ", op->type, op->size);
+   //          //       if( op->type == X86_OP_REG)
+   //          //       {
+   //          //          printf("    OP REG  %d\n", detail->operands[n].reg);
+   //          //       }else
+   //          //       if( op->type == X86_OP_IMM )
+   //          //       {
+   //          //          printf("    OP IMM  %#"PRIx64"\n", detail->operands[n].imm);
+   //          //       }else
+   //          //       if( op->type == X86_OP_MEM )
+   //          //       {
+   //          //          printf("    OP MEM BASE %du\n", detail->operands[n].mem.base);
+   //          //          printf("    OP MEM DISP %ld\n", detail->operands[n].mem.disp);
+   //          //       }
+   //          //    }
+   //          //    printf("\n");
+   //          // }
+
+   //          if(cur_instr->id == X86_INS_CALL
+   //             && cur_instr->detail->x86.operands[0].type == X86_OP_IMM)
+   //          {
+   //             inner_addr = cur_instr->detail->x86.operands[0].imm;
+
+   //             for(uint32_t k = 0; k < 2000; k++)
+   //             {
+   //                num_inner = disassemble_mem(ctxt, &inner_instr, inner_addr);
+
+   //                for(uint32_t l = 0; l < num_inner; l++)
+   //                {
+   //                   cs_insn* cur_inner_instr = &inner_instr[l];
+   //                   cs_x86* detail = &(cur_inner_instr->detail->x86);
+   //                   cs_x86_op *op1 = NULL;
+   //                   cs_x86_op *op2 = NULL;
+   //                   switch(detail->op_count)
+   //                   {
+   //                      case 2:
+   //                         op2 = &(detail->operands[1]);
+   //                      case 1:
+   //                         op1 = &(detail->operands[0]);
+   //                         break;
+   //                   }
+
+   //                   if(cur_inner_instr->id == X86_INS_CMOVB
+   //                      && op1->type == X86_OP_REG
+   //                      && op2->type == X86_OP_MEM
+   //                      && op2->mem.base == X86_REG_RIP)
+   //                   {
+   //                      printf("found phys_base!!!!!!!!!!!!!!!!!!\n");
+   //                      ctxt->phys_base_ptr = inner_addr + cur_inner_instr->size + op2->mem.disp;
+   //                      qemu_load_u64(ctxt->cpu->cpu_index, ctxt->phys_base_ptr, &ctxt->phys_base);
+   //                      cs_free(inner_instr, num_inner);
+   //                      cs_free(instr, num_instr);
+   //                      return true;
+   //                   }
+
+   //                   inner_addr += cur_inner_instr->size;
+   //                }
+
+   //                cs_free(inner_instr, num_inner);
+   //             }
+   //          }
+
+   //          cur_addr += cur_instr->size;
+   //       }
+
+   //       cs_free(instr, num_instr);
+   //    }
+   // }
+
+   // // lookup failed in base function of change_protection...
+   // // so proceed to look in inner functions for phys_base.
+   // if( current_call )
+   // {
+   //    printf("Lookup failed, going into inner functions for %lX\n", current_call);
+   //    for(uint32_t i = 0; i < 30; i++)
+   //    {
+   //       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+   //       for(uint32_t j = 0; j < num_instr; j++)
+   //       {
+   //          cs_insn* cur_instr = &instr[j];
+   //          // {
+   //          //    cs_x86* detail = &(cur_instr->detail->x86);
+   //          //    printf("cur_instr is %s (%d)\n", cur_instr->mnemonic, cur_instr->id);
+   //          //    for(uint32_t n = 0; n < detail->op_count; n++ )
+   //          //    {
+   //          //       cs_x86_op *op = &(detail->operands[n]);
+   //          //       printf("  op->type (size) = %d (%d): ", op->type, op->size);
+   //          //       if( op->type == X86_OP_REG)
+   //          //       {
+   //          //          printf("    OP REG  %d\n", detail->operands[n].reg);
+   //          //       }else
+   //          //       if( op->type == X86_OP_IMM )
+   //          //       {
+   //          //          printf("    OP IMM  %#"PRIx64"\n", detail->operands[n].imm);
+   //          //       }else
+   //          //       if( op->type == X86_OP_MEM )
+   //          //       {
+   //          //          printf("    OP MEM BASE %du\n", detail->operands[n].mem.base);
+   //          //          printf("    OP MEM DISP %ld\n", detail->operands[n].mem.disp);
+   //          //       }
+   //          //    }
+   //          //    printf("\n");
+   //          // }
+
+   //          if(cur_instr->id == X86_INS_CALL
+   //             && cur_instr->detail->x86.operands[0].type == X86_OP_IMM)
+   //          {
+   //             inner_addr = cur_instr->detail->x86.operands[0].imm;
+
+   //             for(uint32_t k = 0; k < 2000; k++)
+   //             {
+   //                num_inner = disassemble_mem(ctxt, &inner_instr, inner_addr);
+
+   //                for(uint32_t l = 0; l < num_inner; l++)
+   //                {
+   //                   cs_insn* cur_inner_instr = &inner_instr[l];
+   //                   cs_x86* detail = &(cur_inner_instr->detail->x86);
+   //                   cs_x86_op *op1 = NULL;
+   //                   cs_x86_op *op2 = NULL;
+   //                   switch(detail->op_count)
+   //                   {
+   //                      case 2:
+   //                         op2 = &(detail->operands[1]);
+   //                      case 1:
+   //                         op1 = &(detail->operands[0]);
+   //                         break;
+   //                   }
+
+   //                   if(cur_inner_instr->id == X86_INS_CMOVB
+   //                      && op1->type == X86_OP_REG
+   //                      && op2->type == X86_OP_MEM
+   //                      && op2->mem.base == X86_REG_RIP)
+   //                   {
+   //                      printf("found phys_base!!!!!!!!!!!!!!!!!!\n");
+   //                      ctxt->phys_base_ptr = inner_addr + cur_inner_instr->size + op2->mem.disp;
+   //                      qemu_load_u64(ctxt->cpu->cpu_index, ctxt->phys_base_ptr, &ctxt->phys_base);
+   //                      cs_free(inner_instr, num_inner);
+   //                      cs_free(instr, num_instr);
+   //                      return true;
+   //                   }
+
+   //                   inner_addr += cur_inner_instr->size;
+   //                }
+
+   //                cs_free(inner_instr, num_inner);
+   //             }
+   //          }
+
+   //          cur_addr += cur_instr->size;
+   //       }
+
+   //       cs_free(instr, num_instr);
+   //    }
+   // }
+
    return false;
 }
 
@@ -720,6 +1121,33 @@ static uint64_t find_syscall_table(Linux* ctxt, uint64_t routine)
    for(uint32_t i = 0; i < 50; i++)
    {
       num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+      // for(uint32_t j = 0; j < num_instr; j++)
+      // {
+      //    cs_insn* cur_instr = &instr[j];
+      //    cs_detail *detail = cur_instr->detail;
+      //    printf("cur_instr is %s (%d)\n", cur_instr->mnemonic, cur_instr->id);
+      //    for(uint32_t n = 0; n < detail->x86.op_count; n++ )
+      //    {
+      //       cs_x86_op *op = &(detail->x86.operands[n]);
+      //       printf("  op->type = %d: ", op->type);
+      //       if( op->type == X86_OP_REG)
+      //       {
+      //          printf("    OP REG  %d\n", detail->x86.operands[n].reg);
+      //       }else
+      //       if( op->type == X86_OP_IMM )
+      //       {
+      //          printf("    OP IMM  %#"PRIx64"\n", detail->x86.operands[n].imm);
+      //       }else
+      //       if( op->type == X86_OP_MEM )
+      //       {
+      //          printf("    OP MEM SEGMENT %du\n", detail->x86.operands[n].mem.segment);
+      //          printf("    OP MEM SCALE %d\n", detail->x86.operands[n].mem.scale);
+      //          printf("    OP MEM BASE %du\n", detail->x86.operands[n].mem.base);
+      //          printf("    OP MEM DISP %lX\n", detail->x86.operands[n].mem.disp);
+      //       }
+      //    }
+      // }
 
       for(uint32_t j = 0; j < num_instr; j++)
       {
@@ -869,6 +1297,91 @@ static bool parse_do_error_trap(Linux* ctxt)
    return false;
 }
 
+/* // Handles an ubuntu type kernel
+static bool parse_do_error_trap2(Linux* ctxt, CPUState* cs)
+{
+   uint64_t cur_addr = 0;
+
+   uint32_t num_instr = 0;
+   uint32_t inst_count = 0;
+
+   bool found = false;
+
+   cs_insn* instr = NULL;
+
+   cur_addr = ctxt->do_error_trap;
+   for(uint32_t i = 0; i < 50; i++)
+   {
+      num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+      for(uint32_t j = 0; j < num_instr; j++)
+      {
+         cs_insn* cur_instr = &instr[j];
+
+         // EOUTPUT("mnemonic %s\n", cur_instr->mnemonic);
+         if(strncmp(cur_instr->mnemonic, "call", sizeof(cur_instr->mnemonic)) == 0)
+         {
+            if(inst_count == 0)
+            {
+               for(uint32_t k = 0; k < cur_instr->detail->x86.op_count; k++)
+               {
+                  // EOUTPUT("operands[%d] = ", k);
+                  switch(cur_instr->detail->x86.operands[k].type)
+                  {
+                     case X86_OP_REG:
+                        // EOUTPUT("  OP REG  %d\n", cur_instr->detail->x86.operands[k].reg);
+                        break;
+                     case X86_OP_IMM:
+                        // EOUTPUT("  OP IMM  %#"PRIx64"\n", cur_instr->detail->x86.operands[k].imm);
+                        ctxt->do_error_trap = cur_instr->detail->x86.operands[k].imm;
+
+                        found = true;
+                        break;
+                     case X86_OP_MEM:
+                        // EOUTPUT("  OP MEM SEGMENT: %#"PRIx64" BASE %#"PRIx64" INDEX %#"PRIx64" SCALE %#"PRIx64
+                        //    " DISP %#"PRIx64"\n", cur_instr->detail->x86.operands[k].mem.segment,
+                        //    cur_instr->detail->x86.operands[k].mem.base, cur_instr->detail->x86.operands[k].mem.index,
+                        //    cur_instr->detail->x86.operands[k].mem.scale, cur_instr->detail->x86.operands[k].mem.disp);
+                        break;
+                     case X86_OP_FP:
+                        // EOUTPUT("  OP FP \n");
+                        break;
+                     case X86_OP_INVALID:
+                        break;
+                     default:
+                        break;
+                  }
+               }
+               break;
+            }
+            else
+            {
+               inst_count++;
+            }
+         }
+
+         cur_addr += cur_instr->size;
+      }
+
+      cs_free(instr, num_instr);
+
+      if(found)
+         break;
+   }
+
+   // EOUTPUT("do_trap = %#"PRIx64"\n", ctxt->do_trap);
+
+   if(!found)
+   {
+       // EOUTPUT("Could not find do_trap\n");
+      goto fail;
+   }
+   return parse_do_error_trap(ctxt, cs);
+
+fail:
+   return found;
+}
+*/
+
 static bool uint_in_list(uint64List* list, uint64_t val)
 {
    for(; list; list=list->next)
@@ -980,6 +1493,12 @@ static void parse_task_child_ptrs(Linux* ctxt, Process* task, CPUState* cpu, uin
    }
 }
 
+// static void parse_task_sibling_ptrs(Process* task, CPUState* cpu, uint64List* siblings)
+// {
+//    if(task->u.lnx.sibling_list_next == task->u.lnx.sibling_list_prev)
+//       return;
+// }
+
 static void parse_vm_area_struct(Linux* ctxt, Process *task, TaskMemoryInfo* mem_info, CPUState* cpu)
 {
    uint64_t ptr = mem_info->base_ptr;
@@ -993,6 +1512,27 @@ static void parse_vm_area_struct(Linux* ctxt, Process *task, TaskMemoryInfo* mem
       uint64_t prev = 0;
 
       vm_info = g_new0(VmAreaInfo, 1);
+
+      // if(!strcmp(task->name,"systemd")){//core.27815")){
+      //    unsigned long a, b, c, d, e, f, g;
+
+      //    if(!qemu_load_u64(ctxt->cpu->cpu_index, ptr + 0, &a) ||
+      //       !qemu_load_u64(ctxt->cpu->cpu_index, ptr + 8, &b) ||
+      //       !qemu_load_u64(ctxt->cpu->cpu_index, ptr + 0x10, &c) ||
+      //       !qemu_load_u64(ctxt->cpu->cpu_index, ptr + 0x18, &d) ||
+      //       !qemu_load_u64(ctxt->cpu->cpu_index, ptr + 0x20, &e) ||
+      //       !qemu_load_u64(ctxt->cpu->cpu_index, ptr + 0x28, &f) ||
+      //       !qemu_load_u64(ctxt->cpu->cpu_index, ptr + 0x30, &g)){
+      //       return;
+      //    }
+      //    printf("0x00 = %#"PRIx64"\n", a);
+      //    printf("0x08 = %#"PRIx64"\n", b);
+      //    printf("0x10 = %#"PRIx64"\n", c);
+      //    printf("0x18 = %#"PRIx64"\n", d);
+      //    printf("0x20 = %#"PRIx64"\n", e);
+      //    printf("0x28 = %#"PRIx64"\n", f);
+      //    printf("0x30 = %#"PRIx64"\n", g);
+      // }
 
       if(!qemu_load_u64(ctxt->cpu->cpu_index, ptr + VM_AREA_VM_NEXT_OFS, &next) ||
          !qemu_load_u64(ctxt->cpu->cpu_index, ptr + VM_AREA_VM_PREV_OFS, &prev) ||
@@ -1065,6 +1605,31 @@ static bool parse_mm_struct(Linux* ctxt, Process* task, CPUState* cpu)
       !qemu_load_u64(ctxt->cpu->cpu_index, mm_ptr + MM_STRUCT_HIGHEST_VM_END_OFS, &info->highest_vm_end)){
       return false;
    }
+   //    printf("mmap_base = %#"PRIx64"\n", info->mmap_base);
+   //    printf("mmap_legacy_base = %#"PRIx64"\n", info->mmap_legacy_base);
+   //    printf("task_size = %#"PRIx64"\n", info->task_size);
+   //    printf("highest_vm_end = %#"PRIx64"\n", info->highest_vm_end);
+
+   // if(!strcmp(task->name,"systemd")){//core.27815")){
+   //    unsigned long a, b, c, d, e, f, g;
+
+   //    if(!qemu_load_u64(ctxt->cpu->cpu_index, mm_ptr + 0, &a) ||
+   //       !qemu_load_u64(ctxt->cpu->cpu_index, mm_ptr + 8, &b) ||
+   //       !qemu_load_u64(ctxt->cpu->cpu_index, mm_ptr + 0x10, &c) ||
+   //       !qemu_load_u64(ctxt->cpu->cpu_index, mm_ptr + 0x18, &d) ||
+   //       !qemu_load_u64(ctxt->cpu->cpu_index, mm_ptr + 0x20, &e) ||
+   //       !qemu_load_u64(ctxt->cpu->cpu_index, mm_ptr + 0x28, &f) ||
+   //       !qemu_load_u64(ctxt->cpu->cpu_index, mm_ptr + 0x30, &g)){
+   //       return false;
+   //    }
+   //    printf("0x00 = %#"PRIx64"\n", a);
+   //    printf("0x08 = %#"PRIx64"\n", b);
+   //    printf("0x10 = %#"PRIx64"\n", c);
+   //    printf("0x18 = %#"PRIx64"\n", d);
+   //    printf("0x20 = %#"PRIx64"\n", e);
+   //    printf("0x28 = %#"PRIx64"\n", f);
+   //    printf("0x30 = %#"PRIx64"\n", g);
+   // }
 
    parse_vm_area_struct(ctxt, task, info, cpu);
 
@@ -1114,11 +1679,18 @@ static bool parse_mm_struct(Linux* ctxt, Process* task, CPUState* cpu)
 
 static bool parse_task_struct(Linux* ctxt, CPUState* cpu, uint64_t ptask, Process* new_task)
 {
+   // uint64_t stack_canary = 0;
+
+   // uint32_t search_len = 0;
+   // uint32_t ret = 0;
    char *comm_name = NULL;
 
+   // X86CPU *x86_cpu = X86_CPU(cpu);
+   // CPUX86State *env = &x86_cpu->env;
 
    // EOUTPUT("cr3 = %#"PRIx64"\n", env->cr[3]);
 
+   // uint64_t ptask = 0;
 
    // EOUTPUT("ctxt->current_task = %#"PRIx64"\n", ctxt->current_task);
 
@@ -1203,8 +1775,17 @@ static bool parse_task_struct(Linux* ctxt, CPUState* cpu, uint64_t ptask, Proces
          }
       }
    }
+         // printf("new_task->info->pid != 0\n");
 
    // EOUTPUT("stack canary = %#"PRIx64"\n", new_task->stack_canary);
+
+   // for(uint32_t i = 0; i < 0x1000; i+=8)
+   // {
+   //    uint64_t tmp = 0;
+   //    uint8_t tmp_comm[16] = {0};
+      
+   //    EOUTPUT("ORIG OFS = %08X    comm = %s\n", i, tmp_comm);
+   // }
 
    // For 32-bit change sizeof(uint64_t) to sizeof(uint32_t), 
    // this would preferably be done with a dynamically assigned pointer size per system
@@ -1257,6 +1838,9 @@ static bool parse_task_struct(Linux* ctxt, CPUState* cpu, uint64_t ptask, Proces
    uint64_t next_task = new_task->info->procaddr + TASK_LIST_CHILD_LIST_HEAD_OFS;
    if(new_task->u.lnx.child_list_next != next_task || new_task->u.lnx.child_list_prev != next_task)
       parse_task_child_ptrs(ctxt, new_task, cpu, new_task->u.lnx.children);
+
+   // if(new_task->u.lnx.sibling_list_next != new_task->u.lnx.sibling_list_prev)
+   //    parse_task_sibling_ptrs(new_task, cpu, new_task->u.lnx.siblings);
 
    // EOUTPUT("child list prev = %#"PRIx64"\nchild list next = %#"PRIx64"\n", child_list_prev, child_list_next);
    // EOUTPUT("\n");
@@ -1347,6 +1931,40 @@ static int64_t find_comm_offset(Linux* ctxt)
 
    cs_insn* instr = NULL;
    
+   // for(uint32_t i = 0; i < 50; i++)
+   // {
+   //    num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+   //    for(uint32_t j = 0; j < num_instr; j++)
+   //    {
+   //       cs_insn* cur_instr = &instr[j];
+   //       cs_detail *detail = cur_instr->detail;
+   //       printf("cur_instr is %s (%d)\n", cur_instr->mnemonic, cur_instr->id);
+   //       for(uint32_t n = 0; n < detail->x86.op_count; n++ )
+   //       {
+   //          cs_x86_op *op = &(detail->x86.operands[n]);
+   //          printf("  op->type = %d: ", op->type);
+   //          if( op->type == X86_OP_REG)
+   //          {
+   //             printf("    OP REG  %d\n", detail->x86.operands[n].reg);
+   //          }else
+   //          if( op->type == X86_OP_IMM )
+   //          {
+   //             printf("    OP IMM  %#"PRIx64"\n", detail->x86.operands[n].imm);
+   //          }else
+   //          if( op->type == X86_OP_MEM )
+   //          {
+   //             printf("    OP MEM SEGMENT %du\n", detail->x86.operands[n].mem.segment);
+   //             printf("    OP MEM SCALE %d\n", detail->x86.operands[n].mem.scale);
+   //             printf("    OP MEM BASE %du\n", detail->x86.operands[n].mem.base);
+   //             printf("    OP MEM DISP %lX\n", detail->x86.operands[n].mem.disp);
+   //          }
+   //       }
+   //    }
+
+   //    cs_free(instr, num_instr);
+   // }
+
    cur_addr = ctxt->do_trap;
 
    // look for it directly as an arg to printk in do_trap
@@ -1495,6 +2113,92 @@ static int64_t find_comm_offset(Linux* ctxt)
 
    return 0;
 }
+   // qemu_load_u64(ctxt->cpu->cpu_index, ctxt->sys_call_table+8*279, &cur_addr);
+   // target_reg = X86_REG_INVALID;
+   // comm_offset = 0;
+   // stage = 0;
+
+   // for(uint32_t i = 0; i < 120; i++)
+   // {
+   //    num_instr = disassemble_mem(ctxt, &instr, cur_addr);
+
+   //    for(uint32_t j = 0; j < num_instr; j++)
+   //    {
+   //       cs_insn* cur_instr = &instr[j];
+   //       cs_x86 *detail = &(cur_instr->detail->x86);
+
+   //       // do we know which register is the current task?
+   //       if(target_reg != X86_REG_INVALID)
+   //       {
+   //          // check if the register is being moved
+   //          if(cur_instr->id == X86_INS_MOV
+   //             && detail->operands[0].type == X86_OP_REG
+   //             && detail->operands[1].type == X86_OP_REG
+   //             && detail->operands[1].reg == target_reg)
+   //          {
+   //             // move the register
+   //             target_reg = detail->operands[0].reg;
+   //          }else
+   //          // check if the register is being used
+   //          if(stage == 2
+   //             && cur_instr->id == X86_INS_MOV
+   //             && detail->operands[0].type == X86_OP_REG
+   //             && detail->operands[1].type == X86_OP_MEM
+   //             && detail->operands[1].mem.base == target_reg)
+   //          {
+   //             // found a usage, wait for access to euid to validate
+   //             comm_offset = (detail->operands[1].mem.disp + 0x10);
+   //             comm_reg = detail->operands[0].reg;
+   //          }else
+   //          // check for use in comparison
+   //          if(stage == 2
+   //             && cur_instr->id == X86_INS_CMP
+   //             && detail->operands[0].type == X86_OP_REG
+   //             && detail->operands[0].size == 4
+   //             && detail->operands[1].type == X86_OP_MEM
+   //             && detail->operands[1].mem.base == comm_reg
+   //             && comm_reg != X86_REG_INVALID)
+   //          {
+   //             // found it...
+   //             cs_free(instr, num_instr);
+   //             return comm_offset;
+   //          }else
+   //          // target reg is being passed into call... follow it...
+   //          if(cur_instr->id == X86_INS_CALL
+   //             && detail->operands[0].type == X86_OP_IMM
+   //             && target_reg == X86_REG_RDI)
+   //          {
+   //             cur_addr = detail->operands[0].imm;
+   //             stage++;
+   //             break;
+   //          }
+   //       }else{
+   //          // find register holding current task
+   //          cs_x86_op *op1 = &(detail->operands[0]);
+   //          cs_x86_op *op2 = &(detail->operands[1]);
+   //          if(cur_instr->id == X86_INS_MOV
+   //             && op1->type == X86_OP_REG
+   //             && op2->type == X86_OP_MEM
+   //             && op2->mem.segment == X86_REG_GS
+   //             && (ctxt->kern_gs_base + op2->mem.disp) == ctxt->current_task)
+   //          {
+   //             target_reg = op1->reg;
+   //          }else
+   //          // we shouldn't hit any calls before accessing current_task
+   //          // so follow the calls if we do find them...
+   //          if(cur_instr->id == X86_INS_CALL
+   //             && op1->type == X86_OP_IMM)
+   //          {
+   //             cur_addr = op1->imm;
+   //             break;
+   //          }
+   //       }
+
+   //       cur_addr += cur_instr->size;
+   //    }
+
+   //    cs_free(instr, num_instr);
+   // }
 
 static int64_t find_pid_offset(Linux* ctxt)
 {
@@ -1786,6 +2490,31 @@ static int64_t find_pids_offset(Linux* ctxt)
 
       for(uint32_t j = 0; j < num_instr; j++)
       {
+         // {
+         //    cs_insn* cur_instr = &instr[j];
+         //    cs_detail *detail = cur_instr->detail;
+         //    printf("cur_instr is %s (%d)\n", cur_instr->mnemonic, cur_instr->id);
+         //    for(uint32_t n = 0; n < detail->x86.op_count; n++ )
+         //    {
+         //       cs_x86_op *op = &(detail->x86.operands[n]);
+         //       printf("  op->type (size) = %d (%d): ", op->type, op->size);
+         //       if( op->type == X86_OP_REG)
+         //       {
+         //          printf("    OP REG  %d\n", detail->x86.operands[n].reg);
+         //       }else
+         //       if( op->type == X86_OP_IMM )
+         //       {
+         //          printf("    OP IMM  %#"PRIx64"\n", detail->x86.operands[n].imm);
+         //       }else
+         //       if( op->type == X86_OP_MEM )
+         //       {
+         //          printf("    OP MEM BASE %du\n", detail->x86.operands[n].mem.base);
+         //          printf("    OP MEM DISP %ld\n", detail->x86.operands[n].mem.disp);
+         //       }
+         //    }
+         //    printf("\n");
+         // }
+
          cs_insn* cur_instr = &instr[j];
          cs_x86 *detail = &(cur_instr->detail->x86);
          cs_x86_op *op1 = NULL;

@@ -31,6 +31,7 @@
 #include <timer.h>
 #include <elf-abi.h>
 #include <errorlog.h>
+#include <occ.h>
 
 /* Pending events to signal via opal_poll_events */
 uint64_t opal_pending_events;
@@ -92,19 +93,12 @@ long opal_bad_token(uint64_t token)
 	return OPAL_PARAMETER;
 }
 
-/* Called from head.S, thus no prototype */
-void opal_trace_entry(struct stack_frame *eframe);
-
-void opal_trace_entry(struct stack_frame *eframe)
+#ifdef OPAL_TRACE_ENTRY
+static void opal_trace_entry(struct stack_frame *eframe __unused)
 {
 	union trace t;
 	unsigned nargs, i;
 
-	if (this_cpu()->pir != mfspr(SPR_PIR)) {
-		printf("CPU MISMATCH ! PIR=%04lx cpu @%p -> pir=%04x\n",
-		       mfspr(SPR_PIR), this_cpu(), this_cpu()->pir);
-		abort();
-	}
 	if (eframe->gpr[0] > OPAL_LAST)
 		nargs = 0;
 	else
@@ -118,6 +112,222 @@ void opal_trace_entry(struct stack_frame *eframe)
 
 	trace_add(&t, TRACE_OPAL, offsetof(struct trace_opal, r3_to_11[nargs]));
 }
+#endif
+
+/*
+ * opal_quiesce_state is used as a lock. Don't use an actual lock to avoid
+ * lock busting.
+ */
+static uint32_t opal_quiesce_state;	/* 0 or QUIESCE_HOLD/QUIESCE_REJECT */
+static int32_t opal_quiesce_owner;	/* PIR */
+static int32_t opal_quiesce_target;	/* -1 or PIR */
+
+static int64_t opal_check_token(uint64_t token);
+
+/* Called from head.S, thus no prototype */
+int64_t opal_entry_check(struct stack_frame *eframe);
+
+int64_t opal_entry_check(struct stack_frame *eframe)
+{
+	struct cpu_thread *cpu = this_cpu();
+	uint64_t token = eframe->gpr[0];
+
+	if (cpu->pir != mfspr(SPR_PIR)) {
+		printf("CPU MISMATCH ! PIR=%04lx cpu @%p -> pir=%04x token=%llu\n",
+		       mfspr(SPR_PIR), cpu, cpu->pir, token);
+		abort();
+	}
+
+#ifdef OPAL_TRACE_ENTRY
+	opal_trace_entry(eframe);
+#endif
+
+	if (!opal_check_token(token))
+		return opal_bad_token(token);
+
+	if (!opal_quiesce_state && cpu->in_opal_call > 1) {
+		disable_fast_reboot("Kernel re-entered OPAL");
+		switch (token) {
+		case OPAL_CONSOLE_READ:
+		case OPAL_CONSOLE_WRITE:
+		case OPAL_CONSOLE_WRITE_BUFFER_SPACE:
+		case OPAL_CONSOLE_FLUSH:
+		case OPAL_POLL_EVENTS:
+		case OPAL_CHECK_TOKEN:
+		case OPAL_CEC_REBOOT:
+		case OPAL_CEC_REBOOT2:
+		case OPAL_SIGNAL_SYSTEM_RESET:
+			break;
+		default:
+			printf("CPU ATTEMPT TO RE-ENTER FIRMWARE! PIR=%04lx cpu @%p -> pir=%04x token=%llu\n",
+			       mfspr(SPR_PIR), cpu, cpu->pir, token);
+			if (cpu->in_opal_call > 2) {
+				printf("Emergency stack is destroyed, can't continue.\n");
+				abort();
+			}
+			return OPAL_INTERNAL_ERROR;
+		}
+	}
+
+	cpu->entered_opal_call_at = mftb();
+	return OPAL_SUCCESS;
+}
+
+int64_t opal_exit_check(int64_t retval, struct stack_frame *eframe);
+
+int64_t opal_exit_check(int64_t retval, struct stack_frame *eframe)
+{
+	struct cpu_thread *cpu = this_cpu();
+	uint64_t token = eframe->gpr[0];
+	uint64_t now = mftb();
+	uint64_t call_time = tb_to_msecs(now - cpu->entered_opal_call_at);
+
+	if (!cpu->in_opal_call) {
+		disable_fast_reboot("Un-accounted firmware entry");
+		printf("CPU UN-ACCOUNTED FIRMWARE ENTRY! PIR=%04lx cpu @%p -> pir=%04x token=%llu retval=%lld\n",
+		       mfspr(SPR_PIR), cpu, cpu->pir, token, retval);
+		cpu->in_opal_call++; /* avoid exit path underflowing */
+	} else {
+		if (cpu->in_opal_call > 2) {
+			printf("Emergency stack is destroyed, can't continue.\n");
+			abort();
+		}
+		if (!list_empty(&cpu->locks_held)) {
+			prlog(PR_ERR, "OPAL exiting with locks held, pir=%04x token=%llu retval=%lld\n",
+			      cpu->pir, token, retval);
+			drop_my_locks(true);
+		}
+	}
+
+	if (call_time > 100 && token != OPAL_RESYNC_TIMEBASE) {
+		prlog((call_time < 1000) ? PR_DEBUG : PR_WARNING,
+		      "Spent %llu msecs in OPAL call %llu!\n",
+		      call_time, token);
+	}
+	return retval;
+}
+
+int64_t opal_quiesce(uint32_t quiesce_type, int32_t cpu_target)
+{
+	struct cpu_thread *cpu = this_cpu();
+	struct cpu_thread *target = NULL;
+	struct cpu_thread *c;
+	uint64_t end;
+	bool stuck = false;
+
+	if (cpu_target >= 0) {
+		target = find_cpu_by_server(cpu_target);
+		if (!target)
+			return OPAL_PARAMETER;
+	} else if (cpu_target != -1) {
+		return OPAL_PARAMETER;
+	}
+
+	if (quiesce_type == QUIESCE_HOLD || quiesce_type == QUIESCE_REJECT) {
+		if (cmpxchg32(&opal_quiesce_state, 0, quiesce_type) != 0) {
+			if (opal_quiesce_owner != cpu->pir) {
+				/*
+				 * Nested is allowed for now just for
+				 * internal uses, so an error is returned
+				 * for OS callers, but no error message
+				 * printed if we are nested.
+				 */
+				printf("opal_quiesce already quiescing\n");
+			}
+			return OPAL_BUSY;
+		}
+		opal_quiesce_owner = cpu->pir;
+		opal_quiesce_target = cpu_target;
+	}
+
+	if (opal_quiesce_owner != cpu->pir) {
+		printf("opal_quiesce CPU does not own quiesce state (must call QUIESCE_HOLD or QUIESCE_REJECT)\n");
+		return OPAL_BUSY;
+	}
+
+	/* Okay now we own the quiesce state */
+
+	if (quiesce_type == QUIESCE_RESUME ||
+			quiesce_type == QUIESCE_RESUME_FAST_REBOOT) {
+		bust_locks = false;
+		sync(); /* release barrier vs opal entry */
+		if (target) {
+			target->quiesce_opal_call = 0;
+		} else {
+			for_each_cpu(c) {
+				if (quiesce_type == QUIESCE_RESUME_FAST_REBOOT)
+					c->in_opal_call = 0;
+
+				if (c == cpu) {
+					assert(!c->quiesce_opal_call);
+					continue;
+				}
+				c->quiesce_opal_call = 0;
+			}
+		}
+		sync();
+		opal_quiesce_state = 0;
+		return OPAL_SUCCESS;
+	}
+
+	if (quiesce_type == QUIESCE_LOCK_BREAK) {
+		if (opal_quiesce_target != -1) {
+			printf("opal_quiesce has not quiesced all CPUs (must target -1)\n");
+			return OPAL_BUSY;
+		}
+		bust_locks = true;
+		return OPAL_SUCCESS;
+	}
+
+	if (target) {
+		target->quiesce_opal_call = quiesce_type;
+	} else {
+		for_each_cpu(c) {
+			if (c == cpu)
+				continue;
+			c->quiesce_opal_call = quiesce_type;
+		}
+	}
+
+	sync(); /* Order stores to quiesce_opal_call vs loads of in_opal_call */
+
+	end = mftb() + msecs_to_tb(1000);
+
+	smt_lowest();
+	if (target) {
+		while (target->in_opal_call) {
+			if (tb_compare(mftb(), end) == TB_AAFTERB) {
+				printf("OPAL quiesce CPU:%04x stuck in OPAL\n", target->pir);
+				stuck = true;
+				break;
+			}
+			barrier();
+		}
+	} else {
+		for_each_cpu(c) {
+			if (c == cpu)
+				continue;
+			while (c->in_opal_call) {
+				if (tb_compare(mftb(), end) == TB_AAFTERB) {
+					printf("OPAL quiesce CPU:%04x stuck in OPAL\n", c->pir);
+					stuck = true;
+					break;
+				}
+				barrier();
+			}
+		}
+	}
+	smt_medium();
+	sync(); /* acquire barrier vs opal entry */
+
+	if (stuck) {
+		printf("OPAL quiesce could not kick all CPUs out of OPAL\n");
+		return OPAL_PARTIAL;
+	}
+
+	return OPAL_SUCCESS;
+}
+opal_call(OPAL_QUIESCE, opal_quiesce, 2);
 
 void __opal_register(uint64_t token, void *func, unsigned int nargs)
 {
@@ -151,6 +361,10 @@ static void add_opal_firmware_exports_node(struct dt_node *node)
 	dt_add_property_u64s(exports, "symbol_map", sym_start, sym_size);
 	dt_add_property_u64s(exports, "hdat_map", SPIRA_HEAP_BASE,
 				SPIRA_HEAP_SIZE);
+#ifdef SKIBOOT_GCOV
+	dt_add_property_u64s(exports, "gcov", SKIBOOT_BASE,
+				HEAP_BASE - SKIBOOT_BASE);
+#endif
 }
 
 static void add_opal_firmware_node(void)
@@ -216,7 +430,6 @@ void add_opal_node(void)
 	add_opal_firmware_node();
 	add_associativity_ref_point();
 	memcons_add_properties();
-	add_cpu_idle_state_properties();
 }
 
 static struct lock evt_lock = LOCK_UNLOCKED;
@@ -345,28 +558,37 @@ void opal_del_poller(void (*poller)(void *data))
 
 void opal_run_pollers(void)
 {
-	struct opal_poll_entry *poll_ent;
 	static int pollers_with_lock_warnings = 0;
 	static int poller_recursion = 0;
+	struct opal_poll_entry *poll_ent;
+	bool was_in_poller;
 
-	/* Don't re-enter on this CPU */
-	if (this_cpu()->in_poller && poller_recursion < 16) {
+	/* Don't re-enter on this CPU, unless it was an OPAL re-entry */
+	if (this_cpu()->in_opal_call == 1 && this_cpu()->in_poller) {
+
 		/**
 		 * @fwts-label OPALPollerRecursion
 		 * @fwts-advice Recursion detected in opal_run_pollers(). This
 		 * indicates a bug in OPAL where a poller ended up running
 		 * pollers, which doesn't lead anywhere good.
 		 */
-		prlog(PR_ERR, "OPAL: Poller recursion detected.\n");
-		backtrace();
 		poller_recursion++;
+		if (poller_recursion <= 16) {
+			disable_fast_reboot("Poller recursion detected.");
+			prlog(PR_ERR, "OPAL: Poller recursion detected.\n");
+			backtrace();
+
+		}
+
 		if (poller_recursion == 16)
 			prlog(PR_ERR, "OPAL: Squashing future poller recursion warnings (>16).\n");
+
 		return;
 	}
+	was_in_poller = this_cpu()->in_poller;
 	this_cpu()->in_poller = true;
 
-	if (this_cpu()->lock_depth && pollers_with_lock_warnings < 64) {
+	if (!list_empty(&this_cpu()->locks_held) && pollers_with_lock_warnings < 64) {
 		/**
 		 * @fwts-label OPALPollerWithLock
 		 * @fwts-advice opal_run_pollers() was called with a lock
@@ -374,6 +596,7 @@ void opal_run_pollers(void)
 		 * lucky/careful.
 		 */
 		prlog(PR_ERR, "Running pollers with lock held !\n");
+		dump_locks_list();
 		backtrace();
 		pollers_with_lock_warnings++;
 		if (pollers_with_lock_warnings == 64) {
@@ -396,7 +619,7 @@ void opal_run_pollers(void)
 		poll_ent->poller(poll_ent->data);
 
 	/* Disable poller flag */
-	this_cpu()->in_poller = false;
+	this_cpu()->in_poller = was_in_poller;
 
 	/* On debug builds, print max stack usage */
 	check_stacks();
@@ -462,12 +685,15 @@ void opal_add_host_sync_notifier(bool (*notify)(void *data), void *data)
 	list_add_tail(&opal_syncers, &ent->link);
 }
 
-void opal_del_host_sync_notifier(bool (*notify)(void *data))
+/*
+ * Remove a host sync notifier for given callback and data
+ */
+void opal_del_host_sync_notifier(bool (*notify)(void *data), void *data)
 {
 	struct opal_sync_entry *ent;
 
 	list_for_each(&opal_syncers, ent, link) {
-		if (ent->notify == notify) {
+		if (ent->notify == notify && ent->data == data) {
 			list_del(&ent->link);
 			free(ent);
 			return;
@@ -480,15 +706,13 @@ void opal_del_host_sync_notifier(bool (*notify)(void *data))
  */
 static int64_t opal_sync_host_reboot(void)
 {
-	struct opal_sync_entry *ent;
-	bool ret = true;
+	struct opal_sync_entry *ent, *nxt;
+	int ret = OPAL_SUCCESS;
 
-	list_for_each(&opal_syncers, ent, link)
-		ret &= ent->notify(ent->data);
+	list_for_each_safe(&opal_syncers, ent, nxt, link)
+		if (! ent->notify(ent->data))
+			ret = OPAL_BUSY_EVENT;
 
-	if (ret)
-		return OPAL_SUCCESS;
-	else
-		return OPAL_BUSY_EVENT;
+	return ret;
 }
 opal_call(OPAL_SYNC_HOST_REBOOT, opal_sync_host_reboot, 0);

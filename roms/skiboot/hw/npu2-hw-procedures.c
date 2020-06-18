@@ -1,4 +1,4 @@
-/* Copyright 2013-2015 IBM Corp.
+/* Copyright 2013-2019 IBM Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,78 +36,88 @@ struct npu2_phy_reg {
 	uint64_t len;
 };
 
-struct npu2_phy_reg NPU2_PHY_RX_DATA_DAC_SPARE_MODE	= {0x000, 63, 64};
-struct npu2_phy_reg NPU2_PHY_RX_DAC_CNTL6		= {0x00c, 63, 64};
-struct npu2_phy_reg NPU2_PHY_RX_DAC_CNTL5		= {0x028, 63, 64};
-struct npu2_phy_reg NPU2_PHY_RX_DAC_CNTL9		= {0x030, 63, 64};
-struct npu2_phy_reg NPU2_PHY_RX_DAC_CNTL5_EO		= {0x00a, 63, 64};
-struct npu2_phy_reg NPU2_PHY_RX_DAC_CNTL4		= {0x026, 63, 64};
-struct npu2_phy_reg NPU2_PHY_RX_RUN_LANE		= {0x0c8, 48, 1};
-struct npu2_phy_reg NPU2_PHY_RX_IORESET			= {0x096, 63, 1};
-struct npu2_phy_reg NPU2_PHY_TX_IORESET			= {0x113, 48, 1};
-struct npu2_phy_reg NPU2_PHY_RX_PR_RESET		= {0x096, 62, 1};
-struct npu2_phy_reg NPU2_PHY_RX_LANE_ANA_PDWN		= {0x002, 54, 1};
-struct npu2_phy_reg NPU2_PHY_RX_LANE_DIG_PDWN		= {0x088, 48, 1};
-struct npu2_phy_reg NPU2_PHY_RX_PR_IQ_RES_SEL		= {0x004, 59, 3};
-struct npu2_phy_reg NPU2_PHY_RX_PR_PHASE_STEP		= {0x08a, 60, 4};
-struct npu2_phy_reg NPU2_PHY_TX_LANE_PDWN		= {0x101, 48, 1};
-struct npu2_phy_reg NPU2_PHY_RX_RUN_DCCAL		= {0x0c8, 49, 1};
-struct npu2_phy_reg NPU2_PHY_RX_DCCAL_DONE		= {0x0ca, 49, 1};
-struct npu2_phy_reg NPU2_PHY_RX_LANE_BUSY		= {0x0ca, 50, 1};
-struct npu2_phy_reg NPU2_PHY_RX_B_BANK_CONTROLS		= {0x002, 58, 6};
-struct npu2_phy_reg NPU2_PHY_TX_UNLOAD_CLK_DISABLE	= {0x103, 56, 1};
-struct npu2_phy_reg NPU2_PHY_TX_FIFO_INIT		= {0x105, 53, 1};
-struct npu2_phy_reg NPU2_PHY_TX_RXCAL			= {0x103, 57, 1};
-struct npu2_phy_reg NPU2_PHY_RX_INIT_DONE		= {0x0ca, 48, 1};
-struct npu2_phy_reg NPU2_PHY_RX_PR_EDGE_TRACK_CNTL	= {0x092, 48, 2};
-struct npu2_phy_reg NPU2_PHY_RX_PR_FW_OFF		= {0x08a, 56, 1};
-struct npu2_phy_reg NPU2_PHY_RX_PR_FW_INERTIA_AMT	= {0x08a, 57, 3};
-struct npu2_phy_reg NPU2_PHY_RX_CFG_LTE_MC		= {0x000, 60, 4};
-struct npu2_phy_reg NPU2_PHY_RX_A_INTEG_COARSE_GAIN	= {0x00a, 48, 4};
-struct npu2_phy_reg NPU2_PHY_RX_B_INTEG_COARSE_GAIN	= {0x026, 48, 4};
-struct npu2_phy_reg NPU2_PHY_RX_E_INTEG_COARSE_GAIN	= {0x030, 48, 4};
+/*
+ * Currently unused, but documented here:
+static struct npu2_phy_reg NPU2_PHY_RX_DATA_DAC_SPARE_MODE = {0x000, 63, 64};
+static struct npu2_phy_reg NPU2_PHY_RX_DAC_CNTL6	   = {0x00c, 63, 64};
+static struct npu2_phy_reg NPU2_PHY_RX_DAC_CNTL5	   = {0x028, 63, 64};
+static struct npu2_phy_reg NPU2_PHY_RX_DAC_CNTL9	   = {0x030, 63, 64};
+static struct npu2_phy_reg NPU2_PHY_RX_DAC_CNTL5_EO	   = {0x00a, 63, 64};
+static struct npu2_phy_reg NPU2_PHY_RX_DAC_CNTL4	   = {0x026, 63, 64};
+*/
+static struct npu2_phy_reg NPU2_PHY_RX_RUN_LANE		   = {0x0c8, 48, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_IORESET		   = {0x096, 63, 1};
+static struct npu2_phy_reg NPU2_PHY_TX_IORESET		   = {0x113, 48, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_PR_RESET		   = {0x096, 62, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_LANE_ANA_PDWN	   = {0x002, 54, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_LANE_DIG_PDWN	   = {0x088, 48, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_PR_IQ_RES_SEL	   = {0x004, 59, 3};
+static struct npu2_phy_reg NPU2_PHY_RX_PR_PHASE_STEP	   = {0x08a, 60, 4};
+static struct npu2_phy_reg NPU2_PHY_TX_LANE_PDWN	   = {0x101, 48, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_RUN_DCCAL	   = {0x0c8, 49, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_DCCAL_DONE	   = {0x0ca, 49, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_LANE_BUSY	   = {0x0ca, 50, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_B_BANK_CONTROLS	   = {0x002, 58, 6};
+static struct npu2_phy_reg NPU2_PHY_TX_UNLOAD_CLK_DISABLE  = {0x103, 56, 1};
+static struct npu2_phy_reg NPU2_PHY_TX_FIFO_INIT	   = {0x105, 53, 1};
+static struct npu2_phy_reg NPU2_PHY_TX_RXCAL		   = {0x103, 57, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_INIT_DONE	   = {0x0ca, 48, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_PR_EDGE_TRACK_CNTL  = {0x092, 48, 2};
+static struct npu2_phy_reg NPU2_PHY_RX_PR_BUMP_SL_1UI	   = {0x092, 57, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_PR_FW_OFF	   = {0x08a, 56, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_PR_FW_INERTIA_AMT   = {0x08a, 57, 3};
+static struct npu2_phy_reg NPU2_PHY_RX_CFG_LTE_MC	   = {0x000, 60, 4};
+static struct npu2_phy_reg NPU2_PHY_RX_A_INTEG_COARSE_GAIN = {0x00a, 48, 4};
+static struct npu2_phy_reg NPU2_PHY_RX_B_INTEG_COARSE_GAIN = {0x026, 48, 4};
+static struct npu2_phy_reg NPU2_PHY_RX_E_INTEG_COARSE_GAIN = {0x030, 48, 4};
 
 /* These registers are per-PHY, not per lane */
-struct npu2_phy_reg NPU2_PHY_TX_ZCAL_SWO_EN		= {0x3c9, 48, 1};
-struct npu2_phy_reg NPU2_PHY_TX_ZCAL_REQ		= {0x3c1, 49, 1};
-struct npu2_phy_reg NPU2_PHY_TX_ZCAL_DONE		= {0x3c1, 50, 1};
-struct npu2_phy_reg NPU2_PHY_TX_ZCAL_ERROR		= {0x3c1, 51, 1};
-struct npu2_phy_reg NPU2_PHY_TX_ZCAL_N			= {0x3c3, 48, 9};
-struct npu2_phy_reg NPU2_PHY_TX_ZCAL_P			= {0x3c5, 48, 9};
-struct npu2_phy_reg NPU2_PHY_TX_PSEG_PRE_EN		= {0x34d, 51, 5};
-struct npu2_phy_reg NPU2_PHY_TX_PSEG_PRE_SELECT		= {0x34d, 56, 5};
-struct npu2_phy_reg NPU2_PHY_TX_NSEG_PRE_EN		= {0x34f, 51, 5};
-struct npu2_phy_reg NPU2_PHY_TX_NSEG_PRE_SELECT		= {0x34f, 56, 5};
-struct npu2_phy_reg NPU2_PHY_TX_PSEG_POST_EN		= {0x361, 49, 7};
-struct npu2_phy_reg NPU2_PHY_TX_PSEG_POST_SELECT	= {0x361, 56, 7};
-struct npu2_phy_reg NPU2_PHY_TX_NSEG_POST_EN		= {0x363, 49, 7};
-struct npu2_phy_reg NPU2_PHY_TX_NSEG_POST_SELECT	= {0x363, 56, 7};
-struct npu2_phy_reg NPU2_PHY_TX_PSEG_MARGINPU_EN	= {0x351, 48, 8};
-struct npu2_phy_reg NPU2_PHY_TX_NSEG_MARGINPU_EN	= {0x353, 48, 8};
-struct npu2_phy_reg NPU2_PHY_TX_PSEG_MARGINPD_EN	= {0x351, 56, 8};
-struct npu2_phy_reg NPU2_PHY_TX_NSEG_MARGINPD_EN	= {0x353, 56, 8};
-struct npu2_phy_reg NPU2_PHY_TX_MARGINPU_SELECT		= {0x355, 48, 8};
-struct npu2_phy_reg NPU2_PHY_TX_MARGINPD_SELECT		= {0x355, 56, 8};
-struct npu2_phy_reg NPU2_PHY_TX_PSEG_MAIN_EN		= {0x357, 51, 7};
-struct npu2_phy_reg NPU2_PHY_TX_NSEG_MAIN_EN		= {0x359, 51, 7};
-struct npu2_phy_reg NPU2_PHY_RX_HIST_MIN_EYE_WIDTH	= {0x24e, 54, 8};
-struct npu2_phy_reg NPU2_PHY_RX_HIST_MIN_EYE_WIDTH_LANE	= {0x24e, 49, 5};
-struct npu2_phy_reg NPU2_PHY_RX_HIST_MIN_EYE_WIDTH_VALID= {0x24e, 48, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_SPEED_SELECT	       = {0x262, 51, 2};
+static struct npu2_phy_reg NPU2_PHY_RX_AC_COUPLED	       = {0x262, 53, 1};
+static struct npu2_phy_reg NPU2_PHY_TX_ZCAL_SWO_EN	       = {0x3c9, 48, 1};
+static struct npu2_phy_reg NPU2_PHY_TX_ZCAL_REQ		       = {0x3c1, 49, 1};
+static struct npu2_phy_reg NPU2_PHY_TX_ZCAL_DONE	       = {0x3c1, 50, 1};
+static struct npu2_phy_reg NPU2_PHY_TX_ZCAL_ERROR	       = {0x3c1, 51, 1};
+static struct npu2_phy_reg NPU2_PHY_TX_ZCAL_N		       = {0x3c3, 48, 9};
+static struct npu2_phy_reg NPU2_PHY_TX_ZCAL_P		       = {0x3c5, 48, 9};
+static struct npu2_phy_reg NPU2_PHY_TX_PSEG_PRE_EN	       = {0x34d, 51, 5};
+static struct npu2_phy_reg NPU2_PHY_TX_PSEG_PRE_SELECT	       = {0x34d, 56, 5};
+static struct npu2_phy_reg NPU2_PHY_TX_NSEG_PRE_EN	       = {0x34f, 51, 5};
+static struct npu2_phy_reg NPU2_PHY_TX_NSEG_PRE_SELECT	       = {0x34f, 56, 5};
+static struct npu2_phy_reg NPU2_PHY_TX_PSEG_POST_EN	       = {0x361, 49, 7};
+static struct npu2_phy_reg NPU2_PHY_TX_PSEG_POST_SELECT        = {0x361, 56, 7};
+static struct npu2_phy_reg NPU2_PHY_TX_NSEG_POST_EN	       = {0x363, 49, 7};
+static struct npu2_phy_reg NPU2_PHY_TX_NSEG_POST_SELECT        = {0x363, 56, 7};
+static struct npu2_phy_reg NPU2_PHY_TX_PSEG_MARGINPU_EN        = {0x351, 48, 8};
+static struct npu2_phy_reg NPU2_PHY_TX_NSEG_MARGINPU_EN        = {0x353, 48, 8};
+static struct npu2_phy_reg NPU2_PHY_TX_PSEG_MARGINPD_EN        = {0x351, 56, 8};
+static struct npu2_phy_reg NPU2_PHY_TX_NSEG_MARGINPD_EN        = {0x353, 56, 8};
+static struct npu2_phy_reg NPU2_PHY_TX_MARGINPU_SELECT	       = {0x355, 48, 8};
+static struct npu2_phy_reg NPU2_PHY_TX_MARGINPD_SELECT	       = {0x355, 56, 8};
+static struct npu2_phy_reg NPU2_PHY_TX_PSEG_MAIN_EN	       = {0x357, 51, 7};
+static struct npu2_phy_reg NPU2_PHY_TX_NSEG_MAIN_EN	       = {0x359, 51, 7};
+/* Currently unused, but documented here
+static struct npu2_phy_reg NPU2_PHY_RX_HIST_MIN_EYE_WIDTH      = {0x24e, 54, 8};
+static struct npu2_phy_reg NPU2_PHY_RX_HIST_MIN_EYE_WIDTH_LANE = {0x24e, 49, 5};
+static struct npu2_phy_reg NPU2_PHY_RX_HIST_MIN_EYE_WIDTH_VALID= {0x24e, 48, 1};
+*/
+static struct npu2_phy_reg NPU2_PHY_RX_RC_ENABLE_AUTO_RECAL    = {0x25c, 51, 1};
 
-struct npu2_phy_reg NPU2_PHY_RX_CLKDIST_PDWN		= {0x204, 48, 3};
-struct npu2_phy_reg NPU2_PHY_RX_IREF_PDWN		= {0x230, 54, 1};
-struct npu2_phy_reg NPU2_PHY_TX_CLKDIST_PDWN		= {0x305, 48, 3};
-struct npu2_phy_reg NPU2_PHY_RX_CTL_DATASM_CLKDIST_PDWN = {0x2e0, 60, 1};
+static struct npu2_phy_reg NPU2_PHY_RX_CLKDIST_PDWN	       = {0x204, 48, 3};
+static struct npu2_phy_reg NPU2_PHY_RX_IREF_PDWN	       = {0x230, 54, 1};
+static struct npu2_phy_reg NPU2_PHY_TX_CLKDIST_PDWN	       = {0x305, 48, 3};
+static struct npu2_phy_reg NPU2_PHY_RX_CTL_DATASM_CLKDIST_PDWN = {0x2e0, 60, 1};
+static struct npu2_phy_reg NPU2_PHY_TX_DRV_DATA_PATTERN_GCRMSG = {0x309, 50, 4};
 
 #define NPU2_PHY_REG(scom_base, reg, lane)					\
 	SETFIELD(PPC_BITMASK(27, 31), ((reg)->offset << 42) | scom_base, lane)
 
-#define NPU2_MAX_PHY_LANES			24
+#define NPU2_MAX_PHY_LANE			23
 
 /* This is a bit of a gross hack but it does the job */
 #define FOR_EACH_LANE(ndev, lane) \
-	for (lane = 0; lane < NPU2_MAX_PHY_LANES; lane++)	\
-		if (!(ndev->lane_mask & (1 << lane)))		\
+	for (lane = 0; lane <= NPU2_MAX_PHY_LANE; lane++)	\
+		if (!(ndev->lane_mask & (1 << (NPU2_MAX_PHY_LANE - lane)))) \
 			continue;				\
 		else
 
@@ -191,10 +201,82 @@ static uint32_t nop(struct npu2_dev *npu_dev __unused)
 }
 DEFINE_PROCEDURE(nop);
 
-/* Procedure 1.2.1 (RESET_NPU_DL) from opt_programmerguide.odt. Also
- * incorporates AT reset. */
-static uint32_t reset_ntl(struct npu2_dev *ndev __unused)
+/* Return the brick number (0-2) within an obus chiplet */
+static int obus_brick_index(struct npu2_dev *ndev)
 {
+	int index = ndev->brick_index % 3;
+
+	/* On the second obus chiplet, index is reversed */
+	if ((ndev->pl_xscom_base & 0x3F000000) != 0x09000000)
+		return 2 - index;
+
+	return index;
+}
+
+static void set_iovalid(struct npu2_dev *ndev, bool raise)
+{
+	uint64_t addr, val, mask;
+	int rc;
+
+	addr = (ndev->pl_xscom_base & 0x3F000000) | 0x9;
+	mask = PPC_BIT(6 + obus_brick_index(ndev));
+	val = raise ? mask : 0;
+
+	rc = xscom_write_mask(ndev->npu->chip_id, addr, val, mask);
+	if (rc)
+		NPU2DEVERR(ndev, "error %d writing scom 0x%llx\n", rc, addr);
+}
+
+static bool poll_fence_status(struct npu2_dev *ndev, uint64_t val)
+{
+	uint64_t fs;
+	int i;
+
+	for (i = 0; i < 4096; i++) {
+		fs = npu2_read(ndev->npu, NPU2_NTL_CQ_FENCE_STATUS(ndev));
+		if ((fs & 0xc000000000000000UL) == val)
+			return true;
+	}
+
+	NPU2DEVERR(ndev, "NPU2_NTL_CQ_FENCE_STATUS timeout (0x%llx)\n", val);
+	return false;
+}
+
+/* Procedure 1.2.1 - Reset NPU/NDL */
+uint32_t reset_ntl(struct npu2_dev *ndev)
+{
+	uint64_t val;
+	int lane;
+
+	set_iovalid(ndev, true);
+
+	/* Power on clocks */
+	phy_write(ndev, &NPU2_PHY_RX_CLKDIST_PDWN, 0);
+	phy_write(ndev, &NPU2_PHY_RX_IREF_PDWN, 1);
+	phy_write(ndev, &NPU2_PHY_TX_CLKDIST_PDWN, 0);
+	phy_write(ndev, &NPU2_PHY_RX_CTL_DATASM_CLKDIST_PDWN, 0);
+
+	FOR_EACH_LANE(ndev, lane) {
+		phy_write_lane(ndev, &NPU2_PHY_RX_LANE_ANA_PDWN, lane, 0);
+		phy_write_lane(ndev, &NPU2_PHY_RX_LANE_DIG_PDWN, lane, 0);
+		phy_write_lane(ndev, &NPU2_PHY_TX_LANE_PDWN, lane, 0);
+	}
+
+	/* Write PRI */
+	val = SETFIELD(PPC_BITMASK(0,1), 0ull, obus_brick_index(ndev));
+	npu2_write_mask(ndev->npu, NPU2_NTL_PRI_CFG(ndev), val, -1ULL);
+
+	val = NPU2_NTL_MISC_CFG2_NDL_RX_PARITY_ENA;
+	npu2_write_mask(ndev->npu, NPU2_NTL_MISC_CFG2(ndev), 0ull, val);
+
+	/* NTL Reset */
+	val = npu2_read(ndev->npu, NPU2_NTL_MISC_CFG1(ndev));
+	val |= PPC_BIT(8) | PPC_BIT(9);
+	npu2_write(ndev->npu, NPU2_NTL_MISC_CFG1(ndev), val);
+
+	if (!poll_fence_status(ndev, 0xc000000000000000UL))
+		return PROCEDURE_COMPLETE | PROCEDURE_FAILED;
+
 	return PROCEDURE_NEXT;
 }
 
@@ -202,67 +284,75 @@ static uint32_t reset_ndl(struct npu2_dev *ndev)
 {
 	uint64_t val;
 
-	if ((ndev->pl_xscom_base & 0xFFFFFFFF) == 0x9010C3F)
-		val = SETFIELD(PPC_BITMASK(0,1), 0ull, ndev->index % 3);
-	else {
-		switch (ndev->index % 3) {
-		case 0:
-			val = SETFIELD(PPC_BITMASK(0,1), 0ull, 2);
-			break;
-		case 1:
-			val = SETFIELD(PPC_BITMASK(0,1), 0ull, 1);
-			break;
-		case 2:
-			val = SETFIELD(PPC_BITMASK(0,1), 0ull, 0);
-			break;
-		}
-	}
-
-	npu2_write_mask(ndev->npu, NPU2_NTL_PRI_CFG(ndev), val, -1ULL);
-
-	val = PPC_BIT32(0) | PPC_BIT32(1);
-
+	val = npu2_read_4b(ndev->npu, NPU2_NTL_DL_CONTROL(ndev));
+	val |= PPC_BIT32(0) | PPC_BIT32(1);
 	npu2_write_4b(ndev->npu, NPU2_NTL_DL_CONTROL(ndev), val);
-	npu2_write_4b(ndev->npu, NPU2_NTL_DL_CONTROL(ndev), 0);
-	npu2_write_4b(ndev->npu, NPU2_NTL_DL_CONFIG(ndev), PPC_BIT32(0));
 
-	/* NTL Reset */
-	val = PPC_BIT(8) | PPC_BIT(9);
-	npu2_write(ndev->npu, NPU2_NTL_MISC_CFG1(ndev), val);
-	val = PPC_BIT(8);
-	npu2_write(ndev->npu, NPU2_NTL_MISC_CFG1(ndev), val);
-	val = 0;
-	npu2_write(ndev->npu, NPU2_NTL_MISC_CFG1(ndev), val);
+	val = npu2_read_4b(ndev->npu, NPU2_NTL_DL_CONTROL(ndev));
+	val &= ~(PPC_BIT32(0) | PPC_BIT32(1));
+	npu2_write_4b(ndev->npu, NPU2_NTL_DL_CONTROL(ndev), val);
+
+	val = PPC_BIT32(0);
+	npu2_write_4b(ndev->npu, NPU2_NTL_DL_CONFIG(ndev), val);
 
 	return PROCEDURE_NEXT;
 }
 
 static uint32_t reset_ntl_release(struct npu2_dev *ndev)
 {
+	uint64_t val;
+	uint64_t npu2_fir;
+	uint64_t npu2_fir_addr;
+	int i;
+
+	/* Clear FIR bits */
+	npu2_fir_addr = NPU2_FIR_REGISTER_0;
+	npu2_fir = 0;
+
+	for (i = 0; i < NPU2_TOTAL_FIR_REGISTERS; i++) {
+		npu2_write(ndev->npu, npu2_fir_addr, npu2_fir);
+		npu2_fir_addr += NPU2_FIR_OFFSET;
+
+	}
+
+	val = npu2_read(ndev->npu, NPU2_NTL_MISC_CFG1(ndev));
+	val &= 0xFFBFFFFFFFFFFFFFUL;
+	npu2_write(ndev->npu, NPU2_NTL_MISC_CFG1(ndev), val);
+
+	if (!poll_fence_status(ndev, 0x8000000000000000UL))
+		return PROCEDURE_COMPLETE | PROCEDURE_FAILED;
+
+	return PROCEDURE_NEXT;
+}
+
+static uint32_t reset_ntl_finish(struct npu2_dev *ndev)
+{
 	/* Credit Setup */
-	npu2_write(ndev->npu, NPU2_NTL_CRED_HDR_CREDIT_TX(ndev), 0x0200000000000000);
-	npu2_write(ndev->npu, NPU2_NTL_PRB_HDR_CREDIT_TX(ndev), 0x0200000000000000);
-	npu2_write(ndev->npu, NPU2_NTL_ATR_HDR_CREDIT_TX(ndev), 0x0200000000000000);
-	npu2_write(ndev->npu, NPU2_NTL_RSP_HDR_CREDIT_TX(ndev), 0x0200000000000000);
-	npu2_write(ndev->npu, NPU2_NTL_CRED_DATA_CREDIT_TX(ndev), 0x1000000000000000);
-	npu2_write(ndev->npu, NPU2_NTL_RSP_DATA_CREDIT_TX(ndev), 0x1000000000000000);
-	npu2_write(ndev->npu, NPU2_NTL_CRED_HDR_CREDIT_RX(ndev), 0x0000BE0000000000);
-	npu2_write(ndev->npu, NPU2_NTL_DBD_HDR_CREDIT_RX(ndev), 0x0000640000000000);
-	npu2_write(ndev->npu, NPU2_NTL_ATSD_HDR_CREDIT_RX(ndev), 0x0000200000000000);
-	npu2_write(ndev->npu, NPU2_NTL_RSP_HDR_CREDIT_RX(ndev), 0x0000BE0000000000);
-	npu2_write(ndev->npu, NPU2_NTL_CRED_DATA_CREDIT_RX(ndev), 0x0001000000000000);
-	npu2_write(ndev->npu, NPU2_NTL_RSP_DATA_CREDIT_RX(ndev), 0x0001000000000000);
+	npu2_write(ndev->npu, NPU2_NTL_CRED_HDR_CREDIT_TX(ndev), 0x0200000000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_PRB_HDR_CREDIT_TX(ndev), 0x0200000000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_ATR_HDR_CREDIT_TX(ndev), 0x0200000000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_RSP_HDR_CREDIT_TX(ndev), 0x0200000000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_CRED_DATA_CREDIT_TX(ndev), 0x1000000000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_RSP_DATA_CREDIT_TX(ndev), 0x1000000000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_CRED_HDR_CREDIT_RX(ndev), 0x0000BE0000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_DBD_HDR_CREDIT_RX(ndev), 0x0000640000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_ATSD_HDR_CREDIT_RX(ndev), 0x0000200000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_RSP_HDR_CREDIT_RX(ndev), 0x0000BE0000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_CRED_DATA_CREDIT_RX(ndev), 0x0001000000000000UL);
+	npu2_write(ndev->npu, NPU2_NTL_RSP_DATA_CREDIT_RX(ndev), 0x0001000000000000UL);
 
 	npu2_set_link_flag(ndev, NPU2_DEV_DL_RESET);
 
 	return PROCEDURE_COMPLETE;
 }
-DEFINE_PROCEDURE(reset_ntl, reset_ndl, reset_ntl_release);
+DEFINE_PROCEDURE(reset_ntl, reset_ndl, reset_ntl_release, reset_ntl_finish);
 
 /* Procedure 1.2.2 - Reset I/O PHY Lanes */
 static uint32_t phy_reset(struct npu2_dev *ndev)
 {
 	int lane;
+
+	set_iovalid(ndev, false);
 
 	/* Power on clocks */
 	phy_write(ndev, &NPU2_PHY_RX_CLKDIST_PDWN, 0);
@@ -307,6 +397,25 @@ static uint32_t phy_reset_complete(struct npu2_dev *ndev)
 {
 	int lane;
 
+	if (ndev->type == NPU2_DEV_TYPE_OPENCAPI) {
+		phy_write(ndev, &NPU2_PHY_RX_AC_COUPLED, 1);
+
+		switch (ndev->link_speed) {
+		case 20000000000UL:
+			prlog(PR_INFO, "OCAPI: Link speed set at 20Gb/s\n");
+			phy_write(ndev, &NPU2_PHY_RX_SPEED_SELECT, 1);
+			break;
+		case 25000000000UL:
+		case 25781250000UL:
+			prlog(PR_INFO, "OCAPI: Link speed set at 25.xGb/s\n");
+			phy_write(ndev, &NPU2_PHY_RX_SPEED_SELECT, 0);
+			break;
+		default:
+			prlog(PR_CRIT, "OCAPI: Invalid link speed!\n");
+			assert(false);
+		}
+	}
+
 	FOR_EACH_LANE(ndev, lane) {
 		phy_write_lane(ndev, &NPU2_PHY_RX_LANE_ANA_PDWN, lane, 0);
 		phy_write_lane(ndev, &NPU2_PHY_RX_LANE_DIG_PDWN, lane, 0);
@@ -320,6 +429,8 @@ static uint32_t phy_reset_complete(struct npu2_dev *ndev)
 		phy_write_lane(ndev, &NPU2_PHY_RX_E_INTEG_COARSE_GAIN, lane, 11);
 	}
 
+	set_iovalid(ndev, true);
+
 	return PROCEDURE_COMPLETE;
 }
 DEFINE_PROCEDURE(phy_reset, phy_reset_wait, phy_reset_complete);
@@ -327,7 +438,7 @@ DEFINE_PROCEDURE(phy_reset, phy_reset_wait, phy_reset_complete);
 /* Procedure 1.2.6 - I/O PHY Tx Impedance Calibration */
 static uint32_t phy_tx_zcal(struct npu2_dev *ndev)
 {
-	if (ndev->npu->tx_zcal_complete[ndev->index > 2])
+	if (ndev->npu->tx_zcal_complete[ndev->brick_index > 2])
 		return PROCEDURE_COMPLETE;
 
 	/* Turn off SW enable and enable zcal state machine */
@@ -498,7 +609,7 @@ static uint32_t phy_tx_zcal_calculate(struct npu2_dev *ndev)
 	phy_write(ndev, &NPU2_PHY_TX_MARGINPU_SELECT, therm(margin_select + 1)/2);
 	phy_write(ndev, &NPU2_PHY_TX_MARGINPD_SELECT, therm(margin_select + 1)/2);
 
-	ndev->npu->tx_zcal_complete[ndev->index > 2] = 1;
+	ndev->npu->tx_zcal_complete[ndev->brick_index > 2] = 1;
 	return PROCEDURE_COMPLETE;
 }
 DEFINE_PROCEDURE(phy_tx_zcal, phy_tx_zcal_wait, phy_tx_zcal_calculate);
@@ -532,6 +643,8 @@ static uint32_t phy_rx_dccal(struct npu2_dev *ndev)
 {
 	int lane;
 
+	set_iovalid(ndev, false);
+
 	FOR_EACH_LANE(ndev, lane)
 		phy_write_lane(ndev, &NPU2_PHY_RX_PR_FW_OFF, lane, 1);
 
@@ -558,6 +671,32 @@ static uint32_t phy_rx_dccal_complete(struct npu2_dev *ndev)
 		phy_write_lane(ndev, &NPU2_PHY_RX_PR_FW_OFF, lane, 0);
 	}
 
+	set_iovalid(ndev, true);
+
+	return PROCEDURE_NEXT;
+}
+
+static uint32_t phy_rx_clock_sel(struct npu2_dev *ndev)
+{
+	if (ndev->type != NPU2_DEV_TYPE_OPENCAPI) {
+		/*
+		 * Change the RX clk mux control to be done by
+		 * software instead of HW. This avoids glitches caused
+		 * by changing the mux setting.
+		 *
+		 * Work around a known DL bug by doing these writes
+		 * twice.
+		 */
+		npu2_write_mask_4b(ndev->npu, NPU2_NTL_DL_CLK_CTRL(ndev),
+				0x80000002, 0x80000003);
+		npu2_write_mask_4b(ndev->npu, NPU2_NTL_DL_CLK_CTRL(ndev),
+				0x80000002, 0x80000003);
+
+		npu2_write_mask_4b(ndev->npu, NPU2_NTL_DL_CLK_CTRL(ndev),
+				0x80000000, 0x80000003);
+		npu2_write_mask_4b(ndev->npu, NPU2_NTL_DL_CLK_CTRL(ndev),
+				0x80000000, 0x80000003);
+	}
 	return PROCEDURE_NEXT;
 }
 
@@ -577,7 +716,8 @@ static uint32_t phy_tx_fifo_init(struct npu2_dev *ndev)
 
 /* We group TX FIFO init in here mainly because that's what was done
  * on NVLink1 */
-DEFINE_PROCEDURE(phy_rx_dccal, phy_rx_dccal_complete, phy_tx_fifo_init);
+DEFINE_PROCEDURE(phy_rx_dccal, phy_rx_dccal_complete, phy_rx_clock_sel,
+		 phy_tx_fifo_init);
 
 /* Procedure 1.2.7 - I/O PHY Upstream Link Training */
 static uint32_t phy_rx_training(struct npu2_dev *ndev)
@@ -602,6 +742,52 @@ static uint32_t phy_rx_training_wait(struct npu2_dev *ndev)
 }
 DEFINE_PROCEDURE(phy_rx_training, phy_rx_training_wait);
 
+static uint32_t check_credit(struct npu2_dev *ndev, uint64_t reg,
+			     const char *reg_name, uint64_t expected)
+{
+	uint64_t val;
+
+	val = npu2_read(ndev->npu, reg);
+	if (val == expected)
+		return 0;
+
+	NPU2DEVERR(ndev, "%s: expected 0x%llx, read 0x%llx\n",
+		   reg_name, expected, val);
+
+	return 1;
+}
+
+#define CHECK_CREDIT(ndev, reg, expected) \
+	check_credit(ndev, reg(ndev), #reg, expected);
+
+static uint32_t check_credits(struct npu2_dev *ndev)
+{
+	int fail = 0;
+	uint64_t val;
+
+	fail += CHECK_CREDIT(ndev, NPU2_NTL_CRED_HDR_CREDIT_RX, 0x0BE0BE0000000000ULL);
+	fail += CHECK_CREDIT(ndev, NPU2_NTL_RSP_HDR_CREDIT_RX, 0x0BE0BE0000000000ULL);
+	fail += CHECK_CREDIT(ndev, NPU2_NTL_CRED_DATA_CREDIT_RX, 0x1001000000000000ULL);
+	fail += CHECK_CREDIT(ndev, NPU2_NTL_RSP_DATA_CREDIT_RX, 0x1001000000000000ULL);
+	fail += CHECK_CREDIT(ndev, NPU2_NTL_DBD_HDR_CREDIT_RX, 0x0640640000000000ULL);
+	fail += CHECK_CREDIT(ndev, NPU2_NTL_ATSD_HDR_CREDIT_RX, 0x0200200000000000ULL);
+
+	assert(!fail);
+
+	val = npu2_read(ndev->npu, NPU2_NTL_MISC_CFG1(ndev));
+	val &= 0xFF3FFFFFFFFFFFFFUL;
+	npu2_write(ndev->npu, NPU2_NTL_MISC_CFG1(ndev), val);
+
+	if (!poll_fence_status(ndev, 0x0))
+		return PROCEDURE_COMPLETE | PROCEDURE_FAILED;
+
+	val = NPU2_NTL_MISC_CFG2_NDL_RX_PARITY_ENA;
+	npu2_write_mask(ndev->npu, NPU2_NTL_MISC_CFG2(ndev), val, val);
+
+	return PROCEDURE_COMPLETE;
+}
+DEFINE_PROCEDURE(check_credits);
+
 static struct procedure *npu_procedures[] = {
 	&procedure_stop,
 	&procedure_nop,
@@ -617,7 +803,9 @@ static struct procedure *npu_procedures[] = {
 
 	/* Place holders for pre-terminate and terminate procedures */
 	&procedure_nop,
-	&procedure_nop};
+	&procedure_nop,
+	&procedure_check_credits
+};
 
 /* Run a procedure step(s) and return status */
 static uint32_t get_procedure_status(struct npu2_dev *dev)
@@ -658,7 +846,7 @@ static int64_t npu_dev_procedure_read(struct npu2_dev *dev, uint32_t offset,
 
 	if (size != 4) {
 		/* Short config reads are not supported */
-		prlog(PR_ERR, "NPU%d: Short read of procedure register\n", dev->npu->phb.opal_id);
+		prlog(PR_ERR, "NPU%d: Short read of procedure register\n", npu2_dev_to_phb(dev)->opal_id);
 		return OPAL_PARAMETER;
 	}
 
@@ -680,7 +868,7 @@ static int64_t npu_dev_procedure_read(struct npu2_dev *dev, uint32_t offset,
 
 	default:
 		prlog(PR_ERR, "NPU%d: Invalid vendor specific offset 0x%08x\n",
-		      dev->npu->phb.opal_id, offset);
+		      npu2_dev_to_phb(dev)->opal_id, offset);
 		rc = OPAL_PARAMETER;
 	}
 
@@ -696,7 +884,7 @@ static int64_t npu_dev_procedure_write(struct npu2_dev *dev, uint32_t offset,
 	if (size != 4) {
 		/* Short config writes are not supported */
 		prlog(PR_ERR, "NPU%d: Short read of procedure register\n",
-		      dev->npu->phb.opal_id);
+		      npu2_dev_to_phb(dev)->opal_id);
 		return OPAL_PARAMETER;
 	}
 
@@ -725,7 +913,6 @@ static int64_t npu_dev_procedure_write(struct npu2_dev *dev, uint32_t offset,
 		dev->procedure_status = PROCEDURE_INPROGRESS;
 		dev->procedure_number = data;
 		dev->procedure_step = 0;
-		dev->procedure_data = 0;
 		dev->procedure_tb = mftb();
 		break;
 
@@ -753,5 +940,92 @@ int64_t npu2_dev_procedure(void *dev, struct pci_cfg_reg_filter *pcrf,
 
 void npu2_dev_procedure_reset(struct npu2_dev *dev)
 {
+	uint64_t val;
+
+	/* Fence the brick */
+	val = npu2_read(dev->npu, NPU2_NTL_MISC_CFG1(dev));
+	val |= PPC_BIT(8) | PPC_BIT(9);
+	npu2_write(dev->npu, NPU2_NTL_MISC_CFG1(dev), val);
+
 	npu2_clear_link_flag(dev, NPU2_DEV_DL_RESET);
+}
+
+static uint32_t run_procedure(struct npu2_dev *dev, uint16_t procedure_number)
+{
+	struct procedure *proc;
+	const char *name;
+	uint32_t result;
+
+	assert(procedure_number <= ARRAY_SIZE(npu_procedures));
+	proc = npu_procedures[procedure_number];
+	assert(proc);
+
+	name = proc->name;
+	NPU2DEVINF(dev, "Running procedure %s\n", name);
+	dev->procedure_status = PROCEDURE_INPROGRESS;
+	dev->procedure_number = procedure_number;
+	dev->procedure_step = 0;
+	dev->procedure_tb = mftb();
+
+	result = get_procedure_status(dev);
+	while (!(result & PROCEDURE_COMPLETE)) {
+		time_wait_ms(1);
+		result = get_procedure_status(dev);
+	}
+	return result;
+}
+
+void npu2_opencapi_bump_ui_lane(struct npu2_dev *dev)
+{
+	uint64_t reg;
+	uint64_t status_xscom;
+	int lane, bit = 7;
+
+	switch (dev->brick_index) {
+	case 2:
+		status_xscom = OB0_ODL0_TRAINING_STATUS;
+		break;
+	case 3:
+		status_xscom = OB0_ODL1_TRAINING_STATUS;
+		break;
+	case 4:
+		status_xscom = OB3_ODL1_TRAINING_STATUS;
+		break;
+	case 5:
+		status_xscom = OB3_ODL0_TRAINING_STATUS;
+		break;
+	default:
+		assert(false);
+	}
+	xscom_read(dev->npu->chip_id, status_xscom, &reg);
+	reg = GETFIELD(OB_ODL_TRAINING_STATUS_STS_RX_PATTERN_B, reg);
+
+	FOR_EACH_LANE(dev, lane) {
+		if (reg & (1 << bit--))
+			continue;
+		prlog(PR_TRACE, "OCAPI: bumpui bumping lane %d\n", lane);
+		for (int i = 0; i < 4; i++) {
+			phy_write_lane(dev, &NPU2_PHY_RX_PR_BUMP_SL_1UI, lane, 1);
+			phy_write_lane(dev, &NPU2_PHY_RX_PR_BUMP_SL_1UI, lane, 0);
+		}
+	}
+}
+
+void npu2_opencapi_phy_setup(struct npu2_dev *dev)
+{
+	/*
+	 * This is only required for OpenCAPI - Hostboot tries to set this
+	 * on systems where it can tell a link is OpenCAPI, but for
+	 * Witherspoon it needs to be done in skiboot after device detection.
+	 */
+	phy_write(dev, &NPU2_PHY_RX_RC_ENABLE_AUTO_RECAL, 0x1);
+
+	run_procedure(dev, 4); /* procedure_phy_reset */
+	run_procedure(dev, 5); /* procedure_phy_tx_zcal */
+	run_procedure(dev, 6); /* procedure_phy_rx_dccal */
+}
+
+void npu2_opencapi_phy_prbs31(struct npu2_dev *dev)
+{
+	phy_write(dev, &NPU2_PHY_TX_DRV_DATA_PATTERN_GCRMSG, 0xD);
 }

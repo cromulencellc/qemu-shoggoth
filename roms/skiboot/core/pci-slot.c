@@ -104,8 +104,12 @@ static int64_t pci_slot_run_sm(struct pci_slot *slot)
 		prlog(PR_ERR, PCI_SLOT_PREFIX
 		      "Invalid state %08x\n", slot->id, slot->state);
 		pci_slot_set_state(slot, PCI_SLOT_STATE_NORMAL);
-		return OPAL_HARDWARE;
+		ret = OPAL_HARDWARE;
 	}
+
+	/* Notify about the pci slot state machine completion */
+	if (ret <= 0 && slot->ops.completed_sm_run)
+		slot->ops.completed_sm_run(slot, ret);
 
 	return ret;
 }
@@ -133,6 +137,7 @@ void pci_slot_add_dt_properties(struct pci_slot *slot,
 	dt_add_property_cells(np, "ibm,slot-card-desc", slot->card_desc);
 	dt_add_property_cells(np, "ibm,slot-card-mech", slot->card_mech);
 	dt_add_property_cells(np, "ibm,slot-wired-lanes", slot->wired_lanes);
+	dt_add_property_cells(np, "ibm,power-limit", slot->power_limit);
 
 	if (slot->ops.add_properties)
 		slot->ops.add_properties(slot, np);
@@ -178,6 +183,7 @@ struct pci_slot *pci_slot_alloc(struct phb *phb,
 	slot->power_state = PCI_SLOT_POWER_ON;
 	slot->ops.run_sm = pci_slot_run_sm;
 	slot->ops.prepare_link_change = pci_slot_prepare_link_change;
+	slot->peer_slot = NULL;
 	if (!pd) {
 		slot->id = PCI_PHB_SLOT_ID(phb);
 		phb->slot = slot;

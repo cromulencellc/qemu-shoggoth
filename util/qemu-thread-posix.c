@@ -445,41 +445,33 @@ void qemu_event_wait(QemuEvent *ev)
     }
 }
 
-static pthread_key_t exit_key;
+static __thread NotifierList thread_exit;
 
-union NotifierThreadData {
-    void *ptr;
-    NotifierList list;
-};
-QEMU_BUILD_BUG_ON(sizeof(union NotifierThreadData) != sizeof(void *));
-
+/*
+ * Note that in this implementation you can register a thread-exit
+ * notifier for the main thread, but it will never be called.
+ * This is OK because main thread exit can only happen when the
+ * entire process is exiting, and the API allows notifiers to not
+ * be called on process exit.
+ */
 void qemu_thread_atexit_add(Notifier *notifier)
 {
-    union NotifierThreadData ntd;
-    ntd.ptr = pthread_getspecific(exit_key);
-    notifier_list_add(&ntd.list, notifier);
-    pthread_setspecific(exit_key, ntd.ptr);
+    notifier_list_add(&thread_exit, notifier);
 }
 
 void qemu_thread_atexit_remove(Notifier *notifier)
 {
-    union NotifierThreadData ntd;
-    ntd.ptr = pthread_getspecific(exit_key);
     notifier_remove(notifier);
-    pthread_setspecific(exit_key, ntd.ptr);
 }
 
-static void qemu_thread_atexit_run(void *arg)
+static void qemu_thread_atexit_notify(void *arg)
 {
-    union NotifierThreadData ntd = { .ptr = arg };
-    notifier_list_notify(&ntd.list, NULL);
+    /*
+     * Called when non-main thread exits (via qemu_thread_exit()
+     * or by returning from its start routine.)
+     */
+    notifier_list_notify(&thread_exit, NULL);
 }
-
-static void __attribute__((constructor)) qemu_thread_atexit_init(void)
-{
-    pthread_key_create(&exit_key, qemu_thread_atexit_run);
-}
-
 
 struct QemuThreadData {
     void *(*start_routine)(void *);
@@ -494,17 +486,25 @@ static void *qemu_thread_start(void *arg)
     QemuThread *this_thread = arg;
     void *(*start_routine)(void *) = this_thread->base.thread_data->start_routine;
     void *thread_arg = this_thread->base.thread_data->arg;
+    void *r;
 
-#ifdef CONFIG_PTHREAD_SETNAME_NP
+#ifdef CONFIG_THREAD_SETNAME_BYTHREAD
     /* Attempt to set the threads name; note that this is for debug, so
      * we're not going to fail if we can't set it.
      */
     if (name_threads && this_thread->base.thread_data->name) {
+# if defined(CONFIG_PTHREAD_SETNAME_NP_W_TID)
         pthread_setname_np(pthread_self(), this_thread->base.thread_data->name);
+# elif defined(CONFIG_PTHREAD_SETNAME_NP_WO_TID)
+        pthread_setname_np(this_thread->base.thread_data->name);
+# endif
     }
 #endif
     current_thread = this_thread;
-    qemu_thread_exit(start_routine(thread_arg));
+    pthread_cleanup_push(qemu_thread_atexit_notify, NULL);
+    r = start_routine(thread_arg);
+    pthread_cleanup_pop(1);
+    qemu_thread_exit(r);
     abort();
     return NULL;
 }
@@ -529,6 +529,11 @@ void qemu_thread_create(QemuThread *thread, const char *name,
 
     /* Leave signal handling to the iothread.  */
     sigfillset(&set);
+    /* Blocking the signals can result in undefined behaviour. */
+    sigdelset(&set, SIGSEGV);
+    sigdelset(&set, SIGFPE);
+    sigdelset(&set, SIGILL);
+    /* TODO avoid SIGBUS loss on macOS */
     pthread_sigmask(SIG_SETMASK, &set, &oldset);
 
     data = g_new0(QemuThreadData, 1);

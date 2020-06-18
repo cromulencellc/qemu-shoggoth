@@ -122,7 +122,23 @@ ENDFN	__start
  */
 	.org	0x0080
 Pal_Mchk:
-	halt
+	mfpr	p6, qemu_exc_addr	// Check for palcode mchk
+	blbs	p6, MchkFromPal
+	mfpr	p0, ptMces		// Check for double mchk
+	blbs	p0, MchkDouble
+
+	// Since this is QEMU, the only MCHK we raise spontaneously
+	// is for access to non-existent memory.
+	//
+	// ??? With MemTxResult we could perhaps distinguish
+	// between MEMTX_DECODE_ERROR (no memory) and
+	// MEMTX_ERROR (device error), but it's not clear whether
+	// "device error" corresponds to "PCI target abort" or whatnot.
+	// However the main reason to handle mchk at all is to allow
+	// the guest OS to probe for devices, which is just "no memory".
+
+	lda	t0, MCHK_K_SYS_NOMEM
+	br	MchkLogOut
 ENDFN	Pal_Mchk
 
 /*
@@ -259,8 +275,8 @@ ENDFN	Pal_MMFault
 Pal_Unalign:
 	mfpr	p0, qemu_ps
 	mfpr	p6, qemu_exc_addr
-	addq	p6, 4, p1		// increment past the faulting insn
 	blbs	p6, MchkBugCheck
+	addq	p6, 4, p6		// increment past the faulting insn
 
 	STACK_FRAME p0, p1, p2, 1
 
@@ -291,10 +307,9 @@ ENDFN	Pal_Unalign
 Pal_OpcDec:
 	mfpr	p0, qemu_ps
 	mfpr	p6, qemu_exc_addr
-	addq	p6, 4, p1		// increment past the faulting insn
 	blbs	p6, MchkBugCheck
 
-	STACK_FRAME p0, p1, p2, 1
+	STACK_FRAME p0, p6, p2, 1
 
 	mfpr	p0, ptEntIF
 	mfpr	$gp, ptKgp
@@ -1410,7 +1425,8 @@ CallPal_CallSys:
 	hw_ret	(p0)
 
 0:	subq	p6, 4, p6		// Get PC of CALL_PAL insn
-	br	MchkOSBugCheck
+	lda	p0, MCHK_K_OS_BUGCHECK
+	br	MchkLogOut
 ENDFN	CallPal_CallSys
 
 	ORG_CALL_PAL_UNPRIV(0x84)
@@ -1763,80 +1779,6 @@ ENDFN	CallPal_OpcDec
 	.org	0x3000
 	.text	1
 /*
- * PALcode detected processor machine check handler.
- *
- *      The PALcode-detected machine check handler loads a code
- *      indicating the type of machine check error, loads 
- *      the System Control Block (SCB) vector for the 
- *      processor machine check service routine, sets the 
- *      Machine-Check-In-Progress (MIP) flag in the Machine
- *      Check Error Summary register (MCES), and merges
- *      with the common machine check flow.
- *
- *      If a second processor machine check error condition 
- *      is detected while the MIP flag is set, the processor 
- *      is forced into console I/O mode indicating "double 
- *      error abort encountered" as the reason for the halt. 
- * 
- * CALLING SEQUENCE:
- * 
- *      Called when an internal processor error is detected
- *      that cannot be successfully corrected by hardware or
- *      PALcode.
- * 
- * INPUT PARAMETERS:
- *
- *      r14 (p6) = Exception address 
- * 
- * OUTPUT PARAMETERS:
- *
- *      ptMchk0         = saved v0
- *      ptMchk1         = saved t0
- *      ptMchk2         = saved t3
- *      ptMchk3         = saved t4
- *      ptMchk4         = saved t5
- *	ptMchk5		= saved exc_addr
- *      ptMisc<47:32>   = MCHK code
- *      ptMisc<31:16>   = SCB vector
- *      ptMces<MIP>     = Set
- * 
- * SIDE EFFECTS:
- *
- *      r0 (v0), r1 (t0), and r4..r6 (t3..t5) are saved in
- *      PAL temporaries and are available for use as scratch
- *      registers by the system specific machine check 
- *      handler.
- */
-
-MchkBugCheck:
-MchkOSBugCheck:
-	halt
-ENDFN	MchkBugCheck
-
-/*
- * Common Machine Check Handler
- *
- * INPUT STATE:
- *
- *      ptMchk0		Saved v0
- *      ptMchk1		Saved t0
- *      ptMchk2		Saved t3
- *      ptMchk3		Saved t4
- *      ptMchk4		Saved t5
- *      ptMchk5		Saved exc_addr
- *      ptMisc<47:32>	MCHK code
- *      ptMisc<31:16>	SCB vector
- *      ptMces<MIP>	Set
- *
- * Registers v0, t0, and t3 .. t5 are available for use, in
- * addition to the shadow registers.
- */
-
-MchkCommon:
-	halt
-ENDFN	MchkCommon
-
-/*
  * Build Machine Check Logout Frame
  *
  *      This portion of the  machine check handler builds a logout frame
@@ -1849,6 +1791,11 @@ ENDFN	MchkCommon
  *      to the kernel interrupt handler pointed to by the entInt 
  *      operating system entry point.
  *
+ * INPUT PARAMETERS:
+ *
+ *      r8  (p0) = Machine check reason
+ *      r14 (p6) = Exception address 
+ *
  * OUTPUT PARAMETERS:
  * 
  *      a0 (r16) = Machine check entry type
@@ -1856,13 +1803,70 @@ ENDFN	MchkCommon
  *      a2 (r18) = Pointer to logout area
  */
 
-.macro	STORE_IPR	which, offset, base
-	mfpr	v0, \which
-	stq_p	v0, \offset(\base)
-.endm
+#define MCHK_COMMON_SIZE  24
+#define MCHK_LOGOUT_SIZE  144
 
 MchkLogOut:
-	halt
+	mfpr	p1, qemu_ps
+
+	// ??? Apparently we skip the insn that caused the mchk.
+	// ??? This is used by the kernel for mcheck_expected.
+	addq	p6, 4, p6
+
+	STACK_FRAME p1, p6, p2, 0
+
+	// Restore the real EXC_ADDR for the logout frame.
+	subq	p6, 4, p6
+
+	// Locate logout frame
+	br	$gp, .+4
+	ldah	$gp, 0($gp)			!gpdisp!2
+	lda	$gp, 0($gp)			!gpdisp!2
+	ldah	p1, mchk_logout($gp)		!gprelhigh
+	lda	p1, mchk_logout(p1)		!gprellow
+
+	SYS_WHAMI p2
+	mull	p2, MCHK_LOGOUT_SIZE, p2
+	addq	p2, p1, a2
+
+	// Populate the minimal logout frame
+	lda	p2, MCHK_LOGOUT_SIZE
+	stl	p2, 0(a2)			// size
+	stl	$31, 4(a2)			// flags
+	lda	p1, MCHK_COMMON_SIZE
+	stl	p1, 8(a2)			// proc_offset
+	stl	p2, 12(a2)			// sys_offset
+	stl	p0, 16(a2)			// mchk_code
+	stl	$31, 20(a2)			// frame_rev
+
+	// EV6 portion, format copied from Linux kernel
+	// although there's not much we can fill in.
+	stq	$31, 24(a2)			// I_STAT
+	stq	$31, 32(a2)			// DC_STAT
+	stq	$31, 40(a2)			// C_ADDR
+	stq	$31, 48(a2)			// DC1_SYNDROME
+	stq	$31, 56(a2)			// DC0_SYNDROME
+	stq	$31, 64(a2)			// C_STAT
+	stq	$31, 72(a2)			// C_STS
+	stq	$31, 80(a2)			// MM_STAT
+	stq	p6, 88(a2)			// EXC_ADDR
+	stq	$31, 96(a2)			// IER_CM
+	stq	$31, 104(a2)			// ISUM
+	stq	$31, 112(a2)			// RESERVED0
+	mfpr	p2, qemu_palbr
+	stq	p2, 120(a2)			// PAL_BASE
+	stq	$31, 128(a2)			// I_CTL
+	stq	$31, 136(a2)			// PCTX
+
+	mov	IPL_K_MCHK, p1			// Raise IPL
+	mtpr	p1, qemu_ps
+
+	mfpr	p6, ptEntInt
+	mfpr	$gp, ptKgp
+	lda	a0, INT_K_MCHK
+	lda	a1, 0				// "vector"
+
+	hw_ret	(p6)
 ENDFN	MchkLogOut
 
 MchkDouble:
@@ -1871,6 +1875,7 @@ MchkDouble:
 	br	Sys_EnterConsole
 ENDFN	MchkDouble
 
+MchkBugCheck:
 MchkFromPal:
 	bsr	p7, UpdatePCB
 	lda	v0, HLT_K_MCHK_FROM_PAL
@@ -1932,3 +1937,9 @@ Sys_EnterConsole:
 	.type	stack,@object
 	.size	stack,STACK_SIZE * 4
 stack:	.skip	STACK_SIZE * 4
+
+	.globl	mchk_logout
+	.type	mchk_logout,@object
+	.size	mchk_logout,MCHK_LOGOUT_SIZE * 4
+mchk_logout:
+	.skip	MCHK_LOGOUT_SIZE * 4

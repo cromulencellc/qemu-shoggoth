@@ -1031,14 +1031,6 @@ static const MemoryRegionOps spips_ops = {
 
 static void xilinx_qspips_invalidate_mmio_ptr(XilinxQSPIPS *q)
 {
-    XilinxSPIPS *s = &q->parent_obj;
-
-    if ((q->mmio_execution_enabled) && (q->lqspi_cached_addr != ~0ULL)) {
-        /* Invalidate the current mapped mmio */
-        memory_region_invalidate_mmio_ptr(&s->mmlqspi, q->lqspi_cached_addr,
-                                          LQSPI_CACHE_SIZE);
-    }
-
     q->lqspi_cached_addr = ~0ULL;
 }
 
@@ -1207,46 +1199,47 @@ static void lqspi_load_cache(void *opaque, hwaddr addr)
     }
 }
 
-static void *lqspi_request_mmio_ptr(void *opaque, hwaddr addr, unsigned *size,
-                                    unsigned *offset)
+static MemTxResult lqspi_read(void *opaque, hwaddr addr, uint64_t *value,
+                              unsigned size, MemTxAttrs attrs)
 {
-    XilinxQSPIPS *q = opaque;
-    hwaddr offset_within_the_region;
-
-    if (!q->mmio_execution_enabled) {
-        return NULL;
-    }
-
-    offset_within_the_region = addr & ~(LQSPI_CACHE_SIZE - 1);
-    lqspi_load_cache(opaque, offset_within_the_region);
-    *size = LQSPI_CACHE_SIZE;
-    *offset = offset_within_the_region;
-    return q->lqspi_buf;
-}
-
-static uint64_t
-lqspi_read(void *opaque, hwaddr addr, unsigned int size)
-{
-    XilinxQSPIPS *q = opaque;
-    uint32_t ret;
+    XilinxQSPIPS *q = XILINX_QSPIPS(opaque);
 
     if (addr >= q->lqspi_cached_addr &&
             addr <= q->lqspi_cached_addr + LQSPI_CACHE_SIZE - 4) {
         uint8_t *retp = &q->lqspi_buf[addr - q->lqspi_cached_addr];
-        ret = cpu_to_le32(*(uint32_t *)retp);
-        DB_PRINT_L(1, "addr: %08x, data: %08x\n", (unsigned)addr,
-                   (unsigned)ret);
-        return ret;
-    } else {
-        lqspi_load_cache(opaque, addr);
-        return lqspi_read(opaque, addr, size);
+        *value = cpu_to_le32(*(uint32_t *)retp);
+        DB_PRINT_L(1, "addr: %08" HWADDR_PRIx ", data: %08" PRIx64 "\n",
+                   addr, *value);
+        return MEMTX_OK;
     }
+
+    lqspi_load_cache(opaque, addr);
+    return lqspi_read(opaque, addr, value, size, attrs);
+}
+
+static MemTxResult lqspi_write(void *opaque, hwaddr offset, uint64_t value,
+                               unsigned size, MemTxAttrs attrs)
+{
+    /*
+     * From UG1085, Chapter 24 (Quad-SPI controllers):
+     * - Writes are ignored
+     * - AXI writes generate an external AXI slave error (SLVERR)
+     */
+    qemu_log_mask(LOG_GUEST_ERROR, "%s Unexpected %u-bit access to 0x%" PRIx64
+                                   " (value: 0x%" PRIx64 "\n",
+                  __func__, size << 3, offset, value);
+
+    return MEMTX_ERROR;
 }
 
 static const MemoryRegionOps lqspi_ops = {
-    .read = lqspi_read,
-    .request_ptr = lqspi_request_mmio_ptr,
+    .read_with_attrs = lqspi_read,
+    .write_with_attrs = lqspi_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
     .valid = {
         .min_access_size = 1,
         .max_access_size = 4
@@ -1322,15 +1315,6 @@ static void xilinx_qspips_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(sbd, &s->mmlqspi);
 
     q->lqspi_cached_addr = ~0ULL;
-
-    /* mmio_execution breaks migration better aborting than having strange
-     * bugs.
-     */
-    if (q->mmio_execution_enabled) {
-        error_setg(&q->migration_blocker,
-                   "enabling mmio_execution breaks migration");
-        migrate_add_blocker(q->migration_blocker, &error_fatal);
-    }
 }
 
 static void xlnx_zynqmp_qspips_realize(DeviceState *dev, Error **errp)
@@ -1427,16 +1411,6 @@ static Property xilinx_zynqmp_qspips_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
-static Property xilinx_qspips_properties[] = {
-    /* We had to turn this off for 2.10 as it is not compatible with migration.
-     * It can be enabled but will prevent the device to be migrated.
-     * This will go aways when a fix will be released.
-     */
-    DEFINE_PROP_BOOL("x-mmio-exec", XilinxQSPIPS, mmio_execution_enabled,
-                     false),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
 static Property xilinx_spips_properties[] = {
     DEFINE_PROP_UINT8("num-busses", XilinxSPIPS, num_busses, 1),
     DEFINE_PROP_UINT8("num-ss-bits", XilinxSPIPS, num_cs, 4),
@@ -1450,7 +1424,6 @@ static void xilinx_qspips_class_init(ObjectClass *klass, void * data)
     XilinxSPIPSClass *xsc = XILINX_SPIPS_CLASS(klass);
 
     dc->realize = xilinx_qspips_realize;
-    dc->props = xilinx_qspips_properties;
     xsc->reg_ops = &qspips_ops;
     xsc->rx_fifo_size = RXFF_A_Q;
     xsc->tx_fifo_size = TXFF_A_Q;

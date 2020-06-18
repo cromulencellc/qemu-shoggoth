@@ -8,7 +8,14 @@ fi
 
 # stat differs between platforms
 if [ -z "$STATSZ" ]; then
-	STATSZ="stat -c %s"
+	stat --version 2>/dev/null | grep -q 'GNU'
+	GNUSTAT=$?
+	if [ "$GNUSTAT" -ne 0 ]; then
+		# Assume BSD stat if we can't detect as GNU stat
+		STATSZ="stat -f %Uz"
+	else
+		STATSZ="stat -c %s"
+	fi
 fi
 
 export QUIET_TEST=1
@@ -232,12 +239,37 @@ dtc_overlay_tests () {
     run_test check_path overlay_base.test.dtb not-exists "/__fixups__"
     run_test check_path overlay_base.test.dtb not-exists "/__local_fixups__"
 
+    # With syntactic sugar
     run_dtc_test -I dts -O dtb -o overlay_overlay.test.dtb overlay_overlay.dts
     run_test check_path overlay_overlay.test.dtb not-exists "/__symbols__"
     run_test check_path overlay_overlay.test.dtb exists "/__fixups__"
     run_test check_path overlay_overlay.test.dtb exists "/__local_fixups__"
 
+    # Without syntactic sugar
+    run_dtc_test -I dts -O dtb -o overlay_overlay_nosugar.test.dtb overlay_overlay.dts
+    run_test check_path overlay_overlay_nosugar.test.dtb not-exists "/__symbols__"
+    run_test check_path overlay_overlay_nosugar.test.dtb exists "/__fixups__"
+    run_test check_path overlay_overlay_nosugar.test.dtb exists "/__local_fixups__"
+
+    # Using target-path
+    run_dtc_test -I dts -O dtb -o overlay_overlay_bypath.test.dtb overlay_overlay_bypath.dts
+    run_test check_path overlay_overlay_bypath.test.dtb not-exists "/__symbols__"
+    run_test check_path overlay_overlay_bypath.test.dtb not-exists "/__fixups__"
+    run_test check_path overlay_overlay_bypath.test.dtb exists "/__local_fixups__"
+
+    # Check building works the same as manual constructions
+    run_test dtbs_equal_ordered overlay_overlay.test.dtb overlay_overlay_nosugar.test.dtb
+
+    run_dtc_test -I dts -O dtb -o overlay_overlay_manual_fixups.test.dtb overlay_overlay_manual_fixups.dts
+    run_test dtbs_equal_ordered overlay_overlay.test.dtb overlay_overlay_manual_fixups.test.dtb
+
+    run_dtc_test -I dts -O dtb -o overlay_overlay_no_fixups.test.dtb overlay_overlay_no_fixups.dts
+    run_test dtbs_equal_ordered overlay_overlay_bypath.test.dtb overlay_overlay_no_fixups.test.dtb
+
+    # Check we can actually apply the result
+    run_dtc_test -I dts -O dtb -o overlay_base_no_symbols.test.dtb overlay_base.dts
     run_test overlay overlay_base.test.dtb overlay_overlay.test.dtb
+    run_test overlay overlay_base_no_symbols.test.dtb overlay_overlay_bypath.test.dtb
 
     # test plugin source to dtb and back
     run_dtc_test -I dtb -O dts -o overlay_overlay_decompile.test.dts overlay_overlay.test.dtb
@@ -304,6 +336,8 @@ libfdt_tests () {
 
     run_dtc_test -I dts -O dtb -o addresses.test.dtb addresses.dts
     run_test addr_size_cells addresses.test.dtb
+    run_dtc_test -I dts -O dtb -o addresses2.test.dtb empty.dts
+    run_test addr_size_cells2 addresses2.test.dtb
 
     run_dtc_test -I dts -O dtb -o stringlist.test.dtb stringlist.dts
     run_test stringlist stringlist.test.dtb
@@ -313,9 +347,10 @@ libfdt_tests () {
     tree1_tests sw_tree1.test.dtb
     tree1_tests unfinished_tree1.test.dtb
     run_test dtbs_equal_ordered test_tree1.dtb sw_tree1.test.dtb
+    run_test sw_states
 
     # Resizing tests
-    for mode in resize realloc; do
+    for mode in resize realloc newalloc; do
 	run_test sw_tree1 $mode
 	tree1_tests sw_tree1.test.dtb
 	tree1_tests unfinished_tree1.test.dtb
@@ -382,6 +417,8 @@ libfdt_tests () {
 
     # Tests for behaviour on various sorts of corrupted trees
     run_test truncated_property
+    run_test truncated_string
+    run_test truncated_memrsv
 
     # Check aliases support in fdt_path_offset
     run_dtc_test -I dts -O dtb -o aliases.dtb aliases.dts
@@ -408,6 +445,17 @@ libfdt_tests () {
     run_wrap_error_test $DTC nul-in-line-info2.dts
 
     run_wrap_error_test $DTC -I dtb -O dts -o /dev/null ovf_size_strings.dtb
+
+    run_test check_header test_tree1.dtb
+
+    # check full tests
+    for good in test_tree1.dtb; do
+	run_test check_full $good
+    done
+    for bad in truncated_property.dtb truncated_string.dtb \
+				      truncated_memrsv.dtb; do
+	run_test check_full -n $bad
+    done
 }
 
 dtc_tests () {
@@ -505,6 +553,13 @@ dtc_tests () {
 	run_test dtbs_equal_ordered $tree odts_$tree.test.dtb
     done
 
+    # Check -Odts preserving type information
+    for tree in type-preservation.dts; do
+        run_dtc_test -I dts -O dts -o $tree.test.dts $tree
+        run_dtc_test -I dts -O dts $tree.test.dts
+        run_wrap_test cmp $tree $tree.test.dts
+    done
+
     # Check version conversions
     for tree in test_tree1.dtb ; do
 	 for aver in 1 2 3 16 17; do
@@ -536,6 +591,13 @@ dtc_tests () {
     run_dtc_test -I dts -O dtb -o dtc_tree1_delete.test.dtb test_tree1_delete.dts
     tree1_tests dtc_tree1_delete.test.dtb
 
+    # Check omit-if-no-ref functionality
+    run_dtc_test -I dts -O dtb -o omit-no-ref.test.dtb omit-no-ref.dts
+    run_test check_path omit-no-ref.test.dtb not-exists "/node1"
+    run_test check_path omit-no-ref.test.dtb not-exists "/node2"
+    run_test check_path omit-no-ref.test.dtb exists "/node3"
+    run_test check_path omit-no-ref.test.dtb exists "/node4"
+
     run_dtc_test -I dts -O dts -o delete_reinstate_multilabel.dts.test.dts delete_reinstate_multilabel.dts
     run_wrap_test cmp delete_reinstate_multilabel.dts.test.dts delete_reinstate_multilabel_ref.dts
 
@@ -564,13 +626,17 @@ dtc_tests () {
     check_tests unit-addr-without-reg.dts unit_address_vs_reg
     check_tests unit-addr-leading-0x.dts unit_address_format
     check_tests unit-addr-leading-0s.dts unit_address_format
+    check_tests unit-addr-unique.dts unique_unit_address
     check_tests bad-phandle-cells.dts interrupts_extended_property
     check_tests bad-gpio.dts gpios_property
+    check_tests bad-graph.dts graph_child_address
+    check_tests bad-graph.dts graph_port
+    check_tests bad-graph.dts graph_endpoint
     run_sh_test dtc-checkfails.sh deprecated_gpio_property -- -Wdeprecated_gpio_property -I dts -O dtb bad-gpio.dts
     check_tests bad-interrupt-cells.dts interrupts_property
     run_sh_test dtc-checkfails.sh node_name_chars -- -I dtb -O dtb bad_node_char.dtb
     run_sh_test dtc-checkfails.sh node_name_format -- -I dtb -O dtb bad_node_format.dtb
-    run_sh_test dtc-checkfails.sh prop_name_chars -- -I dtb -O dtb bad_prop_char.dtb
+    run_sh_test dtc-checkfails.sh property_name_chars -- -I dtb -O dtb bad_prop_char.dtb
 
     run_sh_test dtc-checkfails.sh duplicate_label -- -I dts -O dtb reuse-label1.dts
     run_sh_test dtc-checkfails.sh duplicate_label -- -I dts -O dtb reuse-label2.dts
@@ -831,6 +897,7 @@ fdtoverlay_tests() {
 }
 
 pylibfdt_tests () {
+    run_dtc_test -I dts -O dtb -o test_props.dtb test_props.dts
     TMP=/tmp/tests.stderr.$$
     python pylibfdt_tests.py -v 2> $TMP
 

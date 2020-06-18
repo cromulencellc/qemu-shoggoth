@@ -459,7 +459,16 @@ static bool fsp_crit_op_in_progress(struct fsp *fsp)
 /* Notify the FSP that it will be reset soon by writing to the DRCR */
 static void fsp_prep_for_reset(struct fsp *fsp)
 {
-	u32 drcr = fsp_rreg(fsp, FSP_DRCR_REG);
+	u32 drcr;
+
+	/*
+	 * Its possible that the FSP went into reset by itself between the
+	 * time the HIR is triggered and we get here. Check and bail out if so.
+	 */
+	if (fsp_in_rr())
+		return;
+
+	drcr = fsp_rreg(fsp, FSP_DRCR_REG);
 
 	prlog(PR_TRACE, "FSP: Writing reset to DRCR\n");
 	drcr_last_print = drcr;
@@ -471,6 +480,9 @@ static void fsp_prep_for_reset(struct fsp *fsp)
 static void fsp_hir_poll(struct fsp *fsp, struct psi *psi)
 {
 	u32 drcr;
+
+	if (fsp_in_reset(fsp) || !(psi_check_link_active(psi)))
+		return;
 
 	switch (fsp->state) {
 	case fsp_mbx_crit_op:
@@ -992,7 +1004,7 @@ static void __fsp_fillmsg(struct fsp_msg *msg, u32 cmd_sub_mod,
 	va_end(list);
 }
 
-void fsp_fillmsg(struct fsp_msg *msg, u32 cmd_sub_mod, u8 add_words, ...)
+void fsp_fillmsg(struct fsp_msg *msg, u32 cmd_sub_mod, u32 add_words, ...)
 {
 	va_list list;
 
@@ -1001,7 +1013,7 @@ void fsp_fillmsg(struct fsp_msg *msg, u32 cmd_sub_mod, u8 add_words, ...)
 	va_end(list);
 }
 
-struct fsp_msg *fsp_mkmsg(u32 cmd_sub_mod, u8 add_words, ...)
+struct fsp_msg *fsp_mkmsg(u32 cmd_sub_mod, u32 add_words, ...)
 {
 	struct fsp_msg *msg = fsp_allocmsg(!!(cmd_sub_mod & 0x1000000));
 	va_list list;
@@ -1287,7 +1299,6 @@ static bool fsp_local_command(u32 cmd_sub_mod, struct fsp_msg *msg)
 		fsp_alloc_inbound(msg);
 		return true;
 	case FSP_CMD_SP_RELOAD_COMP:
-		prlog(PR_INFO, "FSP: SP says Reset/Reload complete\n");
 		if (msg->data.bytes[3] & PPC_BIT8(0)) {
 			fsp_fips_dump_notify(msg->data.words[1],
 					     msg->data.words[2]);
@@ -1297,8 +1308,9 @@ static bool fsp_local_command(u32 cmd_sub_mod, struct fsp_msg *msg)
 				      msg->data.words[3]);
 		}
 		if (msg->data.bytes[3] & PPC_BIT8(2)) {
-			prlog(PR_DEBUG, "  A Reset/Reload was NOT done\n");
+			prlog(PR_INFO, "FSP: SP Reset/Reload was NOT done\n");
 		} else {
+			prlog(PR_INFO, "FSP: SP says Reset/Reload complete\n");
 			/* Notify clients that the FSP is back up */
 			fsp_notify_rr_state(FSP_RELOAD_COMPLETE);
 			fsp_repost_queued_msgs_post_rr();
@@ -1588,14 +1600,14 @@ static void __fsp_poll(bool interrupt)
 	}
 	iop = &fsp->iopath[fsp->active_iopath];
 
+	/* Check for error state and handle R&R completion */
+	fsp_handle_errors(fsp);
+
 	/* Handle host initiated resets */
 	if (fsp_in_hir(fsp)) {
 		fsp_hir_poll(fsp, iop->psi);
 		return;
 	}
-
-	/* Check for error state and handle R&R completion */
-	fsp_handle_errors(fsp);
 
 	/*
 	 * The above might have triggered and R&R, check that we
@@ -2350,6 +2362,9 @@ int fsp_fetch_data_queue(uint8_t flags, uint16_t id, uint32_t sub_id,
 #define CAPP_IDX_NIMBUS_DD10 0x100d1
 #define CAPP_IDX_NIMBUS_DD20 0x200d1
 #define CAPP_IDX_NIMBUS_DD21 0x201d1
+#define CAPP_IDX_NIMBUS_DD22 0x202d1
+
+#define IMA_CATALOG_NIMBUS	0x4e0200
 
 static struct {
 	enum resource_id	id;
@@ -2358,6 +2373,7 @@ static struct {
 } fsp_lid_map[] = {
 	{ RESOURCE_ID_KERNEL,	RESOURCE_SUBID_NONE,	KERNEL_LID_OPAL },
 	{ RESOURCE_ID_INITRAMFS,RESOURCE_SUBID_NONE,	INITRAMFS_LID_OPAL },
+	{ RESOURCE_ID_IMA_CATALOG,IMA_CATALOG_NIMBUS,	0x80f00103 },
 	{ RESOURCE_ID_CAPP,	CAPP_IDX_MURANO_DD20,	0x80a02002 },
 	{ RESOURCE_ID_CAPP,	CAPP_IDX_MURANO_DD21,	0x80a02001 },
 	{ RESOURCE_ID_CAPP,	CAPP_IDX_VENICE_DD10,	0x80a02003 },
@@ -2366,6 +2382,7 @@ static struct {
 	{ RESOURCE_ID_CAPP,	CAPP_IDX_NIMBUS_DD10,	0x80a02006 },
 	{ RESOURCE_ID_CAPP,	CAPP_IDX_NIMBUS_DD20,	0x80a02007 },
 	{ RESOURCE_ID_CAPP,	CAPP_IDX_NIMBUS_DD21,	0x80a02007 },
+	{ RESOURCE_ID_CAPP,	CAPP_IDX_NIMBUS_DD22,	0x80a02007 },
 };
 
 static void fsp_start_fetching_next_lid(void);

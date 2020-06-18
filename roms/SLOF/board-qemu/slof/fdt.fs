@@ -279,6 +279,21 @@ fdt-claim-reserve
    2drop
 ;
 
+: (fdt-replace-phandles) ( old new propname propnamelen node -- )
+    get-property IF 2drop EXIT THEN
+    BEGIN
+        dup
+    WHILE                   ( old new prop-addr prop-len )
+        over l@
+        4 pick = IF
+            2 pick 2 pick l! \ replace old with new in place
+            TRUE TO (fdt-phandle-replaced)
+        THEN
+        4 - swap 4 + swap
+    REPEAT
+    2drop 2drop
+;
+
 \ Replace one phandle "old" with a phandle "new" in "node" and recursively
 \ in its child nodes:
 : fdt-replace-all-phandles ( old new node -- )
@@ -288,14 +303,13 @@ fdt-claim-reserve
       ( old new prop-addr prop-len  R: node )
       fdt-replace-interrupt-map
    THEN
-   s" interrupt-parent" r@ get-property 0= IF
-      ( old new prop-addr prop-len  R: node )
-      decode-int -rot 2drop                  ( old new val  R: node )
-      2 pick = IF                            ( old new      R: node )
-         dup encode-int s" interrupt-parent" r@ set-property
-         TRUE TO (fdt-phandle-replaced)
-      THEN
-   THEN
+
+   2dup s" interrupt-parent" r@ (fdt-replace-phandles)
+   2dup s" ibm,gpu" r@ (fdt-replace-phandles)
+   2dup s" ibm,npu" r@ (fdt-replace-phandles)
+   2dup s" ibm,nvlink" r@ (fdt-replace-phandles)
+   2dup s" memory-region" r@ (fdt-replace-phandles)
+
    \ ... add more properties that have to be fixed here ...
    r>
    \ Now recurse over all child nodes:       ( old new node )

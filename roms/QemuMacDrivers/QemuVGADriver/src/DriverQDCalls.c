@@ -25,7 +25,7 @@ static UInt8 DepthModeToDepth(UInt8 mode)
 {
 	switch (mode) {
 	case kDepthMode1:
-		return 32;
+		return 8;
 	case kDepthMode2:
 		return 15;
 	case kDepthMode3:

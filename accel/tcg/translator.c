@@ -17,8 +17,6 @@
 #include "exec/gen-icount.h"
 #include "exec/log.h"
 #include "exec/translator.h"
-#include "oshandler/oshandler.h"
-#include "qapi/qmp/qpointer.h"
 
 /* Pairs with tcg_clear_temp_count.
    To be called by #TranslatorOps.{translate_insn,tb_stop} if
@@ -36,6 +34,8 @@ void translator_loop_temp_check(DisasContextBase *db)
 void translator_loop(const TranslatorOps *ops, DisasContextBase *db,
                      CPUState *cpu, TranslationBlock *tb)
 {
+    int bp_insn = 0;
+
     /* Initialize DisasContext */
     db->tb = tb;
     db->pc_first = tb->pc;
@@ -73,11 +73,13 @@ void translator_loop(const TranslatorOps *ops, DisasContextBase *db,
         tcg_debug_assert(db->is_jmp == DISAS_NEXT);  /* no early exit */
 
         /* Pass breakpoint hits to target for further processing */
-        if (unlikely(!QTAILQ_EMPTY(&cpu->breakpoints))) {
+        if (!db->singlestep_enabled
+            && unlikely(!QTAILQ_EMPTY(&cpu->breakpoints))) {
             CPUBreakpoint *bp;
             QTAILQ_FOREACH(bp, &cpu->breakpoints, entry) {
                 if (bp->pc == db->pc_next) {
                     if (ops->breakpoint_check(db, cpu, bp)) {
+                        bp_insn = 1;
                         break;
                     }
                 }
@@ -120,7 +122,7 @@ void translator_loop(const TranslatorOps *ops, DisasContextBase *db,
 
     /* Emit code to exit the TB, as indicated by db->is_jmp.  */
     ops->tb_stop(db, cpu);
-    gen_tb_end(db->tb, db->num_insns);
+    gen_tb_end(db->tb, db->num_insns - bp_insn);
 
     /* The disas_log hook may use these values rather than recompute.  */
     db->tb->size = db->pc_next - db->pc_first;

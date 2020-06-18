@@ -41,7 +41,7 @@ The bootloader will kexec a host kernel (probably linux). The host OS can
 make OPAL calls. The OPAL API is documented in doc/opal-api/ (there are
 missing parts, patches are welcome!)
 
-See doc/overview.txt for a more in depth overview of skiboot.
+See doc/overview.rst for a more in depth overview of skiboot.
 
 ## Building
 
@@ -90,16 +90,21 @@ To test in a simulator, install the IBM POWER8 Functional Simulator from:
 http://www-304.ibm.com/support/customercare/sas/f/pwrfs/home.html
 Also see external/mambo/README.md
 
-Qemu (as of 2.2.0) is not suitable as it does not (yet) implement
-the HyperVisor mode of the POWER8 processor.
-See https://www.flamingspork.com/blog/2015/08/28/running-opal-in-qemu-the-powernv-platform/ for instructions on how to use a work-in-progress patchset
-to qemu that may be suitable for some work.
+Qemu as of version 2.8 implements the 'powernv' machine model and is sufficient
+to run skiboot:
 
-To run a boot-to-bootloader test, you'll need a zImage.papr built using
-the mambo_defconfig config for op-build. See
-https://github.com/open-power/op-build/ on howto build. Drop zImage.epapr
-in the skiboot directory and the skiboot test suite will automatically pick
-it up.
+ qemu-system-ppc64 -M powernv -m 3G -nographic -L /path/to/skiboot/
+
+To run a boot-to-bootloader test you need a Linux kernel image 'zImage.epapr'.
+Build one using the `mambo_defconfig` config for op-build. See
+https://github.com/open-power/op-build/ on how to build, or download one from
+https://openpower.xyz/job/openpower/job/openpower-op-build/.
+
+Drop zImage.epapr in the skiboot directory and the skiboot test suite will
+automatically pick it up. You can also run a combined skiboot and Linux test in
+Qemu (version 3.0+):
+
+ qemu-system-ppc64 -M powernv -m 3G -nographic -kernel zImage.epapr -L /path/to/skiboot/
 
 See opal-ci/README for further testing instructions.
 
@@ -122,6 +127,25 @@ git format-patch
 You probably want to read the linux
 https://kernel.org/doc/html/latest/process/submitting-patches.html as
 much of it applies to skiboot.
+
+
+## Output files
+
+The Skiboot build process produces a bunch of different outputs. This is what
+they are, and where you should use them:
+
+ skiboot.elf: The output of the linker. Don't flash to a system, but useful when debugging
+
+ skiboot.lid: The raw binary object, named .lid because IBM. Flash this on
+	      really old P8 systems, the POWER Functional Simulator (mambo), or
+	      FSP systems
+
+ skiboot.lid.stb: Lid wrapped with secure boot header. Use on FSP systems
+
+ skiboot.lid.xz: Compressed raw binary. Use this on a OpenPower P8
+
+ skiboot.lid.xz.stb: Compressed raw binary wrapped with a secure boot header.
+                     Use this on OpenPower P9 systems
 
 ## License
 

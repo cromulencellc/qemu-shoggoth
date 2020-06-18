@@ -6,6 +6,7 @@
 #ifndef __FARPTR_H
 #define __FARPTR_H
 
+#include "autoconf.h"
 #include "x86.h" // insb
 
 // Dummy definitions used to make sure gcc understands dependencies
@@ -131,10 +132,15 @@ DECL_SEGFUNCS(SS)
 
 // Macros for converting to/from 32bit flat mode pointers to their
 // equivalent 16bit segment/offset values.
+#if CONFIG_X86
+#define FLATPTR_TO_SEG(p) (((u32)(p)) >> 4)
+#define FLATPTR_TO_OFFSET(p) (((u32)(p)) & 0xf)
+#define MAKE_FLATPTR(seg,off) ((void*)(((u32)(seg)<<4)+(u32)(off)))
+#elif CONFIG_PARISC
 #define FLATPTR_TO_SEG(p) (((u32)(p)) >> 16)
 #define FLATPTR_TO_OFFSET(p) (((u32)(p)) & 0xffff)
-
 #define MAKE_FLATPTR(seg,off) ((void*)(unsigned long)(off))
+#endif
 
 #if MODESEGMENT == 1
 

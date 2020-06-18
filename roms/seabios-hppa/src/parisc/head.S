@@ -1,7 +1,7 @@
 /*
  * Startup glue code for parisc firmware
  *
- *   (C) 2017-2018 Helge Deller <deller@gmx.de>
+ *   (C) 2017-2019 Helge Deller <deller@gmx.de>
  */
 
 #include "parisc/hppa_hardware.h"

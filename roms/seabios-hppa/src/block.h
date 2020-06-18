@@ -57,6 +57,8 @@ struct drive_s {
     u8 translation;     // type of translation
     u16 blksize;        // block size
     struct chs_s pchs;  // Physical CHS
+
+    u8 target, lun;     // SCSI target and LUN
 };
 
 #define DISK_SECTOR_SIZE  512

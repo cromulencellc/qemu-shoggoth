@@ -110,7 +110,8 @@ pci_find_class(u16 classid)
 int pci_init_device(const struct pci_device_id *ids
                     , struct pci_device *pci, void *arg)
 {
-dprintf(1, "pci_init_device: vendor 0x%x device 0x%x\n", pci->vendor, pci->device); 
+    dprintf(1, "pci_init_device: vendor 0x%x device 0x%x\n",
+        pci->vendor, pci->device);
     while (ids->vendid || ids->class_mask) {
         if ((ids->vendid == PCI_ANY_ID || ids->vendid == pci->vendor) &&
             (ids->devid == PCI_ANY_ID || ids->devid == pci->device) &&

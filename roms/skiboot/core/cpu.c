@@ -43,7 +43,7 @@ struct cpu_stack {
 	};
 } __align(STACK_SIZE);
 
-static struct cpu_stack *cpu_stacks = (struct cpu_stack *)CPU_STACKS_BASE;
+static struct cpu_stack * const cpu_stacks = (struct cpu_stack *)CPU_STACKS_BASE;
 unsigned int cpu_thread_count;
 unsigned int cpu_max_pir;
 struct cpu_thread *boot_cpu;
@@ -57,6 +57,7 @@ static bool ipi_enabled;
 static bool pm_enabled;
 static bool current_hile_mode;
 static bool current_radix_mode;
+static bool tm_suspend_enabled;
 
 unsigned long cpu_secondary_start __force_data = 0;
 
@@ -78,13 +79,28 @@ unsigned long __attrconst cpu_stack_bottom(unsigned int pir)
 
 unsigned long __attrconst cpu_stack_top(unsigned int pir)
 {
-	/* This is the top of the MC stack which is above the normal
-	 * stack, which means a SP between cpu_stack_bottom() and
-	 * cpu_stack_top() can either be a normal stack pointer or
-	 * a Machine Check stack pointer
-	 */
+	/* This is the top of the normal stack. */
 	return ((unsigned long)&cpu_stacks[pir]) +
 		NORMAL_STACK_SIZE - STACK_TOP_GAP;
+}
+
+unsigned long __attrconst cpu_emergency_stack_top(unsigned int pir)
+{
+	/* This is the top of the emergency stack, above the normal stack. */
+	return ((unsigned long)&cpu_stacks[pir]) +
+		NORMAL_STACK_SIZE + EMERGENCY_STACK_SIZE - STACK_TOP_GAP;
+}
+
+void __nomcount cpu_relax(void)
+{
+	/* Relax a bit to give sibling threads some breathing space */
+	smt_lowest();
+	asm volatile("nop; nop; nop; nop;\n"
+		     "nop; nop; nop; nop;\n"
+		     "nop; nop; nop; nop;\n"
+		     "nop; nop; nop; nop;\n");
+	smt_medium();
+	barrier();
 }
 
 static void cpu_wake(struct cpu_thread *cpu)
@@ -102,7 +118,11 @@ static void cpu_wake(struct cpu_thread *cpu)
 	}
 }
 
-static struct cpu_thread *cpu_find_job_target(void)
+/*
+ * If chip_id is >= 0, schedule the job on that node.
+ * Otherwise schedule the job anywhere.
+ */
+static struct cpu_thread *cpu_find_job_target(int32_t chip_id)
 {
 	struct cpu_thread *cpu, *best, *me = this_cpu();
 	uint32_t best_count;
@@ -120,6 +140,8 @@ static struct cpu_thread *cpu_find_job_target(void)
 	/* First we scan all available primary threads
 	 */
 	for_each_available_cpu(cpu) {
+		if (chip_id >= 0 && cpu->chip_id != chip_id)
+			continue;
 		if (cpu == me || !cpu_is_thread0(cpu) || cpu->job_has_no_return)
 			continue;
 		if (cpu->job_count)
@@ -139,6 +161,8 @@ static struct cpu_thread *cpu_find_job_target(void)
 	best = NULL;
 	best_count = -1u;
 	for_each_available_cpu(cpu) {
+		if (chip_id >= 0 && cpu->chip_id != chip_id)
+			continue;
 		if (cpu == me || cpu->job_has_no_return)
 			continue;
 		if (!best || cpu->job_count < best_count) {
@@ -161,6 +185,26 @@ static struct cpu_thread *cpu_find_job_target(void)
 
 	/* Go away */
 	return NULL;
+}
+
+/* job_lock is held, returns with it released */
+static void queue_job_on_cpu(struct cpu_thread *cpu, struct cpu_job *job)
+{
+	/* That's bad, the job will never run */
+	if (cpu->job_has_no_return) {
+		prlog(PR_WARNING, "WARNING ! Job %s scheduled on CPU 0x%x"
+		      " which has a no-return job on its queue !\n",
+		      job->name, cpu->pir);
+		backtrace();
+	}
+	list_add_tail(&cpu->job_queue, &job->link);
+	if (job->no_return)
+		cpu->job_has_no_return = true;
+	else
+		cpu->job_count++;
+	if (pm_enabled)
+		cpu_wake(cpu);
+	unlock(&cpu->job_lock);
 }
 
 struct cpu_job *__cpu_queue_job(struct cpu_thread *cpu,
@@ -192,7 +236,7 @@ struct cpu_job *__cpu_queue_job(struct cpu_thread *cpu,
 
 	/* Pick a candidate. Returns with target queue locked */
 	if (cpu == NULL)
-		cpu = cpu_find_job_target();
+		cpu = cpu_find_job_target(-1);
 	else if (cpu != this_cpu())
 		lock(&cpu->job_lock);
 	else
@@ -200,26 +244,52 @@ struct cpu_job *__cpu_queue_job(struct cpu_thread *cpu,
 
 	/* Can't be scheduled, run it now */
 	if (cpu == NULL) {
+		if (!this_cpu()->job_has_no_return)
+			this_cpu()->job_has_no_return = no_return;
 		func(data);
 		job->complete = true;
 		return job;
 	}
 
-	/* That's bad, the job will never run */
-	if (cpu->job_has_no_return) {
-		prlog(PR_WARNING, "WARNING ! Job %s scheduled on CPU 0x%x"
-		      " which has a no-return job on its queue !\n",
-		      job->name, cpu->pir);
-		backtrace();
+	queue_job_on_cpu(cpu, job);
+
+	return job;
+}
+
+struct cpu_job *cpu_queue_job_on_node(uint32_t chip_id,
+				const char *name,
+				void (*func)(void *data), void *data)
+{
+	struct cpu_thread *cpu;
+	struct cpu_job *job;
+
+	job = zalloc(sizeof(struct cpu_job));
+	if (!job)
+		return NULL;
+	job->func = func;
+	job->data = data;
+	job->name = name;
+	job->complete = false;
+	job->no_return = false;
+
+	/* Pick a candidate. Returns with target queue locked */
+	cpu = cpu_find_job_target(chip_id);
+
+	/* Can't be scheduled... */
+	if (cpu == NULL) {
+		cpu = this_cpu();
+		if (cpu->chip_id == chip_id) {
+			/* Run it now if we're the right node. */
+			func(data);
+			job->complete = true;
+			return job;
+		}
+		/* Otherwise fail. */
+		free(job);
+		return NULL;
 	}
-	list_add_tail(&cpu->job_queue, &job->link);
-	if (no_return)
-		cpu->job_has_no_return = true;
-	else
-		cpu->job_count++;
-	if (pm_enabled)
-		cpu_wake(cpu);
-	unlock(&cpu->job_lock);
+
+	queue_job_on_cpu(cpu, job);
 
 	return job;
 }
@@ -242,12 +312,17 @@ void cpu_wait_job(struct cpu_job *job, bool free_it)
 		time_wait_ms(10);
 		time_waited += 10;
 		lwsync();
+		if ((time_waited % 30000) == 0) {
+			prlog(PR_INFO, "cpu_wait_job(%s) for %lums\n",
+			      job->name, time_waited);
+			backtrace();
+		}
 	}
 	lwsync();
 
-	if (time_waited > msecs_to_tb(1000))
-		prlog(PR_DEBUG, "cpu_wait_job(%s) for %lu\n",
-		      job->name, tb_to_msecs(time_waited));
+	if (time_waited > 1000)
+		prlog(PR_DEBUG, "cpu_wait_job(%s) for %lums\n",
+		      job->name, time_waited);
 
 	if (free_it)
 		free(job);
@@ -285,6 +360,11 @@ void cpu_process_jobs(void)
 		if (no_return)
 			free(job);
 		func(data);
+		if (!list_empty(&cpu->locks_held)) {
+			prlog(PR_ERR, "OPAL job %s returning with locks held\n",
+			      job->name);
+			drop_my_locks(true);
+		}
 		lock(&cpu->job_lock);
 		if (!no_return) {
 			cpu->job_count--;
@@ -300,14 +380,15 @@ enum cpu_wake_cause {
 	cpu_wake_on_dec,
 };
 
-static void cpu_idle_p8(enum cpu_wake_cause wake_on)
+static unsigned int cpu_idle_p8(enum cpu_wake_cause wake_on)
 {
 	uint64_t lpcr = mfspr(SPR_LPCR) & ~SPR_LPCR_P8_PECE;
 	struct cpu_thread *cpu = this_cpu();
+	unsigned int vec = 0;
 
 	if (!pm_enabled) {
 		prlog_once(PR_DEBUG, "cpu_idle_p8 called pm disabled\n");
-		return;
+		return vec;
 	}
 
 	/* Clean up ICP, be ready for IPIs */
@@ -342,9 +423,10 @@ static void cpu_idle_p8(enum cpu_wake_cause wake_on)
 		lpcr |= SPR_LPCR_P8_PECE2 | SPR_LPCR_P8_PECE3;
 		mtspr(SPR_LPCR, lpcr);
 	}
+	isync();
 
 	/* Enter nap */
-	enter_p8_pm_state(false);
+	vec = enter_p8_pm_state(false);
 
 skip_sleep:
 	/* Restore */
@@ -352,20 +434,21 @@ skip_sleep:
 	cpu->in_idle = false;
 	cpu->in_sleep = false;
 	reset_cpu_icp();
+
+	return vec;
 }
 
-static void cpu_idle_p9(enum cpu_wake_cause wake_on)
+static unsigned int cpu_idle_p9(enum cpu_wake_cause wake_on)
 {
 	uint64_t lpcr = mfspr(SPR_LPCR) & ~SPR_LPCR_P9_PECE;
 	uint64_t psscr;
 	struct cpu_thread *cpu = this_cpu();
+	unsigned int vec = 0;
 
 	if (!pm_enabled) {
 		prlog_once(PR_DEBUG, "cpu_idle_p9 called pm disabled\n");
-		return;
+		return vec;
 	}
-
-	msgclr(); /* flush pending messages */
 
 	/* Synchronize with wakers */
 	if (wake_on == cpu_wake_on_job) {
@@ -392,43 +475,69 @@ static void cpu_idle_p9(enum cpu_wake_cause wake_on)
 
 		/* HV DBELL and DEC */
 		lpcr |= SPR_LPCR_P9_PECEL1 | SPR_LPCR_P9_PECEL3;
-		mtspr(SPR_LPCR, lpcr);
 	}
 
 	mtspr(SPR_LPCR, lpcr);
+	isync();
 
 	if (sreset_enabled) {
 		/* stop with EC=1 (sreset) and ESL=1 (enable thread switch). */
-		/* PSSCR SD=0 ESL=1 EC=1 PSSL=0 TR=3 MTL=0 RL=3 */
+		/* PSSCR SD=0 ESL=1 EC=1 PSSL=0 TR=3 MTL=0 RL=1 */
 		psscr = PPC_BIT(42) | PPC_BIT(43) |
-			PPC_BITMASK(54, 55) | PPC_BITMASK(62,63);
-		enter_p9_pm_state(psscr);
+			PPC_BITMASK(54, 55) | PPC_BIT(63);
+		vec = enter_p9_pm_state(psscr);
 	} else {
 		/* stop with EC=0 (resumes) which does not require sreset. */
-		/* PSSCR SD=0 ESL=0 EC=0 PSSL=0 TR=3 MTL=0 RL=3 */
-		psscr = PPC_BITMASK(54, 55) | PPC_BITMASK(62,63);
+		/* PSSCR SD=0 ESL=0 EC=0 PSSL=0 TR=3 MTL=0 RL=1 */
+		psscr = PPC_BITMASK(54, 55) | PPC_BIT(63);
 		enter_p9_pm_lite_state(psscr);
 	}
 
-skip_sleep:
+	/* Clear doorbell */
+	p9_dbell_receive();
+
+ skip_sleep:
 	/* Restore */
+	sync();
 	cpu->in_idle = false;
 	cpu->in_sleep = false;
-	p9_dbell_receive();
+
+	return vec;
 }
 
 static void cpu_idle_pm(enum cpu_wake_cause wake_on)
 {
+	unsigned int vec;
+
 	switch(proc_gen) {
 	case proc_gen_p8:
-		cpu_idle_p8(wake_on);
+		vec = cpu_idle_p8(wake_on);
 		break;
 	case proc_gen_p9:
-		cpu_idle_p9(wake_on);
+		vec = cpu_idle_p9(wake_on);
 		break;
 	default:
+		vec = 0;
 		prlog_once(PR_DEBUG, "cpu_idle_pm called with bad processor type\n");
 		break;
+	}
+
+	if (vec == 0x100) {
+		unsigned long srr1 = mfspr(SPR_SRR1);
+
+		switch (srr1 & SPR_SRR1_PM_WAKE_MASK) {
+		case SPR_SRR1_PM_WAKE_SRESET:
+			exception_entry_pm_sreset();
+			break;
+		default:
+			break;
+		}
+		mtmsrd(MSR_RI, 1);
+
+	} else if (vec == 0x200) {
+		exception_entry_pm_mce();
+		enable_machine_check();
+		mtmsrd(MSR_RI, 1);
 	}
 }
 
@@ -444,6 +553,7 @@ void cpu_idle_job(void)
 		while (!cpu_check_jobs(cpu)) {
 			if (pm_enabled)
 				break;
+			cpu_relax();
 			barrier();
 		}
 		smt_medium();
@@ -539,11 +649,6 @@ void cpu_set_sreset_enable(bool enabled)
 		}
 
 	} else if (proc_gen == proc_gen_p9) {
-		/* Don't use sreset idle on DD1 (has a number of bugs) */
-		uint32_t version = mfspr(SPR_PVR);
-		if (is_power9n(version) && (PVR_VERS_MAJ(version) == 1))
-			return;
-
 		sreset_enabled = enabled;
 		sync();
 		/*
@@ -572,11 +677,6 @@ void cpu_set_ipi_enable(bool enabled)
 		}
 
 	} else if (proc_gen == proc_gen_p9) {
-		/* Don't use doorbell on DD1 (requires darn for msgsync) */
-		uint32_t version = mfspr(SPR_PVR);
-		if (is_power9n(version) && (PVR_VERS_MAJ(version) == 1))
-			return;
-
 		ipi_enabled = enabled;
 		sync();
 		if (!enabled)
@@ -648,6 +748,13 @@ struct cpu_thread *find_cpu_by_pir(u32 pir)
 	return &cpu_stacks[pir].cpu;
 }
 
+struct __nomcount cpu_thread *find_cpu_by_pir_nomcount(u32 pir)
+{
+	if (pir > cpu_max_pir)
+		return NULL;
+	return &cpu_stacks[pir].cpu;
+}
+
 struct cpu_thread *find_cpu_by_server(u32 server_no)
 {
 	struct cpu_thread *t;
@@ -661,13 +768,13 @@ struct cpu_thread *find_cpu_by_server(u32 server_no)
 
 struct cpu_thread *next_cpu(struct cpu_thread *cpu)
 {
-	struct cpu_stack *s = container_of(cpu, struct cpu_stack, cpu);
-	unsigned int index;
+	struct cpu_stack *s;
+	unsigned int index = 0;
 
-	if (cpu == NULL)
-		index = 0;
-	else
+	if (cpu != NULL) {
+		s = container_of(cpu, struct cpu_stack, cpu);
 		index = s - cpu_stacks + 1;
+	}
 	for (; index <= cpu_max_pir; index++) {
 		cpu = &cpu_stacks[index].cpu;
 		if (cpu->state != cpu_state_no_cpu)
@@ -707,6 +814,34 @@ struct cpu_thread *next_present_cpu(struct cpu_thread *cpu)
 struct cpu_thread *first_present_cpu(void)
 {
 	return next_present_cpu(NULL);
+}
+
+struct cpu_thread *next_ungarded_cpu(struct cpu_thread *cpu)
+{
+	do {
+		cpu = next_cpu(cpu);
+	} while(cpu && cpu->state == cpu_state_unavailable);
+
+	return cpu;
+}
+
+struct cpu_thread *first_ungarded_cpu(void)
+{
+	return next_ungarded_cpu(NULL);
+}
+
+struct cpu_thread *next_ungarded_primary(struct cpu_thread *cpu)
+{
+	do {
+		cpu = next_cpu(cpu);
+	} while(cpu && (cpu->state == cpu_state_unavailable || cpu->primary != cpu));
+
+	return cpu;
+}
+
+struct cpu_thread *first_ungarded_primary(void)
+{
+	return next_ungarded_primary(NULL);
 }
 
 u8 get_available_nr_cores_in_chip(u32 chip_id)
@@ -791,9 +926,16 @@ static void init_cpu_thread(struct cpu_thread *t,
 			    enum cpu_thread_state state,
 			    unsigned int pir)
 {
+	/* offset within cpu_thread to prevent stack_guard clobber */
+	const size_t guard_skip = container_off_var(t, stack_guard) +
+		sizeof(t->stack_guard);
+
+	memset(((void *)t) + guard_skip, 0, sizeof(struct cpu_thread) - guard_skip);
 	init_lock(&t->dctl_lock);
 	init_lock(&t->job_lock);
 	list_head_init(&t->job_queue);
+	list_head_init(&t->locks_held);
+	t->stack_guard = STACK_CHECK_GUARD_BASE ^ pir;
 	t->state = state;
 	t->pir = pir;
 #ifdef STACK_CHECK_ENABLED
@@ -837,12 +979,13 @@ void __nomcount pre_init_boot_cpu(void)
 {
 	struct cpu_thread *cpu = this_cpu();
 
-	memset(cpu, 0, sizeof(struct cpu_thread));
+	/* We skip the stack guard ! */
+	memset(((void *)cpu) + 8, 0, sizeof(struct cpu_thread) - 8);
 }
 
 void init_boot_cpu(void)
 {
-	unsigned int i, pir, pvr;
+	unsigned int pir, pvr;
 
 	pir = mfspr(SPR_PIR);
 	pvr = mfspr(SPR_PVR);
@@ -867,6 +1010,7 @@ void init_boot_cpu(void)
 		hid0_attn = SPR_HID0_POWER8_ENABLE_ATTN;
 		break;
 	case PVR_TYPE_P9:
+	case PVR_TYPE_P9P:
 		proc_gen = proc_gen_p9;
 		hile_supported = true;
 		radix_supported = true;
@@ -877,23 +1021,20 @@ void init_boot_cpu(void)
 		proc_gen = proc_gen_unknown;
 	}
 
-	/* Get a CPU thread count and an initial max PIR based on family */
+	/* Get a CPU thread count based on family */
 	switch(proc_gen) {
 	case proc_gen_p7:
 		cpu_thread_count = 4;
-		cpu_max_pir = SPR_PIR_P7_MASK;
 		prlog(PR_INFO, "CPU: P7 generation processor"
 		      " (max %d threads/core)\n", cpu_thread_count);
 		break;
 	case proc_gen_p8:
 		cpu_thread_count = 8;
-		cpu_max_pir = SPR_PIR_P8_MASK;
 		prlog(PR_INFO, "CPU: P8 generation processor"
 		      " (max %d threads/core)\n", cpu_thread_count);
 		break;
 	case proc_gen_p9:
 		cpu_thread_count = 4;
-		cpu_max_pir = SPR_PIR_P9_MASK;
 		prlog(PR_INFO, "CPU: P9 generation processor"
 		      " (max %d threads/core)\n", cpu_thread_count);
 		break;
@@ -903,20 +1044,20 @@ void init_boot_cpu(void)
 		cpu_max_pir = mfspr(SPR_PIR);
 	}
 
+	if (is_power9n(pvr) && (PVR_VERS_MAJ(pvr) == 1)) {
+		prerror("CPU: POWER9N DD1 is not supported\n");
+		abort();
+	}
+
 	prlog(PR_DEBUG, "CPU: Boot CPU PIR is 0x%04x PVR is 0x%08x\n",
 	      pir, pvr);
-	prlog(PR_DEBUG, "CPU: Initial max PIR set to 0x%x\n", cpu_max_pir);
 
 	/*
-	 * Adjust top of RAM to include CPU stacks. While we *could* have
-	 * less RAM than this... during early boot, it's enough of a check
-	 * until we start parsing device tree / hdat and find out for sure
+	 * Adjust top of RAM to include the boot CPU stack. If we have less
+	 * RAM than this, it's not possible to boot.
 	 */
+	cpu_max_pir = pir;
 	top_of_ram += (cpu_max_pir + 1) * STACK_SIZE;
-
-	/* Clear the CPU structs */
-	for (i = 0; i <= cpu_max_pir; i++)
-		memset(&cpu_stacks[i].cpu, 0, sizeof(struct cpu_thread));
 
 	/* Setup boot CPU state */
 	boot_cpu = &cpu_stacks[pir].cpu;
@@ -936,6 +1077,7 @@ static void enable_large_dec(bool on)
 		lpcr &= ~SPR_LPCR_P9_LD;
 
 	mtspr(SPR_LPCR, lpcr);
+	isync();
 }
 
 #define HIGH_BIT (1ull << 63)
@@ -970,14 +1112,60 @@ static int find_dec_bits(void)
 	return bits;
 }
 
+static void init_tm_suspend_mode_property(void)
+{
+	struct dt_node *node;
+
+	/* If we don't find anything, assume TM suspend is enabled */
+	tm_suspend_enabled = true;
+
+	node = dt_find_by_path(dt_root, "/ibm,opal/fw-features/tm-suspend-mode");
+	if (!node)
+		return;
+
+	if (dt_find_property(node, "disabled"))
+		tm_suspend_enabled = false;
+}
+
+void init_cpu_max_pir(void)
+{
+	struct dt_node *cpus, *cpu;
+
+	cpus = dt_find_by_path(dt_root, "/cpus");
+	assert(cpus);
+
+	/* Iterate all CPUs in the device-tree */
+	dt_for_each_child(cpus, cpu) {
+		unsigned int pir, server_no;
+
+		/* Skip cache nodes */
+		if (strcmp(dt_prop_get(cpu, "device_type"), "cpu"))
+			continue;
+
+		server_no = dt_prop_get_u32(cpu, "reg");
+
+		/* If PIR property is absent, assume it's the same as the
+		 * server number
+		 */
+		pir = dt_prop_get_u32_def(cpu, "ibm,pir", server_no);
+
+		if (cpu_max_pir < pir + cpu_thread_count - 1)
+			cpu_max_pir = pir + cpu_thread_count - 1;
+	}
+
+	prlog(PR_DEBUG, "CPU: New max PIR set to 0x%x\n", cpu_max_pir);
+}
+
 void init_all_cpus(void)
 {
 	struct dt_node *cpus, *cpu;
-	unsigned int thread, new_max_pir = 0;
+	unsigned int thread;
 	int dec_bits = find_dec_bits();
 
 	cpus = dt_find_by_path(dt_root, "/cpus");
 	assert(cpus);
+
+	init_tm_suspend_mode_property();
 
 	/* Iterate all CPUs in the device-tree */
 	dt_for_each_child(cpus, cpu) {
@@ -1022,19 +1210,17 @@ void init_all_cpus(void)
 		t->node = cpu;
 		t->chip_id = chip_id;
 		t->icp_regs = NULL; /* Will be set later */
+#ifdef DEBUG_LOCKS
+		t->requested_lock = NULL;
+#endif
 		t->core_hmi_state = 0;
 		t->core_hmi_state_ptr = &t->core_hmi_state;
-		t->thread_mask = 1;
 
 		/* Add associativity properties */
 		add_core_associativity(t);
 
 		/* Add the decrementer width property */
 		dt_add_property_cells(cpu, "ibm,dec-bits", dec_bits);
-
-		/* Adjust max PIR */
-		if (new_max_pir < (pir + cpu_thread_count - 1))
-			new_max_pir = pir + cpu_thread_count - 1;
 
 		/* Iterate threads */
 		p = dt_find_property(cpu, "ibm,ppc-interrupt-server#s");
@@ -1052,13 +1238,9 @@ void init_all_cpus(void)
 			t->node = cpu;
 			t->chip_id = chip_id;
 			t->core_hmi_state_ptr = &pt->core_hmi_state;
-			t->thread_mask = 1 << thread;
 		}
 		prlog(PR_INFO, "CPU:  %d secondary threads\n", thread);
 	}
-	cpu_max_pir = new_max_pir;
-	prlog(PR_DEBUG, "CPU: New max PIR set to 0x%x\n", new_max_pir);
-	adjust_cpu_stacks_alloc();
 }
 
 void cpu_bringup(void)
@@ -1098,10 +1280,13 @@ void cpu_bringup(void)
 
 void cpu_callin(struct cpu_thread *cpu)
 {
+	sync();
 	cpu->state = cpu_state_active;
-	cpu->job_has_no_return = false;
+	sync();
 
-	init_hid();
+	cpu->job_has_no_return = false;
+	if (cpu_is_thread0(cpu))
+		init_hid();
 }
 
 static void opal_start_thread_job(void *data)
@@ -1189,6 +1374,11 @@ static int64_t opal_return_cpu(void)
 {
 	prlog(PR_DEBUG, "OPAL: Returning CPU 0x%04x\n", this_cpu()->pir);
 
+	this_cpu()->in_opal_call--;
+	if (this_cpu()->in_opal_call != 0) {
+		printf("OPAL in_opal_call=%u\n", this_cpu()->in_opal_call);
+	}
+
 	__secondary_cpu_entry();
 
 	return OPAL_HARDWARE; /* Should not happen */
@@ -1216,17 +1406,30 @@ static void cpu_change_hid0(void *__req)
 static int64_t cpu_change_all_hid0(struct hid0_change_req *req)
 {
 	struct cpu_thread *cpu;
+	struct cpu_job **jobs;
+
+	jobs = zalloc(sizeof(struct cpu_job *) * (cpu_max_pir + 1));
+	assert(jobs);
 
 	for_each_available_cpu(cpu) {
 		if (!cpu_is_thread0(cpu))
 			continue;
-		if (cpu == this_cpu()) {
-			cpu_change_hid0(req);
+		if (cpu == this_cpu())
 			continue;
-		}
-		cpu_wait_job(cpu_queue_job(cpu, "cpu_change_hid0",
-			cpu_change_hid0, req), true);
+		jobs[cpu->pir] = cpu_queue_job(cpu, "cpu_change_hid0",
+						cpu_change_hid0, req);
 	}
+
+	/* this cpu */
+	cpu_change_hid0(req);
+
+	for_each_available_cpu(cpu) {
+		if (jobs[cpu->pir])
+			cpu_wait_job(jobs[cpu->pir], true);
+	}
+
+	free(jobs);
+
 	return OPAL_SUCCESS;
 }
 
@@ -1248,20 +1451,35 @@ static void cpu_cleanup_one(void *param __unused)
 {
 	mtspr(SPR_AMR, 0);
 	mtspr(SPR_IAMR, 0);
+	mtspr(SPR_PCR, 0);
 }
 
 static int64_t cpu_cleanup_all(void)
 {
 	struct cpu_thread *cpu;
+	struct cpu_job **jobs;
+
+	jobs = zalloc(sizeof(struct cpu_job *) * (cpu_max_pir + 1));
+	assert(jobs);
 
 	for_each_available_cpu(cpu) {
-		if (cpu == this_cpu()) {
-			cpu_cleanup_one(NULL);
+		if (cpu == this_cpu())
 			continue;
-		}
-		cpu_wait_job(cpu_queue_job(cpu, "cpu_cleanup",
-					   cpu_cleanup_one, NULL), true);
+		jobs[cpu->pir] = cpu_queue_job(cpu, "cpu_cleanup",
+						cpu_cleanup_one, NULL);
 	}
+
+	/* this cpu */
+	cpu_cleanup_one(NULL);
+
+	for_each_available_cpu(cpu) {
+		if (jobs[cpu->pir])
+			cpu_wait_job(jobs[cpu->pir], true);
+	}
+
+	free(jobs);
+
+
 	return OPAL_SUCCESS;
 }
 
@@ -1284,9 +1502,9 @@ static int64_t opal_reinit_cpus(uint64_t flags)
 	prlog(PR_DEBUG, "OPAL: CPU re-init with flags: 0x%llx\n", flags);
 
 	if (flags & OPAL_REINIT_CPUS_HILE_LE)
-		prlog(PR_NOTICE, "OPAL: Switch to little-endian OS\n");
+		prlog(PR_INFO, "OPAL: Switch to little-endian OS\n");
 	else if (flags & OPAL_REINIT_CPUS_HILE_BE)
-		prlog(PR_NOTICE, "OPAL: Switch to big-endian OS\n");
+		prlog(PR_INFO, "OPAL: Switch to big-endian OS\n");
 
  again:
 	lock(&reinit_lock);
@@ -1386,11 +1604,10 @@ static int64_t opal_reinit_cpus(uint64_t flags)
 	if (flags & OPAL_REINIT_CPUS_TM_SUSPEND_DISABLED) {
 		flags &= ~OPAL_REINIT_CPUS_TM_SUSPEND_DISABLED;
 
-		/*
-		 * Pending a hostboot change we can't determine the status of
-		 * this, so it always fails.
-		 */
-		rc = OPAL_UNSUPPORTED;
+		if (tm_suspend_enabled)
+			rc = OPAL_UNSUPPORTED;
+		else
+			rc = OPAL_SUCCESS;
 	}
 
 	/* Handle P8 DD1 SLW reinit */

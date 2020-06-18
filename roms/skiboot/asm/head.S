@@ -23,19 +23,17 @@
 
 #define EPAPR_MAGIC	0x65504150
 
-/* Power management instructions */
-#define PPC_INST_NAP		.long 0x4c000364
-#define PPC_INST_SLEEP		.long 0x4c0003a4
-#define PPC_INST_RVWINKLE	.long 0x4c0003e4
-
-#define PPC_INST_STOP		.long 0x4c0002e4
-
-#define GET_STACK(stack_reg,pir_reg)				\
-	sldi	stack_reg,pir_reg,STACK_SHIFT;			\
-	addis	stack_reg,stack_reg,CPU_STACKS_OFFSET@ha;	\
+#define GET_STACK(stack_reg,pir_reg)					\
+	sldi	stack_reg,pir_reg,STACK_SHIFT;				\
+	addis	stack_reg,stack_reg,CPU_STACKS_OFFSET@ha;		\
 	addi	stack_reg,stack_reg,CPU_STACKS_OFFSET@l;
 
-#define GET_CPU()						\
+#define GET_EMERGENCY_STACK(stack_reg,pir_reg)				\
+	sldi	stack_reg,pir_reg,STACK_SHIFT;				\
+	addis	stack_reg,stack_reg,EMERGENCY_CPU_STACKS_OFFSET@ha;	\
+	addi	stack_reg,stack_reg,EMERGENCY_CPU_STACKS_OFFSET@l;
+
+#define GET_CPU()							\
 	clrrdi	%r13,%r1,STACK_SHIFT
 
 #define SAVE_GPR(reg,sp)	std %r##reg,STACK_GPR##reg(sp)
@@ -102,6 +100,7 @@ hir_trigger:
 	 * used for recovering from rvw or nap mode
 	 */
 	. = 0x100
+sreset_vector:
 	/* BML entry, load up r3 with device tree location */
 	li	%r3, 0
 	oris	%r3, %r3, 0xa
@@ -113,6 +112,31 @@ hdat_entry:
 	li	%r27,0
 	b	boot_entry
 
+	.= 0x200
+	mtsprg0	%r3
+	mtsprg1 %r4
+	mfspr	%r3,SPR_SRR1
+	mfcr	%r4
+	rldicl.	%r3,%r3,48,62
+	bne	1f		/* powersave wakeup (CFAR not required) */
+	mtcr	%r4
+	mfspr	%r3,SPR_CFAR
+	li	%r4,0x200
+	b	_exception
+1:
+	LOAD_IMM64(%r30, SKIBOOT_BASE)
+	cmpdi	%r3,0x1
+	bne	2f		/* state loss */
+	LOAD_IMM32(%r3, reset_resume - __head)
+	b	3f
+2:
+	LOAD_IMM32(%r3, reset_wakeup - __head)
+3:
+	add	%r3,%r30,%r3
+	mtctr	%r3
+	li	%r3,0x200
+	bctr
+
 #define EXCEPTION(nr)		\
 	.= nr			;\
 	mtsprg0	%r3		;\
@@ -122,7 +146,6 @@ hdat_entry:
 	b	_exception
 
 	/* More exception stubs */
-	EXCEPTION(0x200)
 	EXCEPTION(0x300)
 	EXCEPTION(0x380)
 	EXCEPTION(0x400)
@@ -157,9 +180,25 @@ hdat_entry:
 
 	.= 0x1e00
 _exception:
-	stdu	%r1,-STACK_FRAMESIZE(%r1)
+	stdu	%r1,-INT_FRAMESIZE(%r1)
 	std	%r3,STACK_CFAR(%r1)
 	std	%r4,STACK_TYPE(%r1)
+	mfspr	%r3,SPR_SRR0
+	mfspr	%r4,SPR_SRR1
+	std	%r3,STACK_SRR0(%r1)
+	std	%r4,STACK_SRR1(%r1)
+	mfspr	%r3,SPR_DSISR
+	mfspr	%r4,SPR_DAR
+	stw	%r3,STACK_DSISR(%r1)
+	std	%r4,STACK_DAR(%r1)
+	mfmsr	%r3
+	li	%r4,MSR_RI
+	std	%r3,STACK_MSR(%r1)
+	mtmsrd	%r4,1
+	mfspr	%r3,SPR_HSRR0
+	mfspr	%r4,SPR_HSRR1
+	std	%r3,STACK_HSRR0(%r1)
+	std	%r4,STACK_HSRR1(%r1)
 	mfsprg0	%r3
 	mfsprg1 %r4
 	SAVE_GPR(0,%r1)
@@ -202,25 +241,72 @@ _exception:
 	stw	%r4,STACK_XER(%r1)
 	std	%r5,STACK_CTR(%r1)
 	std	%r6,STACK_LR(%r1)
-	mfspr	%r3,SPR_SRR0
-	mfspr	%r4,SPR_SRR1
-	mfspr	%r5,SPR_HSRR0
-	mfspr	%r6,SPR_HSRR1
-	std	%r3,STACK_SRR0(%r1)
-	std	%r4,STACK_SRR1(%r1)
-	std	%r5,STACK_HSRR0(%r1)
-	std	%r6,STACK_HSRR1(%r1)
 	mr	%r3,%r1
 	LOAD_IMM64(%r4, SKIBOOT_BASE)
 	LOAD_IMM32(%r5, exception_entry_foo - __head)
 	add	%r4,%r4,%r5
 	mtctr	%r4
-	bctrl
-	b	.
+	bctr
 exception_entry_foo:
-	b	exception_entry
+	bl	exception_entry
+	/* Restore HSRRs in case a NMI interrupted an HSRR-live section
+	 * and the NMI uses HSRRs for something. Possibly does not happen
+	 * in current skiboot code, but good to be careful.
+	 */
+	ld	%r3,STACK_HSRR0(%r1)
+	ld	%r4,STACK_HSRR1(%r1)
+	mtspr	SPR_HSRR0,%r3
+	mtspr	SPR_HSRR1,%r4
+	lwz	%r3,STACK_CR(%r1)
+	lwz	%r4,STACK_XER(%r1)
+	ld	%r5,STACK_CTR(%r1)
+	ld	%r6,STACK_LR(%r1)
+	mtcr	%r3
+	mtxer	%r4
+	mtctr	%r5
+	mtlr	%r6
+	REST_GPR(0,%r1)
+	REST_GPR(2,%r1)
+	REST_GPR(4,%r1)
+	REST_GPR(5,%r1)
+	REST_GPR(6,%r1)
+	REST_GPR(7,%r1)
+	REST_GPR(8,%r1)
+	REST_GPR(9,%r1)
+	REST_GPR(10,%r1)
+	REST_GPR(11,%r1)
+	REST_GPR(12,%r1)
+	REST_GPR(13,%r1)
+	REST_GPR(14,%r1)
+	REST_GPR(15,%r1)
+	REST_GPR(16,%r1)
+	REST_GPR(17,%r1)
+	REST_GPR(18,%r1)
+	REST_GPR(19,%r1)
+	REST_GPR(20,%r1)
+	REST_GPR(21,%r1)
+	REST_GPR(22,%r1)
+	REST_GPR(23,%r1)
+	REST_GPR(24,%r1)
+	REST_GPR(25,%r1)
+	REST_GPR(26,%r1)
+	REST_GPR(27,%r1)
+	REST_GPR(28,%r1)
+	REST_GPR(29,%r1)
+	REST_GPR(30,%r1)
+	REST_GPR(31,%r1)
+	li	%r3,0
+	mtmsrd	%r3,1	/* Clear MSR[RI] */
+	ld	%r3,STACK_SRR0(%r1)
+	mtspr	SPR_SRR0,%r3
+	ld	%r3,STACK_SRR1(%r1)
+	mtspr	SPR_SRR1,%r3
+	REST_GPR(3,%r1)
+	addi	%r1,%r1,INT_FRAMESIZE
+	rfid
+	b	.
 
-	.= 0x2000
+	.= EXCEPTION_VECTORS_END
 	/* This is the OPAL branch table. It's populated at boot time
 	 * with function pointers to the various OPAL functions from
 	 * the content of the .opal_table section, indexed by Token.
@@ -269,7 +355,10 @@ boot_entry:
 	beq	2f
 	cmpwi	cr0,%r3,PVR_TYPE_P9
 	beq 	1f
+	cmpwi	cr0,%r3,PVR_TYPE_P9P
+	beq 	1f
 	attn		/* Unsupported CPU type... what do we do ? */
+	b 	.	/* loop here, just in case attn is disabled */
 
 	/* P8 -> 8 threads */
 2:	li	%r26,7
@@ -354,7 +443,10 @@ boot_entry:
 	/* Get ready for C code: get a stack */
 2:	GET_STACK(%r1,%r31)
 
-	/* Clear up initial frame */
+	/* Clear up initial frame.
+	 * Zero back chain indicates stack entry from boot,
+	 * non-zero indicates entry from OS (see backtrace code).
+	 */
 	li	%r3,0
 	std	%r3,0(%r1)
 	std	%r3,8(%r1)
@@ -388,6 +480,11 @@ boot_entry:
 	li	%r0,0
 	std	%r0,CPUTHREAD_STACK_BOT_MARK(%r13)
 #endif
+	/* Initialize the stack guard */
+	LOAD_IMM64(%r3,STACK_CHECK_GUARD_BASE);
+	xor	%r3,%r3,%r31
+	std	%r3,0(%r13)
+
 	/* Jump to C */
 	mr	%r3,%r27
 	bl	main_cpu_entry
@@ -461,131 +558,40 @@ call_relocate:
 1:	/* Fatal relocate failure */
 	attn
 
-#define FIXUP_ENDIAN                                              \
-       tdi   0,0,0x48;   /* Reverse endian of b . + 8          */ \
-       b     $+36;       /* Skip trampoline if endian is good  */ \
-       .long 0x05009f42; /* bcl 20,31,$+4                      */ \
-       .long 0xa602487d; /* mflr r10                           */ \
-       .long 0x1c004a39; /* addi r10,r10,28                    */ \
-       .long 0xa600607d; /* mfmsr r11                          */ \
-       .long 0x01006b69; /* xori r11,r11,1                     */ \
-       .long 0xa6035a7d; /* mtsrr0 r10                         */ \
-       .long 0xa6037b7d; /* mtsrr1 r11                         */ \
-       .long 0x2400004c  /* rfid                               */
-
-pm_save_regs:
-	SAVE_GPR(2,%r1)
-	SAVE_GPR(14,%r1)
-	SAVE_GPR(15,%r1)
-	SAVE_GPR(16,%r1)
-	SAVE_GPR(17,%r1)
-	SAVE_GPR(18,%r1)
-	SAVE_GPR(19,%r1)
-	SAVE_GPR(20,%r1)
-	SAVE_GPR(21,%r1)
-	SAVE_GPR(22,%r1)
-	SAVE_GPR(23,%r1)
-	SAVE_GPR(24,%r1)
-	SAVE_GPR(25,%r1)
-	SAVE_GPR(26,%r1)
-	SAVE_GPR(27,%r1)
-	SAVE_GPR(28,%r1)
-	SAVE_GPR(29,%r1)
-	SAVE_GPR(30,%r1)
-	SAVE_GPR(31,%r1)
-	mfcr	%r4
-	mfxer	%r5
-	mfspr	%r6,SPR_HSPRG0
-	mfspr	%r7,SPR_HSPRG1
-	stw	%r4,STACK_CR(%r1)
-	stw	%r5,STACK_XER(%r1)
-	std	%r6,STACK_GPR0(%r1)
-	std	%r7,STACK_GPR1(%r1)
-	blr
-
-.global enter_p8_pm_state
-enter_p8_pm_state:
-	/* Before entering map or rvwinkle, we create a stack frame
-	 * and save our non-volatile registers.
-	 *
-	 * We also save these SPRs:
-	 *
-	 *  - HSPRG0	in GPR0 slot
-	 *  - HSPRG1	in GPR1 slot
-	 *
-	 *  - xxx TODO: HIDs
-	 *  - TODO: Mask MSR:ME during the process
-	 *
-	 * On entry, r3 indicates:
-	 *
-	 *    0 = nap
-	 *    1 = rvwinkle
-	 */
-	mflr	%r0
-	std	%r0,16(%r1)
-	stdu	%r1,-STACK_FRAMESIZE(%r1)
-
-	bl	pm_save_regs
-
-	/* Save stack pointer in struct cpu_thread */
-	std	%r1,CPUTHREAD_SAVE_R1(%r13)
-
-	/* Winkle or nap ? */
-	cmpli	%cr0,0,%r3,0
-	bne	1f
-
-	/* nap sequence */
-	ptesync
-0:	ld	%r0,CPUTHREAD_SAVE_R1(%r13)
-	cmpd	cr0,%r0,%r0
-	bne	0b
-	PPC_INST_NAP
-	b	.
-
-	/* rvwinkle sequence */
-1:	ptesync
-0:	ld	%r0,CPUTHREAD_SAVE_R1(%r13)
-	cmpd	cr0,%r0,%r0
-	bne	0b
-	PPC_INST_RVWINKLE
-	b	.
-
-.global enter_p9_pm_lite_state
-enter_p9_pm_lite_state:
-	mtspr	SPR_PSSCR,%r3
-	PPC_INST_STOP
-	blr
-
-.global enter_p9_pm_state
-enter_p9_pm_state:
-	mflr	%r0
-	std	%r0,16(%r1)
-	stdu	%r1,-STACK_FRAMESIZE(%r1)
-
-	bl	pm_save_regs
-
-	/* Save stack pointer in struct cpu_thread */
-	std	%r1,CPUTHREAD_SAVE_R1(%r13)
-
-	mtspr	SPR_PSSCR,%r3
-	PPC_INST_STOP
-	b	.
-
 /* This is a little piece of code that is copied down to
- * 0x100 for handling power management wakeups
+ * 0x100 for handling sresets and power management wakeups.
+ * This matches the 0x200 handler closely.
  */
 .global reset_patch_start
 reset_patch_start:
-	FIXUP_ENDIAN
-	smt_medium
+	mtsprg0	%r3
+	mtsprg1 %r4
+	mfspr	%r3,SPR_SRR1
+	mfcr	%r4
+	rldicl.	%r3,%r3,48,62
+	bne	1f		/* powersave wakeup (CFAR not required) */
+	mtcr	%r4
+	mfspr	%r3,SPR_CFAR
+	li	%r4,0x100
+	b	_exception + (reset_patch_start - sreset_vector)
+1:
 	LOAD_IMM64(%r30, SKIBOOT_BASE)
+	cmpdi	%r3,0x1
+	bne	2f		/* state loss */
+	LOAD_IMM32(%r3, reset_resume - __head)
+	b	3f
+2:
 	LOAD_IMM32(%r3, reset_wakeup - __head)
+3:
 	add	%r3,%r30,%r3
 	mtctr	%r3
+	li	%r3,0x100
 	bctr
 .global reset_patch_end
 reset_patch_end:
 
+/* Wakeup vector in r3 */
+.global reset_wakeup
 reset_wakeup:
 	/* Get PIR */
 	mfspr	%r31,SPR_PIR
@@ -595,22 +601,17 @@ reset_wakeup:
 	GET_CPU()
 
 	/* Restore original stack pointer */
-	ld	%r3,CPUTHREAD_SAVE_R1(%r13)
-
-	/* If it's 0, we are doing a fast reboot */
-	cmpldi	%r3,0
-	beq	fast_reset_entry
-	mr	%r1,%r3
+	ld	%r1,CPUTHREAD_SAVE_R1(%r13)
 
 	/* Restore more stuff */
-	lwz	%r3,STACK_CR(%r1)
-	lwz	%r4,STACK_XER(%r1)
-	ld	%r5,STACK_GPR0(%r1)
-	ld	%r6,STACK_GPR1(%r1)
-	mtcr	%r3
-	mtxer	%r4
-	mtspr	SPR_HSPRG0,%r5
-	mtspr	SPR_HSPRG1,%r6
+	lwz	%r4,STACK_CR(%r1)
+	lwz	%r5,STACK_XER(%r1)
+	ld	%r6,STACK_GPR0(%r1)
+	ld	%r7,STACK_GPR1(%r1)
+	mtcr	%r4
+	mtxer	%r5
+	mtspr	SPR_HSPRG0,%r6
+	mtspr	SPR_HSPRG1,%r7
 	REST_GPR(2,%r1)
 	REST_GPR(14,%r1)
 	REST_GPR(15,%r1)
@@ -630,20 +631,38 @@ reset_wakeup:
 	REST_GPR(29,%r1)
 	REST_GPR(30,%r1)
 	REST_GPR(31,%r1)
-
+reset_resume:
 	/* Get LR back, pop stack and return */
 	addi	%r1,%r1,STACK_FRAMESIZE
 	ld	%r0,16(%r1)
 	mtlr	%r0
 	blr
 
-/* Fast reset code. We clean up the TLB and a few SPRs and
- * return to C code. All CPUs do that, the CPU triggering the
- * reset does it to itself last. The C code will sort out who
- * the master is. We come from the trampoline above with
- * r30 containing SKIBOOT_BASE
+.global reset_fast_reboot_patch_start
+reset_fast_reboot_patch_start:
+	FIXUP_ENDIAN	/* HILE bit may or may not be set */
+	smt_medium
+	LOAD_IMM64(%r30, SKIBOOT_BASE)
+	LOAD_IMM32(%r3, reset_fast_reboot_wakeup - __head)
+	add	%r3,%r30,%r3
+	mtctr	%r3
+	bctr
+.global reset_fast_reboot_patch_end
+reset_fast_reboot_patch_end:
+
+/* Fast reset code. We reset the stack, clean up the TLB and a few SPRs and
+ * jump to C code. All CPUs do that, the CPU triggering the reset does it to
+ * itself last. The C code will sort out who the master is. We come from the
+ * trampoline above with r30 containing SKIBOOT_BASE
  */
-fast_reset_entry:
+reset_fast_reboot_wakeup:
+	/* Get PIR */
+	mfspr	%r31,SPR_PIR
+
+	/* Get that CPU stack base and use it to restore r13 */
+	GET_STACK(%r1,%r31)
+	GET_CPU()
+
 	/* Clear out SLB */
 	li	%r6,0
 	slbmte	%r6,%r6
@@ -686,6 +705,8 @@ init_shared_sprs:
 	beq	3f
 	cmpwi	cr0,%r3,PVR_TYPE_P9
 	beq	4f
+	cmpwi	cr0,%r3,PVR_TYPE_P9P
+	beq	4f
 	/* Unsupported CPU type... what do we do ? */
 	b	9f
 
@@ -716,7 +737,7 @@ init_shared_sprs:
 	li	%r0,1
 	sldi	%r4,%r0,(63-13)
 	sldi	%r5,%r0,(63-19)
-	or	%r0,%r4,%r5,
+	or	%r0,%r4,%r5
 	andc	%r3,%r3,%r0
 	sync
 	mtspr	SPR_HID0,%r3
@@ -750,7 +771,7 @@ init_shared_sprs:
 	li	%r0,1
 	sldi	%r4,%r0,(63-5)
 	sldi	%r5,%r0,(63-4)
-	or	%r0,%r4,%r5,
+	or	%r0,%r4,%r5
 	andc	%r3,%r3,%r0
 	sync
 	mtspr	SPR_HID0,%r3
@@ -782,6 +803,8 @@ init_replicated_sprs:
 	cmpwi	cr0,%r3,PVR_TYPE_P8NVL
 	beq	3f
 	cmpwi	cr0,%r3,PVR_TYPE_P9
+	beq	4f
+	cmpwi	cr0,%r3,PVR_TYPE_P9P
 	beq	4f
 	/* Unsupported CPU type... what do we do ? */
 	b	9f
@@ -913,24 +936,83 @@ opal_boot_trampoline:
  *       r0: Token
  *       r2: OPAL Base
  *  r3..r10: Args
- *      r12: Scratch
+ * r11..r12: Scratch
  * r13..r31: Preserved
- *
  */
 	.balign	0x10
 .global opal_entry
 opal_entry:
-	/* Get our per CPU stack */
+	/* Get our per CPU pointer in r12 to check for quiesce */
 	mfspr	%r12,SPR_PIR
 	GET_STACK(%r12,%r12)
+
+	/* Get CPU thread */
+	clrrdi	%r12,%r12,STACK_SHIFT
+
+	/*
+	 * OPAL entry must first increment in_opal_call, then check
+	 * for quiesce, without touching the stack or clobbering
+	 * registers other than r11 and r12 and cr0. In this way, OPAL
+	 * is tolerant of re-entry on this same CPU while it is spinning
+	 * for quiesce.
+	 *
+	 * Sequence goes:
+	 * in_opal_call++;
+	 * sync;
+	 * if (quiesce_opal_call) {
+	 *     in_opal_call--;
+	 *     reject-or-spin-then-retry;
+	 */
+1:	lwz	%r11,CPUTHREAD_IN_OPAL_CALL(%r12)
+	addi	%r11,%r11,1
+	stw	%r11,CPUTHREAD_IN_OPAL_CALL(%r12)
+	/*
+	 * Order the store in_opal_call vs load quiesce_opal_call.
+	 * This also provides an acquire barrier for opal entry vs
+	 * another thread quiescing opal. In this way, quiescing
+	 * can behave as mutual exclusion.
+	 */
+	sync
+	lwz	%r11,CPUTHREAD_QUIESCE_OPAL_CALL(%r12)
+	cmpwi	%cr0,%r11,0
+	beq+	4f
+	/* We are quiescing, hold or reject */
+	cmpwi	%cr0,%r11,QUIESCE_REJECT
+	bne	2f
+	li	%r3,OPAL_BUSY
+	b	.Lreturn /* reject */
+2:	/* hold */
+	lwz	%r11,CPUTHREAD_IN_OPAL_CALL(%r12)
+	subi	%r11,%r11,1
+	stw	%r11,CPUTHREAD_IN_OPAL_CALL(%r12)
+	smt_lowest
+3:	lwz	%r11,CPUTHREAD_QUIESCE_OPAL_CALL(%r12)
+	cmpwi	%cr0,%r11,QUIESCE_HOLD
+	beq	3b
+	/* spin finished, try again */
+	smt_medium
+	b	1b
+
+4:	/* Quiesce protocol done, get our per CPU stack */
+	/* Emergency stack if we have re-entered OPAL */
+	lwz	%r11,CPUTHREAD_IN_OPAL_CALL(%r12)
+	cmpwi	%r11,1
+
+	mfspr	%r12,SPR_PIR
+	bgt	5f
+	GET_STACK(%r12,%r12)
+	b	6f
+5:
+	GET_EMERGENCY_STACK(%r12,%r12)
+6:
 	stdu	%r12,-STACK_FRAMESIZE(%r12)
 
 	/* Save caller r1, establish new r1 */
+	std	%r1,0(%r12)
 	std	%r1,STACK_GPR1(%r12)
 	mr	%r1,%r12
 
-	/* May save arguments for tracing */
-#ifdef OPAL_TRACE_ENTRY
+	/* Save arguments because we call C */
 	std	%r3,STACK_GPR3(%r1)
 	std	%r4,STACK_GPR4(%r1)
 	std	%r5,STACK_GPR5(%r1)
@@ -939,7 +1021,7 @@ opal_entry:
 	std	%r8,STACK_GPR8(%r1)
 	std	%r9,STACK_GPR9(%r1)
 	std	%r10,STACK_GPR10(%r1)
-#endif
+
 	/* Save Token (r0), LR and r13 */
 	mflr	%r12
 	std	%r0,STACK_GPR0(%r1)
@@ -960,15 +1042,12 @@ opal_entry:
 	addis	%r2,%r2,(__toc_start - __head)@ha
 	addi	%r2,%r2,(__toc_start - __head)@l
 
-	/* Check for a reboot in progress */
-	LOAD_ADDR_FROM_TOC(%r12, reboot_in_progress)
-	lbz	%r12,0(%r12)
-	cmpwi	%r12,0
-	bne	3f
-
-#ifdef OPAL_TRACE_ENTRY
+	/* Check entry */
 	mr	%r3,%r1
-	bl	opal_trace_entry
+	bl	opal_entry_check
+	cmpdi	%r3,0
+	bne	.Lreturn
+
 	ld	%r0,STACK_GPR0(%r1)
 	ld	%r3,STACK_GPR3(%r1)
 	ld	%r4,STACK_GPR4(%r1)
@@ -978,38 +1057,37 @@ opal_entry:
 	ld	%r8,STACK_GPR8(%r1)
 	ld	%r9,STACK_GPR9(%r1)
 	ld	%r10,STACK_GPR10(%r1)
-#endif /* OPAL_TRACE_ENTRY */
 
 	/* Convert our token into a table entry and get the
 	 * function pointer. Also check the token.
 	 * For ELFv2 ABI, the local entry point is used so no need for r12.
 	 */
-	cmpldi	%r0,OPAL_LAST
-	bgt-	2f
 	sldi	%r0,%r0,3
 	LOAD_ADDR_FROM_TOC(%r12, opal_branch_table)
 	ldx	%r0,%r12,%r0
-	cmpldi	%r0,0
-	beq-	2f
 	mtctr	%r0
 
 	/* Jump ! */
 	bctrl
 
-1:	ld	%r12,STACK_LR(%r1)
+	mr	%r4,%r1
+	bl	opal_exit_check /* r3 is preserved */
+
+	/*
+	 * Restore r1 and r13 before decrementing in_opal_call.
+	 * Move per-cpu pointer to volatile r12, restore lr, r1, r13.
+	 */
+.Lreturn:
+	ld	%r12,STACK_LR(%r1)
 	mtlr	%r12
+	mr	%r12,%r13
 	ld	%r13,STACK_GPR13(%r1)
 	ld	%r1,STACK_GPR1(%r1)
+	sync 	/* release barrier vs quiescing */
+	lwz	%r11,CPUTHREAD_IN_OPAL_CALL(%r12)
+	subi	%r11,%r11,1
+	stw	%r11,CPUTHREAD_IN_OPAL_CALL(%r12)
 	blr
-
-2:	/* Bad token */
-	ld	%r3,STACK_GPR0(%r1)
-	bl	opal_bad_token
-	b	1b
-
-3:	/* Reboot in progress, reject all calls */
-	li	%r3,OPAL_BUSY
-	b	1b
 
 .global start_kernel
 start_kernel:

@@ -6,6 +6,7 @@
 #ifndef __BIOSVAR_H
 #define __BIOSVAR_H
 
+#include "autoconf.h" // CONFIG_*
 #include "config.h" // SEG_BDA
 #include "farptr.h" // GET_FARVAR
 #include "memmap.h" // SYMBOL

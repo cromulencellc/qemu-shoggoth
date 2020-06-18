@@ -4,6 +4,10 @@ include ../../external/common/rules.mk
 
 all: links arch_links $(EXE)
 
+.PHONY: coverage
+coverage: CFLAGS += -fprofile-arcs -ftest-coverage
+coverage: check
+
 #Rebuild version.o so that the the version always matches
 #what the test suite will get from ./make_version.sh
 check: version.o all
@@ -20,6 +24,7 @@ check: version.o all
 
 install: all $(INSTALLDEPS)
 	install -D pflash $(DESTDIR)$(sbindir)/pflash
+	install -D -m 0644 pflash.1 $(DESTDIR)$(mandir)/man1/pflash.1
 
 .PHONY: dist
 #File is named $(PFLASH_VERSION).tar because the expectation is that pflash-

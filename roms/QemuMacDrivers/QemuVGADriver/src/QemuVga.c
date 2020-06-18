@@ -4,13 +4,8 @@
 #include "QemuVga.h"
 #include <Timer.h>
 
-/* List of supported modes */
-struct vMode {
-	UInt32	width;
-	UInt32	height;
-};
-
-static struct vMode vModes[] =  {
+/*
+static struct _vMode defaultVModes[] =  {
 	{ 640, 480 },
 	{ 800, 600 },
 	{ 1024, 768 },
@@ -18,9 +13,9 @@ static struct vMode vModes[] =  {
 	{ 1600, 1200 },
 	{ 1920, 1080 },
 	{ 1920, 1200 },
-	{ 0,0 }
+	{ 0, 0 }
 };
-
+*/
 static void VgaWriteB(UInt16 port, UInt8 val)
 {
 	UInt8 *ptr;
@@ -152,6 +147,8 @@ OSStatus QemuVga_Init(void)
 {
 	UInt16 id, i;
 	UInt32 mem, width, height, depth;
+	Boolean modeFound = false;
+	struct vMode *v;
 
 	lprintf("First MMIO read...\n");
 	id = DispiReadW(VBE_DISPI_INDEX_ID);
@@ -174,16 +171,23 @@ OSStatus QemuVga_Init(void)
 	lprintf("Current setting: %dx%dx%d\n", width, height, depth);
 
 	GLOBAL.depth = GLOBAL.bootDepth = depth;
-	for (i = 0; vModes[i].width; i++) {
-		if (width == vModes[i].width && height == vModes[i].height)
+	GLOBAL.numModes = QemuVga_ReadEdidModes();
+	lprintf("Number of modes: %d\n", GLOBAL.numModes);
+
+	for (i = 0, v = vModes; v != NULL; v = v->next, i++) {
+		if (width == v->mode->width && height == v->mode->height) {
+		    modeFound = true;
 			break;
+		}
 	}
-	if (!vModes[i].width) {
+
+	if (!modeFound) {
 		lprintf("Not found in list ! using default.\n");
 		i = 0;
+	} else {
+	    lprintf("Using mode: %d\n", i);
 	}
 	GLOBAL.bootMode = i;
-	GLOBAL.numModes = sizeof(vModes) / sizeof(struct vMode) - 1;
 
 	QemuVga_SetMode(GLOBAL.bootMode, depth, 0);
 
@@ -305,9 +309,9 @@ OSStatus QemuVga_GetModeInfo(UInt32 index, UInt32 *width, UInt32 *height)
 	if (index >= GLOBAL.numModes)
 		return paramErr;
 	if (width)
-		*width = vModes[index].width;
+		*width = getVMode(index)->width;
 	if (height)
-		*height = vModes[index].height;
+		*height = getVMode(index)->height;
 	return noErr;
 }
 
@@ -318,8 +322,8 @@ OSStatus QemuVga_GetModePages(UInt32 index, UInt32 depth,
 
 	if (index >= GLOBAL.numModes)
 		return paramErr;
-	width = vModes[index].width;
-	height = vModes[index].height;
+	width = getVMode(index)->width;
+	height = getVMode(index)->height;
 	pBytes = width * ((depth + 7) / 8) * height;
 	if (pageSize)
 		*pageSize = pBytes;
@@ -340,8 +344,8 @@ OSStatus QemuVga_SetMode(UInt32 mode, UInt32 depth, UInt32 page)
 	if (mode >= GLOBAL.numModes)
 		return paramErr;
 	
-	width = vModes[mode].width;
-	height = vModes[mode].height;
+	width = getVMode(mode)->width;
+	height = getVMode(mode)->height;
 	QemuVga_GetModePages(mode, depth, &pageSize, &numPages);
 	lprintf("Set Mode: %dx%dx%d has %d pages\n", width, height, depth, numPages);
 	if (page >= numPages)

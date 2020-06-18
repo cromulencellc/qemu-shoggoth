@@ -264,6 +264,7 @@ static void *call_rcu_thread(void *opaque)
             }
             n = atomic_read(&rcu_call_count);
         }
+
         atomic_sub(&rcu_call_count, n);
         synchronize_rcu();
         qemu_mutex_lock_iothread();
@@ -283,7 +284,7 @@ static void *call_rcu_thread(void *opaque)
             n--;
             node->func(node);
         }
-        qemu_mutex_unlock_iothread();        
+        qemu_mutex_unlock_iothread();
     }
     abort();
 }

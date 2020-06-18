@@ -252,8 +252,8 @@ static const struct slot_table_entry p8dnu_phb_table[] = {
 
 #define NPU_BASE	0x8013c00
 #define NPU_SIZE	0x2c
-#define NPU_INDIRECT0	0x8000000008010c3f
-#define NPU_INDIRECT1	0x8000000008010c7f
+#define NPU_INDIRECT0	0x8000000008010c3fUL
+#define NPU_INDIRECT1	0x8000000008010c7fUL
 
 static void create_link(struct dt_node *npu, int group, int index)
 {
@@ -337,16 +337,21 @@ static bool p8dnu_probe(void)
 	return true;
 }
 
-static const struct bmc_platform astbmc_smc = {
-	.name = "SMC",
+static const struct bmc_sw_config bmc_sw_smc = {
 	.ipmi_oem_partial_add_esel   = IPMI_CODE(0x3a, 0xf0),
 	.ipmi_oem_pnor_access_status = IPMI_CODE(0x3a, 0x07),
+};
+
+static const struct bmc_platform bmc_plat_ast2400_smc = {
+	.name = "SMC",
+	.hw = &bmc_hw_ast2400,
+	.sw = &bmc_sw_smc,
 };
 
 DECLARE_PLATFORM(p8dnu) = {
 	.name			= "P8DNU",
 	.probe			= p8dnu_probe,
-	.bmc			= &astbmc_smc,
+	.bmc			= &bmc_plat_ast2400_smc,
 	.init			= astbmc_init,
 	.pci_get_slot_info	= slot_table_get_slot_info,
 	.cec_power_down         = astbmc_ipmi_power_down,

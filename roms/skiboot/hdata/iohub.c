@@ -82,8 +82,7 @@ static bool io_get_lx_info(const void *kwvpd, unsigned int kwvpd_sz,
 		return false;
 	}
 
-	if (lxr)
-		memcpy(lxrbuf, lxr, sizeof(uint32_t)*2);
+	memcpy(lxrbuf, lxr, sizeof(uint32_t)*2);
 
 	prlog(PR_DEBUG, "CEC:     LXRn=%d LXR=%08x%08x\n", lx_idx, lxrbuf[0], lxrbuf[1]);
 	prlog(PR_DEBUG, "CEC:     LX Info added to %llx\n", (long long)hn);
@@ -258,7 +257,6 @@ static struct dt_node *add_pec_stack(const struct cechub_io_hub *hub,
 {
 	struct dt_node *stack;
 	u64 eq[8];
-	uint32_t version;
 	u8 *gen4;
 	int i;
 
@@ -280,18 +278,12 @@ static struct dt_node *add_pec_stack(const struct cechub_io_hub *hub,
 
 	for (i = 0; i < 4; i++) /* gen 3 eq settings */
 		eq[i] = be64_to_cpu(hub->phb_lane_eq[phb_index][i]);
+	for (i = 0; i < 4; i++) /* gen 4 eq settings */
+		eq[i+4] = be64_to_cpu(hub->phb4_lane_eq[phb_index][i]);
 
 	/* Lane-eq settings are packed 2 bytes per lane for 16 lanes
-	 * On P9 DD1, 2 bytes per lane are used in the hardware
 	 * On P9 DD2, 1 byte  per lane is  used in the hardware
 	 */
-	version = mfspr(SPR_PVR);
-	if (is_power9n(version) &&
-	    (PVR_VERS_MAJ(version) == 1)) {
-		dt_add_property_u64s(stack, "ibm,lane-eq", eq[0], eq[1],
-				     eq[2], eq[3], eq[4], eq[5], eq[6], eq[7]);
-		return stack;
-	}
 
 	/* Repack 2 byte lane settings into 1 byte */
 	gen4 = (u8 *)&eq[4];
@@ -703,7 +695,7 @@ static void parse_one_slot(const struct slot_map_entry *entry,
 			st_name(type), vid, did);
 
 		/* The VID:DID is only meaningful for builtins and switches */
-		if (vid && did) {
+		if (type == st_sw_upstream && vid && did) {
 			node = dt_new_2addr(parent, st_name(type), vid, did);
 			dt_add_property_cells(node, "reg", vid, did);
 		} else {
@@ -755,9 +747,23 @@ static void parse_one_slot(const struct slot_map_entry *entry,
 		dt_add_property_cells(node, "lanes-reversed",
 				be16_to_cpu(entry->lane_reverse));
 
-	if (strnlen(entry->name, sizeof(entry->name)))
+	if (strnlen(entry->name, sizeof(entry->name))) {
+		/*
+		 * HACK: On some platforms (witherspoon) the slot label is
+		 * applied to the device rather than the pcie downstream port
+		 * that has the slot under it. Hack around this by moving the
+		 * slot label up if the parent port doesn't have one.
+		 */
+		if (dt_node_is_compatible(node->parent, "ibm,pcie-port") &&
+		    !dt_find_property(node->parent, "ibm,slot-label")) {
+			dt_add_property_nstr(node->parent, "ibm,slot-label",
+					entry->name, sizeof(entry->name));
+		}
+
 		dt_add_property_nstr(node, "ibm,slot-label",
 				entry->name, sizeof(entry->name));
+	}
+
 	if (entry->type == st_slot || entry->type == st_rc_slot)
 		dt_add_property(node, "ibm,pluggable", NULL, 0);
 
@@ -832,7 +838,6 @@ static void io_parse_slots(const struct HDIF_common_hdr *sp_iohubs, int hub_id)
 static void io_parse_fru(const void *sp_iohubs)
 {
 	unsigned int i;
-	struct dt_node *hn;
 	int count;
 
 	count = HDIF_get_iarray_size(sp_iohubs, CECHUB_FRU_IO_HUBS);
@@ -847,6 +852,7 @@ static void io_parse_fru(const void *sp_iohubs)
 	for (i = 0; i < count; i++) {
 		const struct cechub_io_hub *hub;
 		unsigned int size, hub_id;
+		struct dt_node *hn;
 		uint32_t chip_id;
 
 		hub = HDIF_get_iarray_item(sp_iohubs, CECHUB_FRU_IO_HUBS,
@@ -890,26 +896,25 @@ static void io_parse_fru(const void *sp_iohubs)
 		case CECHUB_HUB_MURANO:
 		case CECHUB_HUB_MURANO_SEGU:
 			prlog(PR_INFO, "CEC:     Murano !\n");
-			hn = io_add_p8(hub, sp_iohubs);
+			io_add_p8(hub, sp_iohubs);
 			break;
 		case CECHUB_HUB_VENICE_WYATT:
 			prlog(PR_INFO, "CEC:     Venice !\n");
-			hn = io_add_p8(hub, sp_iohubs);
+			io_add_p8(hub, sp_iohubs);
 			break;
 		case CECHUB_HUB_NIMBUS_SFORAZ:
 		case CECHUB_HUB_NIMBUS_MONZA:
 		case CECHUB_HUB_NIMBUS_LAGRANGE:
 			prlog(PR_INFO, "CEC:     Nimbus !\n");
-			hn = io_add_p9(hub, sp_iohubs);
+			io_add_p9(hub, sp_iohubs);
 			break;
 		case CECHUB_HUB_CUMULUS_DUOMO:
 			prlog(PR_INFO, "CEC:     Cumulus !\n");
-			hn = io_add_p9(hub, sp_iohubs);
+			io_add_p9(hub, sp_iohubs);
 			break;
 		default:
 			prlog(PR_ERR, "CEC:     Hub ID 0x%04x unsupported !\n",
 			      hub_id);
-			hn = NULL;
 		}
 
 		chip_id = pcid_to_chip_id(be32_to_cpu(hub->proc_chip_id));

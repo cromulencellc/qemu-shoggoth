@@ -25,6 +25,7 @@
 #include "qapi/qapi-commands-oshandler.h"
 #include "exec/gdbstub.h"
 #include "monitor/monitor.h"
+#include "qemu/error-report.h"
 
 OSHandler* os_handler = NULL;
 
@@ -713,6 +714,28 @@ static bool oshandler_is_active_process(OSHandler* ctxt, CPUState* cpu, ProcessI
    return OSARCH_GET_CLASS(ctxt->arch)->is_same_process(ctxt->arch, pi, api);
 }
 
+static void *oshandler_generic_do_process_coroutine(OSHandler *ctxt, ProcessInfo *pi, OSHANDLER_PROC_COROUTINE func, void *args)
+{
+   OSArchClass *arch_cc = OSARCH_GET_CLASS(ctxt->arch);
+   void *proc_state = NULL;
+
+   if(!arch_cc->process_enter || !arch_cc->process_exit) {
+      return NULL;
+   }
+
+   proc_state = arch_cc->process_enter(ctxt->arch, pi);
+   if(!proc_state){
+      return NULL;
+   }
+
+   void *ret = func(pi, args);
+
+   arch_cc->process_exit(ctxt->arch, proc_state);
+
+   return ret;
+}
+
+
 static void oshandler_class_init(ObjectClass *klass, void* class_data)
 {
    OSHandlerClass* oshandler_class = OSHANDLER_CLASS(klass);
@@ -743,6 +766,7 @@ static void oshandler_class_init(ObjectClass *klass, void* class_data)
    oshandler_class->release_ospid = oshandler_release_ospid;
    oshandler_class->get_processinfo_by_ospid = oshandler_get_processinfo_by_ospid;
    oshandler_class->is_active_process = oshandler_is_active_process;
+   oshandler_class->do_process_coroutine = oshandler_generic_do_process_coroutine;
 }
 
 static void property_get_uint64_ptr(Object *obj, Visitor *v, const char *name,

@@ -25,6 +25,7 @@
 #include <errorlog.h>
 #include <bt.h>
 #include <nvram.h>
+#include <npu2.h>
 #include <platforms/astbmc/astbmc.h>
 
 bool manufacturing_mode = false;
@@ -41,6 +42,8 @@ static int64_t opal_cec_power_down(uint64_t request)
 {
 	prlog(PR_NOTICE, "OPAL: Shutdown request type 0x%llx...\n", request);
 
+	opal_quiesce(QUIESCE_HOLD, -1);
+
 	console_complete_flush();
 
 	if (platform.cec_power_down)
@@ -54,11 +57,13 @@ static int64_t opal_cec_reboot(void)
 {
 	prlog(PR_NOTICE, "OPAL: Reboot request...\n");
 
-	console_complete_flush();
+	opal_quiesce(QUIESCE_HOLD, -1);
 
 	/* Try fast-reset unless explicitly disabled */
 	if (!nvram_query_eq("fast-reset","0"))
 		fast_reboot();
+
+	console_complete_flush();
 
 	if (platform.cec_reboot)
 		return platform.cec_reboot();
@@ -70,6 +75,8 @@ opal_call(OPAL_CEC_REBOOT, opal_cec_reboot, 0);
 static int64_t opal_cec_reboot2(uint32_t reboot_type, char *diag)
 {
 	struct errorlog *buf;
+
+	opal_quiesce(QUIESCE_HOLD, -1);
 
 	switch (reboot_type) {
 	case OPAL_REBOOT_NORMAL:
@@ -91,6 +98,7 @@ static int64_t opal_cec_reboot2(uint32_t reboot_type, char *diag)
 			prerror("OPAL: failed to log an error\n");
 		}
 		disable_fast_reboot("Reboot due to Platform Error");
+		console_complete_flush();
 		return xscom_trigger_xstop();
 	case OPAL_REBOOT_FULL_IPL:
 		disable_fast_reboot("full IPL reboot requested");
@@ -162,6 +170,23 @@ static int generic_start_preload_resource(enum resource_id id, uint32_t subid,
 	return OPAL_EMPTY;
 }
 
+/* These values will work for a ZZ booted using BML */
+const struct platform_ocapi generic_ocapi = {
+	.i2c_engine          = 1,
+	.i2c_port            = 4,
+	.i2c_reset_addr      = 0x20,
+	.i2c_reset_brick2    = (1 << 1),
+	.i2c_reset_brick3    = (1 << 6),
+	.i2c_reset_brick4    = 0, /* unused */
+	.i2c_reset_brick5    = 0, /* unused */
+	.i2c_presence_addr   = 0x20,
+	.i2c_presence_brick2 = (1 << 2), /* bottom connector */
+	.i2c_presence_brick3 = (1 << 7), /* top connector */
+	.i2c_presence_brick4 = 0, /* unused */
+	.i2c_presence_brick5 = 0, /* unused */
+	.odl_phy_swap        = true,
+};
+
 static struct bmc_platform generic_bmc = {
 	.name = "generic",
 };
@@ -177,6 +202,8 @@ static struct platform generic_platform = {
 	.cec_power_down	= generic_cec_power_down,
 	.start_preload_resource	= generic_start_preload_resource,
 	.resource_loaded	= generic_resource_loaded,
+	.ocapi		= &generic_ocapi,
+	.npu2_device_detect = npu2_i2c_presence_detect, /* Assumes ZZ */
 };
 
 const struct bmc_platform *bmc_platform = &generic_bmc;

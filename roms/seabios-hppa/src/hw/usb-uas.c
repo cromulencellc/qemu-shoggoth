@@ -204,7 +204,7 @@ uas_add_lun(u32 lun, struct drive_s *tmpl_drv)
                  lun);
 
     int prio = bootprio_find_usb(drive->usbdev, drive->lun);
-    int ret = scsi_drive_setup(&drive->drive, "USB UAS", prio);
+    int ret = scsi_drive_setup(&drive->drive, "USB UAS", prio, 0, lun);
     if (ret) {
         free(drive);
         return -1;

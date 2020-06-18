@@ -110,6 +110,7 @@ struct pci_slot_ops {
 	int64_t (*freset)(struct pci_slot *slot);
 	int64_t (*hreset)(struct pci_slot *slot);
 	int64_t (*run_sm)(struct pci_slot *slot);
+	int64_t (*completed_sm_run)(struct pci_slot *slot, uint64_t err);
 
 	/* Auxillary functions */
 	void (*add_properties)(struct pci_slot *slot, struct dt_node *np);
@@ -169,6 +170,7 @@ struct pci_slot {
 	uint8_t			card_desc;
 	uint8_t			card_mech;
 	uint8_t			wired_lanes;
+	uint8_t			power_limit;
 
 	/*
 	 * PCI slot is driven by state machine with polling function.
@@ -186,10 +188,11 @@ struct pci_slot {
 	uint64_t		retries;
 	uint64_t		link_retries;
 	struct pci_slot_ops	ops;
+	struct pci_slot		*peer_slot;
 	void			*data;
 };
 
-#define PCI_SLOT_ID_PREFIX	0x8000000000000000
+#define PCI_SLOT_ID_PREFIX	0x8000000000000000UL
 #define PCI_SLOT_ID(phb, bdfn)	\
 	(PCI_SLOT_ID_PREFIX | ((uint64_t)(bdfn) << 16) | (phb)->opal_id)
 #define PCI_PHB_SLOT_ID(phb)	((phb)->opal_id)

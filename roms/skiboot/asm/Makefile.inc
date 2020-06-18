@@ -1,8 +1,8 @@
 # -*-Makefile-*-
 
 SUBDIRS += asm 
-ASM_OBJS = head.o lock.o misc.o kernel-wrapper.o rom_entry.o
-ASM=asm/built-in.o
+ASM_OBJS = head.o misc.o kernel-wrapper.o cvc_entry.o
+ASM=asm/built-in.a
 
 # Add extra dependency to the kernel wrapper
 kernel_wrapper.o : $(KERNEL)

@@ -24,6 +24,7 @@
 #include <lock.h>
 #include <cpu.h>
 #include <timebase.h>
+#include <debug_descriptor.h>
 
 struct ipmi_backend *ipmi_backend = NULL;
 static struct lock sync_lock = LOCK_UNLOCKED;
@@ -147,7 +148,8 @@ void ipmi_cmd_done(uint8_t cmd, uint8_t netfn, uint8_t cc, struct ipmi_msg *msg)
 	msg->netfn = netfn;
 
 	if (cc != IPMI_CC_NO_ERROR) {
-		prlog(PR_DEBUG, "IPMI: Got error response 0x%02x\n", msg->cc);
+		prlog(PR_DEBUG, "IPMI: Got error response. cmd=0x%x, netfn=0x%x,"
+		      " rc=0x%02x\n", msg->cmd, msg->netfn, msg->cc);
 
 		assert(msg->error);
 		msg->error(msg);
@@ -175,11 +177,13 @@ void ipmi_queue_msg_sync(struct ipmi_msg *msg)
 	lock(&sync_lock);
 	while (sync_msg);
 	sync_msg = msg;
-	ipmi_queue_msg(msg);
+	if (msg->backend->disable_retry && !opal_booting())
+		msg->backend->disable_retry(msg);
+	ipmi_queue_msg_head(msg);
 	unlock(&sync_lock);
 
 	while (sync_msg == msg)
-		time_wait_ms(100);
+		time_wait_ms(10);
 }
 
 static void ipmi_read_event_complete(struct ipmi_msg *msg)

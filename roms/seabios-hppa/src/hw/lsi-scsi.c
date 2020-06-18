@@ -14,6 +14,7 @@
 #include "block.h" // struct drive_s
 #include "blockcmd.h" // scsi_drive_setup
 #include "config.h" // CONFIG_*
+#include "byteorder.h" // cpu_to_*
 #include "fw/paravirt.h" // runningOnQEMU
 #include "malloc.h" // free
 #include "output.h" // dprintf
@@ -109,13 +110,6 @@ lsi_scsi_process_op(struct disk_op_s *op)
     /* convert to little endian for PCI */
     convert_to_le32(script, sizeof(script));
 
-#if 0
- int nr;
- dprintf(1, "Data from SEABIOS  cdbcmd = ");
- for (nr=0; nr<15; nr++) dprintf(1, "0x%x  ", cdbcmd[nr]);
- dprintf(1, "\n");
-#endif
-
     outb(dsp         & 0xff, iobase + LSI_REG_DSP0);
     outb((dsp >>  8) & 0xff, iobase + LSI_REG_DSP1);
     outb((dsp >> 16) & 0xff, iobase + LSI_REG_DSP2);
@@ -171,7 +165,7 @@ lsi_scsi_add_lun(u32 lun, struct drive_s *tmpl_drv)
     char *name = znprintf(MAXDESCSIZE, "lsi %pP %d:%d",
                           llun->pci, llun->target, llun->lun);
     int prio = bootprio_find_scsi_device(llun->pci, llun->target, llun->lun);
-    int ret = scsi_drive_setup(&llun->drive, name, prio);
+    int ret = scsi_drive_setup(&llun->drive, name, prio, llun->target, llun->lun);
     free(name);
     if (ret)
         goto fail;

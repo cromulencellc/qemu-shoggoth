@@ -95,8 +95,40 @@
 #define BMC_SIO_SCR28 0x28
 #define BOOT_FLAGS_VERSION 0x42
 
+/*
+ *  SIO Register 0x29: Boot Flags (normal bit ordering)
+ *
+ *       [7:6] Hostboot Boot mode:
+ *              00 : Normal
+ *              01 : Terminate on first error
+ *              10 : istep mode
+ *              11 : reserved
+ *       [5:4] Boot options
+ *              00 : reserved
+ *              01 : Memboot
+ *              10 : Clear gard
+ *              11 : reserved
+ *       [ 3 ] BMC mbox PNOR driver
+ *       [2:0] Hostboot Log level:
+ *                 000 : Normal
+ *                 001 : Enable Scan trace
+ *                 xxx : reserved
+ */
+
 #define BMC_SIO_SCR29 0x29
+#define BMC_SIO_SCR29_MBOX 0x08
 #define BMC_SIO_SCR29_MEMBOOT 0x10
+
+/*
+ *  SIO Register 0x2d: Platform Flags (normal bit ordering)
+ *
+ *       [ 7 ] Hostboot configures SUART
+ *       [ 6 ] Hostboot configures VUART
+ *       [5:1] Reserved
+ *       [ 0 ] Isolate Service Processor
+ */
+#define BMC_SIO_PLAT_FLAGS 		0x2d
+#define  BMC_SIO_PLAT_ISOLATE_SP 	0x01
 
 enum {
 	BMC_SIO_DEV_NONE	= -1,
@@ -227,8 +259,6 @@ static uint32_t bmc_sio_ahb_readl(uint32_t reg)
  * We could support all access sizes via iLPC but we don't need
  * that for now.
  */
-#define PNOR_AHB_ADDR	0x30000000
-static uint32_t pnor_lpc_offset;
 
 void ast_ahb_writel(uint32_t val, uint32_t reg)
 {
@@ -240,87 +270,6 @@ uint32_t ast_ahb_readl(uint32_t reg)
 {
 	/* For now, always use iLPC->AHB, it will byteswap */
 	return bmc_sio_ahb_readl(reg);
-}
-
-int ast_copy_to_ahb(uint32_t reg, const void *src, uint32_t len)
-{
-	/* Check we don't cross IDSEL segments */
-	if ((reg ^ (reg + len - 1)) >> 28)
-		return -EINVAL;
-
-	/* SPI flash, use LPC->AHB bridge */
-	if ((reg >> 28) == (PNOR_AHB_ADDR >> 28)) {
-		uint32_t chunk, off = reg - PNOR_AHB_ADDR + pnor_lpc_offset;
-		int64_t rc;
-
-		while(len) {
-			/* Chose access size */
-			if (len > 3 && !(off & 3)) {
-				rc = lpc_write(OPAL_LPC_FW, off,
-					       *(uint32_t *)src, 4);
-				chunk = 4;
-			} else {
-				rc = lpc_write(OPAL_LPC_FW, off,
-					       *(uint8_t *)src, 1);
-				chunk = 1;
-			}
-			if (rc) {
-				prerror("AST_IO: lpc_write.sb failure %lld"
-					" to FW 0x%08x\n", rc, off);
-				return rc;
-			}
-			len -= chunk;
-			off += chunk;
-			src += chunk;
-		}
-		return 0;
-	}
-
-	/* Otherwise we don't do byte access (... yet)  */
-	prerror("AST_IO: Attempted write bytes access to %08x\n", reg);
-	return -EINVAL;
-}
-
-int ast_copy_from_ahb(void *dst, uint32_t reg, uint32_t len)
-{
-	/* Check we don't cross IDSEL segments */
-	if ((reg ^ (reg + len - 1)) >> 28)
-		return -EINVAL;
-
-	/* SPI flash, use LPC->AHB bridge */
-	if ((reg >> 28) == (PNOR_AHB_ADDR >> 28)) {
-		uint32_t chunk, off = reg - PNOR_AHB_ADDR + pnor_lpc_offset;
-		int64_t rc;
-
-		while(len) {
-			uint32_t dat;
-
-			/* Chose access size */
-			if (len > 3 && !(off & 3)) {
-				rc = lpc_read(OPAL_LPC_FW, off, &dat, 4);
-				if (!rc)
-					*(uint32_t *)dst = dat;
-				chunk = 4;
-			} else {
-				rc = lpc_read(OPAL_LPC_FW, off, &dat, 1);
-				if (!rc)
-					*(uint8_t *)dst = dat;
-				chunk = 1;
-			}
-			if (rc) {
-				prerror("AST_IO: lpc_read.sb failure %lld"
-					" to FW 0x%08x\n", rc, off);
-				return rc;
-			}
-			len -= chunk;
-			off += chunk;
-			dst += chunk;
-		}
-		return 0;
-	}
-	/* Otherwise we don't do byte access (... yet)  */
-	prerror("AST_IO: Attempted read bytes access to %08x\n", reg);
-	return -EINVAL;
 }
 
 static void ast_setup_sio_irq_polarity(void)
@@ -372,29 +321,81 @@ static void ast_setup_sio_irq_polarity(void)
 	bmc_sio_put(true);
 }
 
-void ast_io_init(void)
+bool ast_sio_is_enabled(void)
 {
-	uint32_t hicr7;
+	bool enabled;
+	int64_t rc;
 
-	/* Read the configuration of the LPC->AHB bridge for PNOR
-	 * to extract the PNOR LPC offset which can be different
-	 * depending on flash size
+	lock(&bmc_sio_lock);
+	/*
+	 * Probe by attempting to lock the SIO device, this way the
+	 * post-condition is that the SIO device is locked or not able to be
+	 * unlocked. This turns out neater than trying to use the unlock code.
 	 */
+	rc = lpc_probe_write(OPAL_LPC_IO, 0x2e, 0xaa, 1);
+	if (rc) {
+		enabled = false;
+		/* If we can't lock it, then we can't unlock it either */
+		goto out;
+	}
 
-	hicr7 = bmc_sio_ahb_readl(LPC_HICR7);
-	pnor_lpc_offset = (hicr7 & 0xffffu) << 16;
-	prlog(PR_DEBUG, "AST: PNOR LPC offset: 0x%08x\n", pnor_lpc_offset);
+	/*
+	 * Now that we know that is locked and able to be unlocked, unlock it
+	 * if skiboot's recorded device state indicates it was previously
+	 * unlocked.
+	 */
+	if (bmc_sio_cur_dev != BMC_SIO_DEV_NONE) {
+		/* Send SuperIO password */
+		lpc_outb(0xa5, 0x2e);
+		lpc_outb(0xa5, 0x2e);
+
+		/* Ensure the previously selected logical dev is selected */
+		bmc_sio_outb(bmc_sio_cur_dev, 0x07);
+	}
+
+	enabled = true;
+out:
+	unlock(&bmc_sio_lock);
+
+	return enabled;
+}
+
+bool ast_sio_init(void)
+{
+	bool enabled = ast_sio_is_enabled();
 
 	/* Configure all AIO interrupts to level low */
-	ast_setup_sio_irq_polarity();
+	if (enabled)
+		ast_setup_sio_irq_polarity();
+
+	return enabled;
 }
 
-bool ast_is_mbox_pnor(void)
+bool ast_io_is_rw(void)
 {
-	return dt_find_compatible_node(dt_root, NULL, "mbox");
+	return !(ast_ahb_readl(LPC_HICRB) & LPC_HICRB_ILPC_DISABLE);
 }
 
-bool ast_is_ahb_lpc_pnor(void)
+bool ast_io_init(void)
+{
+	return ast_io_is_rw();
+}
+
+bool ast_lpc_fw_ipmi_hiomap(void)
+{
+	return platform.bmc->sw->ipmi_oem_hiomap_cmd != 0;
+}
+
+bool ast_lpc_fw_mbox_hiomap(void)
+{
+	struct dt_node *n;
+
+	n = dt_find_compatible_node(dt_root, NULL, "mbox");
+
+	return n != NULL;
+}
+
+bool ast_lpc_fw_maps_flash(void)
 {
 	uint8_t boot_version;
 	uint8_t boot_flags;
@@ -405,6 +406,19 @@ bool ast_is_ahb_lpc_pnor(void)
 
 	boot_flags = bmc_sio_inb(BMC_SIO_SCR29);
 	return !(boot_flags & BMC_SIO_SCR29_MEMBOOT);
+}
+
+bool ast_scratch_reg_is_mbox(void)
+{
+	uint8_t boot_version;
+	uint8_t boot_flags;
+
+	boot_version = bmc_sio_inb(BMC_SIO_SCR28);
+	if (boot_version != BOOT_FLAGS_VERSION)
+		return false;
+
+	boot_flags = bmc_sio_inb(BMC_SIO_SCR29);
+	return boot_flags & BMC_SIO_SCR29_MBOX;
 }
 
 void ast_setup_ibt(uint16_t io_base, uint8_t irq)
