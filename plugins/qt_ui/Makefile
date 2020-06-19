@@ -33,9 +33,8 @@ QTUI_CXX_RES_SRC_DIR=$(QTUI_CXX_SRC_DIR)/res
 QTUI_CXX_BUILD_DIR=$(PLUGIN_BUILD_DIR)$(QTUI_NAME)
 QTUI_CXX_TGT=$(QTUI_CXX_BUILD_DIR)/$(QTUI_NAME).so
 
-#Find QT paths
-#TODO find QT and error out if there is none
-QT_DEPS=Qt5Core Qt5Gui Qt5Widgets Qt5Xml libdrm
+# Find QT paths
+QT_DEPS=Qt5Core Qt5Gui Qt5Widgets Qt5Xml
 QT_DIST_INCLUDES=$(shell pkg-config --cflags-only-I $(QT_DEPS)) 
 
 QT_DIST_SYS_INCLUDES=$(patsubst -I%, -isystem %, $(QT_DIST_INCLUDES))
